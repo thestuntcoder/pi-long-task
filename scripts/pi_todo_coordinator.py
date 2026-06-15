@@ -422,6 +422,29 @@ def last_assistant_text_from_messages(messages: Any) -> str:
     return ""
 
 
+def last_assistant_text_from_session_file(session_file: Optional[str]) -> str:
+    if not session_file:
+        return ""
+    path = Path(session_file)
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = entry.get("message") if isinstance(entry, dict) else None
+        if isinstance(message, dict):
+            text = assistant_message_text(message)
+            if text:
+                return text
+    return ""
+
+
 def has_task_result(assistant_text: str) -> bool:
     return bool(re.search(r"TASK_RESULT\s*:", assistant_text or "", re.IGNORECASE))
 
@@ -991,14 +1014,21 @@ async def run_pi_task(
                     now = time.monotonic()
                     if now >= next_idle_text_poll:
                         next_idle_text_poll = now + 15
-                        try:
-                            last_text_response = await client.command({"type": "get_last_assistant_text"}, timeout=5)
-                            latest_text = ((last_text_response.get("data") or {}).get("text")) or ""
-                            if latest_text:
-                                assistant_text = latest_text
-                        except Exception as exc:  # noqa: BLE001 - idle polling must not stop active workers
-                            if verbose:
-                                print(f"[coordinator] idle get_last_assistant_text unavailable: {exc}", file=sys.stderr)
+                        file_text = last_assistant_text_from_session_file(session_file)
+                        if file_text:
+                            assistant_text = file_text
+                        if not has_task_result_status(assistant_text):
+                            try:
+                                last_text_response = await client.command({"type": "get_last_assistant_text"}, timeout=5)
+                                latest_text = ((last_text_response.get("data") or {}).get("text")) or ""
+                                if latest_text:
+                                    assistant_text = latest_text
+                            except Exception as exc:  # noqa: BLE001 - idle polling must not stop active workers
+                                if verbose:
+                                    print(
+                                        f"[coordinator] idle get_last_assistant_text unavailable: {exc}",
+                                        file=sys.stderr,
+                                    )
 
                     if has_task_result_status(assistant_text):
                         context_observations.append("idle poll: TASK_RESULT status seen; finishing session")
