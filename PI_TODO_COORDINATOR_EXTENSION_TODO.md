@@ -23,7 +23,7 @@ Global constraints for every task:
 - [x] TODO 4 — Port worker prompt and TASK_RESULT parsing
 - [x] TODO 5 — Implement native Pi SDK worker session runner
 - [x] TODO 6 — Implement coordinator orchestration loop
-- [ ] TODO 7 — Implement git commit safety and artifact exclusion
+- [x] TODO 7 — Implement git commit safety and artifact exclusion
 - [ ] TODO 8 — Add tool streaming updates and structured result details
 - [ ] TODO 9 — Add automated tests for pure coordinator logic
 - [ ] TODO 10 — Add documentation and smoke-test instructions
@@ -350,13 +350,13 @@ Do not use a public tool parameter for artifact path, models, timeouts, attempts
 **Goal:** Add safe optional commit behavior matching the Python coordinator.
 
 **Status:**
-- [ ] Detect git root
-- [ ] Capture pre-existing dirty paths
-- [ ] Stage worker changes after each task
-- [ ] Unstage coordinator artifacts
-- [ ] Unstage pre-existing dirty paths
-- [ ] Commit only when staged diff exists and outcome is eligible
-- [ ] Record commit hash or commit error in result details
+- [x] Detect git root
+- [x] Capture pre-existing dirty paths
+- [x] Stage worker changes after each task
+- [x] Unstage coordinator artifacts
+- [x] Unstage pre-existing dirty paths
+- [x] Commit only when staged diff exists and outcome is eligible
+- [x] Record commit hash or commit error in result details
 
 **Implementation details:**
 Implement `src/git.ts` with argv-based child process execution, not shell string execution.

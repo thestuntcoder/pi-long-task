@@ -29,6 +29,9 @@ export interface PiTodoCoordinatorResult {
     reportedStatus: string;
     done: boolean;
     error?: string;
+    commitHash?: string;
+    commitError?: string;
+    commitSkipped?: string;
   }>;
   commit: boolean;
   error?: string;

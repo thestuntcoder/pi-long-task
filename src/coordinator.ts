@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { PiTodoCoordinatorInput } from "./types.ts";
+import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { extractResultSummary } from "./result_writer.ts";
 import { buildTodoCreationPrompt, extractTodoMarkdown, todoMarkdownFromString, validateTodoMarkdown } from "./todo_generator.ts";
 import { incompleteTasks, markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
@@ -60,6 +61,9 @@ export interface TaskAttemptSummary {
   reportedStatus: string;
   done: boolean;
   error?: string;
+  commitHash?: string;
+  commitError?: string;
+  commitSkipped?: string;
 }
 
 export interface CoordinatorResult {
@@ -119,6 +123,9 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       }
 
       const attempt = (previousAttempts.get(nextTask.taskId)?.length ?? 0) + 1;
+      const preExistingDirtyPaths = options.commit
+        ? await gitDirtyPaths(runtime.cwd, runtime.taskResultPath, runtime.todoPath, runtime.runDir)
+        : new Set<string>();
       const outcome = await runtime.workerRunner({
         cwd: runtime.cwd,
         todoPath: runtime.todoPath,
@@ -135,22 +142,43 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         now: runtime.now,
       });
 
-      attempts.push({
+      if (outcome.done) {
+        todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
+        await writeFile(runtime.todoPath, todoMarkdown, "utf8");
+      }
+
+      const attemptDetails: TaskAttemptSummary = {
         taskId: nextTask.taskId,
         title: nextTask.title,
         attempt,
         reportedStatus: outcome.reportedStatus,
         done: outcome.done,
         error: outcome.error,
-      });
+      };
+      attempts.push(attemptDetails);
       await appendTaskResult(runtime.taskResultPath, nextTask, outcome);
+
+      if (options.commit) {
+        const commitResult = shouldCommitOutcome(outcome)
+          ? await commitAfterSession({
+              cwd: runtime.cwd,
+              resultPath: runtime.taskResultPath,
+              todoPath: runtime.todoPath,
+              runDir: runtime.runDir,
+              outcome,
+              preExistingDirtyPaths,
+            })
+          : ({ skipped: "outcome is not eligible for commit" } satisfies CommitAfterSessionResult);
+        attemptDetails.commitHash = commitResult.hash;
+        attemptDetails.commitError = commitResult.error;
+        attemptDetails.commitSkipped = commitResult.skipped;
+        await appendCommitNote(runtime.taskResultPath, commitResult);
+      }
 
       const attemptSummary = resultTextForPreviousAttempt(outcome);
       previousAttempts.set(nextTask.taskId, [...(previousAttempts.get(nextTask.taskId) ?? []), attemptSummary]);
 
       if (outcome.done) {
-        todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
-        await writeFile(runtime.todoPath, todoMarkdown, "utf8");
         continue;
       }
 
@@ -286,6 +314,18 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
 
 function initialTaskResultMarkdown(runId: string): string {
   return `# Pi Coordinator TASK_RESULT\n\nRun: ${runId}\n`;
+}
+
+async function appendCommitNote(pathname: string, result: CommitAfterSessionResult): Promise<void> {
+  const lines = ["", "### Commit note", ""];
+  if (result.hash) {
+    lines.push(`Committed eligible non-artifact changes as \`${result.hash}\`.`);
+  } else if (result.error) {
+    lines.push(`Commit error: \`${result.error}\``);
+  } else {
+    lines.push(`Commit skipped: ${result.skipped ?? "no staged diff"}.`);
+  }
+  await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
 }
 
 async function appendTaskResult(pathname: string, task: Task, outcome: SessionOutcome): Promise<void> {
