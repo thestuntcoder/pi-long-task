@@ -4,11 +4,13 @@ import {
   assistantMessageText,
   assistantTextFromEvent,
   buildCompactionInstructions,
+  buildMissingTaskResultMessage,
   buildShutdownMessage,
   buildTaskPrompt,
   buildTimeLimitMessage,
   lastAssistantTextFromEvents,
   lastAssistantTextFromMessages,
+  runWorkerTask,
 } from "../src/worker_session.ts";
 
 const task = {
@@ -97,4 +99,105 @@ assert.equal(
     { messages: [{ role: "assistant", content: "last event" }] },
   ]),
   "last event",
+);
+assert.match(buildMissingTaskResultMessage(), /TASK_RESULT:\nstatus: done\|partial\|blocked\|failed/);
+
+class FakeWorkerSession {
+  prompts: string[] = [];
+  messages: unknown[] = [];
+  private listeners: Array<(event: unknown) => void> = [];
+  private readonly responses: string[];
+
+  constructor(responses: string[]) {
+    this.responses = responses;
+  }
+
+  subscribe(listener: (event: unknown) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((item) => item !== listener);
+    };
+  }
+
+  async prompt(text: string): Promise<void> {
+    this.prompts.push(text);
+    const response = this.responses.shift() ?? "";
+    this.emit({ type: "message_start", message: { role: "assistant" } });
+    this.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: response } });
+    const message = { role: "assistant", content: response };
+    this.messages.push(message);
+    this.emit({ type: "message_end", message });
+    this.emit({ type: "turn_end", message, toolResults: [] });
+    this.emit({ type: "agent_end", messages: this.messages });
+  }
+
+  getLastAssistantText(): string | undefined {
+    return this.responses.length < 2 ? lastAssistantTextFromMessages(this.messages) : undefined;
+  }
+
+  dispose(): void {}
+
+  private emit(event: unknown): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+}
+
+const fakeDoneSession = new FakeWorkerSession([
+  `TASK_RESULT:
+status: done
+summary: ok
+changes:
+- none
+verification:
+- not run
+remaining:
+- none`,
+]);
+const fakeDoneOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({ session: fakeDoneSession }),
+});
+assert.equal(fakeDoneOutcome.reportedStatus, "done");
+assert.equal(fakeDoneOutcome.done, true);
+assert.equal(fakeDoneSession.prompts.length, 1);
+assert.match(fakeDoneSession.prompts[0], /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
+assert.ok(fakeDoneOutcome.events.some((event) => event.type === "message_update" && event.textDelta));
+
+const fakeMissingResultSession = new FakeWorkerSession([
+  "I finished but forgot the block.",
+  `TASK_RESULT:
+status: partial
+summary: supplied after reminder
+changes:
+- none
+verification:
+- not run
+remaining:
+- none`,
+]);
+const fakeMissingResultOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({ session: fakeMissingResultSession }),
+});
+assert.equal(fakeMissingResultOutcome.reportedStatus, "partial");
+assert.equal(fakeMissingResultSession.prompts.length, 2);
+assert.match(fakeMissingResultSession.prompts[1], /previous response did not include/);
+assert.ok(
+  fakeMissingResultOutcome.contextObservations.some((item) =>
+    item.includes("missing TASK_RESULT status after initial prompt"),
+  ),
 );

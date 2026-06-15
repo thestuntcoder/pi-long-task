@@ -1,3 +1,4 @@
+import { hasTaskResult, hasTaskResultStatus, isDoneStatus, parseReportedStatus } from "./result_writer.ts";
 import type { Task } from "./todo_parser.ts";
 
 export interface WorkerTaskPromptOptions {
@@ -184,6 +185,385 @@ export const extractLastAssistantTextFromMessages = lastAssistantTextFromMessage
 export const extractAssistantTextFromEvent = assistantTextFromEvent;
 export const extractLastAssistantTextFromEvents = lastAssistantTextFromEvents;
 
+export const DEFAULT_WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+export const DEFAULT_WORKER_MODEL = "openai-codex/gpt-5.5";
+export const DEFAULT_WORKER_THINKING_LEVEL = "high";
+export const DEFAULT_TASK_TIMEOUT_SECONDS = 60 * 60;
+export const DEFAULT_GRACEFUL_SHUTDOWN_SECONDS = 60;
+
+export interface WorkerSessionLike {
+  prompt(text: string, options?: Record<string, unknown>): Promise<void>;
+  steer?(text: string): Promise<void>;
+  followUp?(text: string): Promise<void>;
+  subscribe(listener: (event: unknown) => void): () => void;
+  abort?(): Promise<void> | void;
+  abortBash?(): void;
+  compact?(customInstructions?: string): Promise<unknown>;
+  dispose?(): void;
+  getLastAssistantText?(): string | undefined;
+  getSessionStats?(): unknown;
+  getContextUsage?(): unknown;
+  sessionFile?: string;
+  sessionId?: string;
+  isStreaming?: boolean;
+  isBashRunning?: boolean;
+  messages?: unknown[];
+}
+
+export interface WorkerSessionFactoryResult {
+  session: WorkerSessionLike;
+  modelFallbackMessage?: string;
+  diagnostics?: string[];
+}
+
+export interface CreateWorkerSessionOptions {
+  cwd: string;
+  agentDir?: string;
+  tools?: readonly string[];
+  model?: unknown;
+  modelName?: string;
+  thinkingLevel?: string;
+  authStorage?: unknown;
+  modelRegistry?: unknown;
+  settingsManager?: unknown;
+  resourceLoader?: unknown;
+}
+
+export type WorkerSessionFactory = (options: CreateWorkerSessionOptions) => Promise<WorkerSessionFactoryResult>;
+
+export interface RunWorkerTaskOptions extends WorkerTaskPromptOptions, CreateWorkerSessionOptions {
+  taskTimeoutSeconds?: number;
+  gracefulShutdownSeconds?: number;
+  abortSignal?: AbortSignal;
+  sessionFactory?: WorkerSessionFactory;
+  onEvent?: (event: CapturedWorkerEvent) => void;
+  now?: () => Date;
+}
+
+export interface CapturedWorkerEvent {
+  type: string;
+  textDelta?: string;
+  toolName?: string;
+  isError?: boolean;
+  note?: string;
+}
+
+export interface SessionOutcome {
+  task: Pick<Task, "taskId" | "title" | "section">;
+  attempt: number;
+  startedAt: string;
+  endedAt: string;
+  reportedStatus: string;
+  done: boolean;
+  assistantText: string;
+  sessionFile?: string;
+  sessionId?: string;
+  contextObservations: string[];
+  compactionEvents: string[];
+  events: CapturedWorkerEvent[];
+  shutdownRequested: boolean;
+  timedOut: boolean;
+  aborted: boolean;
+  error?: string;
+}
+
+export function buildMissingTaskResultMessage(): string {
+  return `Coordinator notice: your previous response did not include a complete machine-readable TASK_RESULT block.
+Reply now with only the required block:
+
+TASK_RESULT:
+status: done|partial|blocked|failed
+summary: <short summary>
+changes:
+- <changed item or "none">
+verification:
+- <command/result or "not run">
+remaining:
+- <remaining item or "none">`;
+}
+
+export async function createIsolatedWorkerSession(
+  options: CreateWorkerSessionOptions,
+): Promise<WorkerSessionFactoryResult> {
+  const pi = await import("@earendil-works/pi-coding-agent");
+  const cwd = options.cwd;
+  const agentDir = options.agentDir ?? pi.getAgentDir();
+  const authStorage = options.authStorage ?? pi.AuthStorage.create();
+  const modelRegistry = options.modelRegistry ?? pi.ModelRegistry.create(authStorage as never);
+  const settingsManager = options.settingsManager ?? pi.SettingsManager.create(cwd, agentDir);
+
+  applyWorkerSettingsDefaults(settingsManager);
+
+  const discoveredResourceLoader =
+    options.resourceLoader ??
+    new pi.DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager: settingsManager as never,
+      noExtensions: true,
+    });
+  const resourceLoader = disableExtensionsForWorker(discoveredResourceLoader, () => pi.createExtensionRuntime());
+  await resourceLoader.reload();
+
+  const model = options.model ?? (await resolveWorkerModel(modelRegistry, options.modelName ?? DEFAULT_WORKER_MODEL));
+  const createOptions: Record<string, unknown> = {
+    cwd,
+    agentDir,
+    authStorage,
+    modelRegistry,
+    settingsManager,
+    resourceLoader,
+    tools: [...(options.tools ?? DEFAULT_WORKER_TOOLS)],
+    thinkingLevel: options.thinkingLevel ?? DEFAULT_WORKER_THINKING_LEVEL,
+    sessionManager: pi.SessionManager.inMemory(cwd),
+  };
+  if (model) {
+    createOptions.model = model;
+  }
+
+  const result = await pi.createAgentSession(createOptions as never);
+  return {
+    session: result.session,
+    modelFallbackMessage: result.modelFallbackMessage,
+    diagnostics: extensionDiagnostics(result.extensionsResult),
+  };
+}
+
+export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<SessionOutcome> {
+  const now = options.now ?? (() => new Date());
+  const startedAt = now().toISOString();
+  const contextObservations: string[] = [];
+  const compactionEvents: string[] = [];
+  const events: CapturedWorkerEvent[] = [];
+  let assistantText = "";
+  let currentAssistantText = "";
+  let sessionFile: string | undefined;
+  let sessionId: string | undefined;
+  let shutdownRequested = false;
+  let timedOut = false;
+  let aborted = false;
+  let error: string | undefined;
+  let finished = false;
+  let turnCount = 0;
+
+  const prompt = buildTaskPrompt(options);
+  const taskTimeoutSeconds = options.taskTimeoutSeconds ?? DEFAULT_TASK_TIMEOUT_SECONDS;
+  const gracefulShutdownSeconds = options.gracefulShutdownSeconds ?? DEFAULT_GRACEFUL_SHUTDOWN_SECONDS;
+  const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
+  let session: WorkerSessionLike | undefined;
+  let unsubscribe: (() => void) | undefined;
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+
+  const capture = (event: CapturedWorkerEvent) => {
+    events.push(event);
+    options.onEvent?.(event);
+  };
+
+  const clearTimers = () => {
+    for (const timer of timers) {
+      clearTimeout(timer);
+    }
+    timers.clear();
+  };
+
+  const schedule = (fn: () => void | Promise<void>, ms: number) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      void Promise.resolve(fn()).catch((exc: unknown) => {
+        compactionEvents.push(`timer action failed: ${errorMessage(exc)}`);
+      });
+    }, ms);
+    timers.add(timer);
+  };
+
+  const requestGracefulTaskResult = async (message: string, options: { shutdown?: boolean } = {}) => {
+    if (!session || finished || aborted) {
+      return;
+    }
+    if (options.shutdown) {
+      shutdownRequested = true;
+    }
+    if (session.isBashRunning && session.abortBash) {
+      session.abortBash();
+      compactionEvents.push("aborted running bash before graceful shutdown request");
+    }
+    if ((session.isStreaming || session.isBashRunning) && session.steer) {
+      await session.steer(message);
+    } else {
+      await session.prompt(message);
+    }
+  };
+
+  const abortSession = async (reason: string) => {
+    if (!session || finished || aborted) {
+      return;
+    }
+    aborted = true;
+    shutdownRequested = true;
+    error = error ?? reason;
+    await session.abort?.();
+  };
+
+  const abortListener = () => {
+    void abortSession("worker session aborted by outer signal").catch((exc: unknown) => {
+      compactionEvents.push(`abort by outer signal failed: ${errorMessage(exc)}`);
+    });
+  };
+
+  try {
+    if (options.abortSignal?.aborted) {
+      throw new Error("worker session aborted before start");
+    }
+
+    const factoryResult = await sessionFactory(options);
+    session = factoryResult.session;
+    sessionFile = session.sessionFile;
+    sessionId = session.sessionId;
+    if (factoryResult.modelFallbackMessage) {
+      contextObservations.push(`model fallback: ${factoryResult.modelFallbackMessage}`);
+    }
+    for (const diagnostic of factoryResult.diagnostics ?? []) {
+      contextObservations.push(diagnostic);
+    }
+
+    unsubscribe = session.subscribe((event: unknown) => {
+      const summary = summarizeWorkerEvent(event);
+      if (summary) {
+        capture(summary);
+      }
+
+      if (!isRecord(event) || typeof event.type !== "string") {
+        return;
+      }
+
+      switch (event.type) {
+        case "message_start": {
+          const message = event.message;
+          if (isRecord(message) && message.role === "assistant") {
+            currentAssistantText = "";
+          }
+          break;
+        }
+        case "message_update": {
+          const assistantEvent = event.assistantMessageEvent;
+          if (isRecord(assistantEvent) && assistantEvent.type === "text_delta") {
+            const delta = typeof assistantEvent.delta === "string" ? assistantEvent.delta : "";
+            currentAssistantText += delta;
+            assistantText = currentAssistantText || assistantText;
+          }
+          break;
+        }
+        case "message_end": {
+          const messageText = assistantMessageText(event.message);
+          if (messageText) {
+            assistantText = messageText;
+          }
+          break;
+        }
+        case "turn_end": {
+          turnCount += 1;
+          const messageText = assistantMessageText(event.message);
+          if (messageText) {
+            assistantText = messageText;
+          }
+          captureContextUsage(session, turnCount, contextObservations);
+          break;
+        }
+        case "tool_execution_start": {
+          const toolName = typeof event.toolName === "string" ? event.toolName : "";
+          if (toolName === "bash") {
+            const requestedTimeout = requestedBashTimeout(event);
+            if (requestedTimeout !== undefined && requestedTimeout > options.maxBashTimeoutSeconds) {
+              const command = isRecord(event.args) && typeof event.args.command === "string" ? event.args.command : "";
+              compactionEvents.push(
+                `aborted bash command with timeout ${requestedTimeout.toFixed(0)}s > max ${options.maxBashTimeoutSeconds.toFixed(0)}s: ${command.slice(0, 160)}`,
+              );
+              session?.abortBash?.();
+            }
+          }
+          break;
+        }
+        case "compaction_end": {
+          compactionEvents.push(formatCompactionEndEvent(event));
+          break;
+        }
+        case "agent_end": {
+          const eventText = lastAssistantTextFromMessages(event.messages);
+          if (eventText) {
+            assistantText = eventText;
+          }
+          break;
+        }
+        case "extension_error": {
+          compactionEvents.push(`extension_error: ${String(event.error ?? "unknown")}`);
+          break;
+        }
+      }
+    });
+
+    options.abortSignal?.addEventListener("abort", abortListener, { once: true });
+
+    if (taskTimeoutSeconds > 0) {
+      schedule(async () => {
+        if (finished || hasTaskResultStatus(assistantText)) {
+          return;
+        }
+        timedOut = true;
+        await requestGracefulTaskResult(buildTimeLimitMessage(taskTimeoutSeconds), { shutdown: true });
+        if (gracefulShutdownSeconds > 0) {
+          schedule(() => abortSession(`task exceeded ${taskTimeoutSeconds.toFixed(0)}s timeout`), gracefulShutdownSeconds * 1000);
+        }
+      }, taskTimeoutSeconds * 1000);
+    }
+
+    await session.prompt(prompt);
+    assistantText = latestAssistantText(session, assistantText);
+
+    if (!hasTaskResultStatus(assistantText) && !aborted && !options.abortSignal?.aborted) {
+      contextObservations.push("missing TASK_RESULT status after initial prompt; requested required block once");
+      await requestGracefulTaskResult(buildMissingTaskResultMessage());
+      assistantText = latestAssistantText(session, assistantText);
+    }
+  } catch (exc) {
+    error = error ?? errorMessage(exc);
+  } finally {
+    finished = true;
+    clearTimers();
+    options.abortSignal?.removeEventListener("abort", abortListener);
+    unsubscribe?.();
+    if (session) {
+      assistantText = latestAssistantText(session, assistantText);
+      sessionFile = session.sessionFile ?? sessionFile;
+      sessionId = session.sessionId ?? sessionId;
+      session.dispose?.();
+    }
+  }
+
+  if ((error || aborted || timedOut) && !hasTaskResult(assistantText)) {
+    assistantText = buildCoordinatorFailureTaskResult(error ?? (timedOut ? "task timed out" : "worker session aborted"));
+  }
+
+  const reportedStatus = parseReportedStatus(assistantText);
+  return {
+    task: options.task,
+    attempt: options.attempt,
+    startedAt,
+    endedAt: now().toISOString(),
+    reportedStatus,
+    done: isDoneStatus(reportedStatus),
+    assistantText,
+    sessionFile,
+    sessionId,
+    contextObservations,
+    compactionEvents,
+    events,
+    shutdownRequested,
+    timedOut,
+    aborted: aborted || Boolean(options.abortSignal?.aborted),
+    error,
+  };
+}
+
 function textFromContentPart(item: unknown): string {
   if (!isRecord(item)) {
     return "";
@@ -220,6 +600,231 @@ function textFromDeltaEvent(event: Record<string, unknown>): string {
     return textFromContentPart(event.content);
   }
   return "";
+}
+
+function applyWorkerSettingsDefaults(settingsManager: unknown): void {
+  if (!isRecord(settingsManager) || typeof settingsManager.applyOverrides !== "function") {
+    return;
+  }
+
+  try {
+    settingsManager.applyOverrides({
+      retry: { enabled: true, maxRetries: 2 },
+      compaction: { enabled: true },
+    });
+  } catch {
+    // Settings defaults are best-effort; createAgentSession can still use its own defaults.
+  }
+}
+
+async function resolveWorkerModel(modelRegistry: unknown, modelName: string): Promise<unknown> {
+  const [provider, ...modelIdParts] = modelName.split("/");
+  const modelId = modelIdParts.join("/");
+  if (provider && modelId && isRecord(modelRegistry) && typeof modelRegistry.find === "function") {
+    const registryModel = modelRegistry.find(provider, modelId);
+    if (registryModel) {
+      return registryModel;
+    }
+  }
+
+  try {
+    const ai = await import("@earendil-works/pi-ai");
+    if (typeof ai.getModel === "function" && provider && modelId) {
+      return ai.getModel(provider, modelId);
+    }
+  } catch {
+    // Optional peer resolution can fail in tests that inject a session factory.
+  }
+  return undefined;
+}
+
+function disableExtensionsForWorker(
+  resourceLoader: unknown,
+  createRuntime: () => unknown,
+): {
+  getExtensions: () => { extensions: unknown[]; errors: unknown[]; runtime: unknown };
+  getSkills: () => unknown;
+  getPrompts: () => unknown;
+  getThemes: () => unknown;
+  getAgentsFiles: () => unknown;
+  getSystemPrompt: () => unknown;
+  getAppendSystemPrompt: () => unknown[];
+  extendResources: (paths: unknown) => void;
+  reload: () => Promise<void>;
+} {
+  const loader = resourceLoader as Record<string, unknown>;
+  return {
+    getExtensions: () => ({ extensions: [], errors: [], runtime: createRuntime() }),
+    getSkills: () => callLoaderMethod(loader, "getSkills", { skills: [], diagnostics: [] }),
+    getPrompts: () => callLoaderMethod(loader, "getPrompts", { prompts: [], diagnostics: [] }),
+    getThemes: () => callLoaderMethod(loader, "getThemes", { themes: [], diagnostics: [] }),
+    getAgentsFiles: () => callLoaderMethod(loader, "getAgentsFiles", { agentsFiles: [] }),
+    getSystemPrompt: () => callLoaderMethod(loader, "getSystemPrompt", undefined),
+    getAppendSystemPrompt: () => callLoaderMethod(loader, "getAppendSystemPrompt", []) as unknown[],
+    extendResources: (paths: unknown) => {
+      if (typeof loader.extendResources === "function") {
+        loader.extendResources(paths);
+      }
+    },
+    reload: async () => {
+      if (typeof loader.reload === "function") {
+        await loader.reload();
+      }
+    },
+  };
+}
+
+function callLoaderMethod(loader: Record<string, unknown>, name: string, fallback: unknown): unknown {
+  const method = loader[name];
+  return typeof method === "function" ? method.call(loader) : fallback;
+}
+
+function extensionDiagnostics(extensionsResult: unknown): string[] {
+  if (!isRecord(extensionsResult) || !Array.isArray(extensionsResult.errors)) {
+    return [];
+  }
+  return extensionsResult.errors.map((item) => {
+    if (!isRecord(item)) {
+      return `extension diagnostic: ${String(item)}`;
+    }
+    return `extension diagnostic: ${String(item.path ?? "unknown")}: ${String(item.error ?? "unknown error")}`;
+  });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function summarizeWorkerEvent(event: unknown): CapturedWorkerEvent | undefined {
+  if (!isRecord(event) || typeof event.type !== "string") {
+    return undefined;
+  }
+
+  if (event.type === "message_update" && isRecord(event.assistantMessageEvent)) {
+    const assistantEvent = event.assistantMessageEvent;
+    if (assistantEvent.type === "text_delta") {
+      return {
+        type: event.type,
+        textDelta: typeof assistantEvent.delta === "string" ? assistantEvent.delta : "",
+      };
+    }
+    return { type: event.type, note: String(assistantEvent.type ?? "assistant_update") };
+  }
+
+  if (event.type.startsWith("tool_execution_")) {
+    return {
+      type: event.type,
+      toolName: typeof event.toolName === "string" ? event.toolName : undefined,
+      isError: typeof event.isError === "boolean" ? event.isError : undefined,
+    };
+  }
+
+  if (
+    event.type === "turn_end" ||
+    event.type === "message_end" ||
+    event.type === "compaction_start" ||
+    event.type === "compaction_end" ||
+    event.type === "agent_end" ||
+    event.type === "auto_retry_start" ||
+    event.type === "auto_retry_end"
+  ) {
+    return { type: event.type };
+  }
+
+  return undefined;
+}
+
+function captureContextUsage(
+  session: WorkerSessionLike | undefined,
+  turnCount: number,
+  contextObservations: string[],
+): void {
+  const usage = session?.getContextUsage?.() ?? contextUsageFromStats(session?.getSessionStats?.());
+  const percent = contextPercent(usage);
+  if (percent === undefined) {
+    contextObservations.push(`turn ${turnCount}: context usage unavailable`);
+    return;
+  }
+  contextObservations.push(`turn ${turnCount}: ${percent.toFixed(1)}%`);
+}
+
+function contextUsageFromStats(stats: unknown): unknown {
+  return isRecord(stats) ? stats.contextUsage : undefined;
+}
+
+function contextPercent(usage: unknown): number | undefined {
+  if (!isRecord(usage)) {
+    return undefined;
+  }
+  for (const key of ["percent", "percentage", "contextPercent", "contextPercentage"] as const) {
+    const value = usage[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value > 1 ? value : value * 100;
+    }
+  }
+
+  const used = numericProperty(usage, ["used", "tokens", "contextTokens"]);
+  const limit = numericProperty(usage, ["limit", "max", "contextWindow", "window"]);
+  if (used !== undefined && limit !== undefined && limit > 0) {
+    return (used / limit) * 100;
+  }
+  return undefined;
+}
+
+function numericProperty(record: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function requestedBashTimeout(event: Record<string, unknown>): number | undefined {
+  if (!isRecord(event.args)) {
+    return undefined;
+  }
+  const timeout = event.args.timeout;
+  if (typeof timeout === "number" && Number.isFinite(timeout)) {
+    return timeout;
+  }
+  if (typeof timeout === "string") {
+    const parsed = Number.parseFloat(timeout);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function formatCompactionEndEvent(event: Record<string, unknown>): string {
+  const reason = String(event.reason ?? "unknown");
+  const aborted = Boolean(event.aborted);
+  if (isRecord(event.result)) {
+    const tokensBefore = event.result.tokensBefore;
+    return `compaction_end reason=${reason} aborted=${aborted} tokensBefore=${String(tokensBefore ?? "unknown")}`;
+  }
+  return `compaction_end reason=${reason} aborted=${aborted} error=${String(event.errorMessage ?? "unknown")}`;
+}
+
+function latestAssistantText(session: WorkerSessionLike, fallback: string): string {
+  const direct = session.getLastAssistantText?.();
+  if (direct) {
+    return direct;
+  }
+  const fromMessages = lastAssistantTextFromMessages(session.messages);
+  return fromMessages || fallback;
+}
+
+function buildCoordinatorFailureTaskResult(reason: string): string {
+  return `TASK_RESULT:
+status: partial
+summary: Coordinator stopped the session before the worker produced a final result.
+changes:
+- unknown; inspect git diff and session state
+verification:
+- not completed by worker
+remaining:
+- Coordinator/session error: ${reason}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

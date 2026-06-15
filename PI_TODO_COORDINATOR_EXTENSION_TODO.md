@@ -21,7 +21,7 @@ Global constraints for every task:
 - [x] TODO 2 — Port TODO markdown parsing and progress mutation
 - [x] TODO 3 — Port TODO generation from raw input
 - [x] TODO 4 — Port worker prompt and TASK_RESULT parsing
-- [ ] TODO 5 — Implement native Pi SDK worker session runner
+- [x] TODO 5 — Implement native Pi SDK worker session runner
 - [ ] TODO 6 — Implement coordinator orchestration loop
 - [ ] TODO 7 — Implement git commit safety and artifact exclusion
 - [ ] TODO 8 — Add tool streaming updates and structured result details
@@ -246,12 +246,12 @@ Keep status sets compatible with the Python script:
 **Goal:** Replace `pi --mode rpc` worker subprocesses with isolated native Pi SDK sessions.
 
 **Status:**
-- [ ] Create isolated worker session factory
-- [ ] Disable extension discovery for worker sessions
-- [ ] Run one assigned task prompt
-- [ ] Capture streaming events and final assistant text
-- [ ] Handle abort and timeout
-- [ ] Return structured session outcome
+- [x] Create isolated worker session factory
+- [x] Disable extension discovery for worker sessions
+- [x] Run one assigned task prompt
+- [x] Capture streaming events and final assistant text
+- [x] Handle abort and timeout
+- [x] Return structured session outcome
 
 **Implementation details:**
 Use the Pi SDK from `@earendil-works/pi-coding-agent`, not the Python script and not `pi --mode rpc`.
