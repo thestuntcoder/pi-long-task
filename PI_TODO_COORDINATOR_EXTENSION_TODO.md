@@ -26,7 +26,7 @@ Global constraints for every task:
 - [x] TODO 7 — Implement git commit safety and artifact exclusion
 - [x] TODO 8 — Add tool streaming updates and structured result details
 - [x] TODO 9 — Add automated tests for pure coordinator logic
-- [ ] TODO 10 — Add documentation and smoke-test instructions
+- [x] TODO 10 — Add documentation and smoke-test instructions
 
 ---
 
@@ -481,12 +481,12 @@ Avoid live model calls in automated tests. Mock worker session outcomes.
 **Goal:** Document installation, usage, guarantees, and migration from the Python coordinator.
 
 **Status:**
-- [ ] Add package README
-- [ ] Document public tool schema
-- [ ] Document safety guarantees
-- [ ] Document install/load commands
-- [ ] Document smoke tests
-- [ ] Document current limitations
+- [x] Add package README
+- [x] Document public tool schema
+- [x] Document safety guarantees
+- [x] Document install/load commands
+- [x] Document smoke tests
+- [x] Document current limitations
 
 **Implementation details:**
 Create `~/Sites/pi-coordinator/README.md`.
