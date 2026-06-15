@@ -19,7 +19,7 @@ Global constraints for every task:
 
 - [x] TODO 1 — Create standalone Pi package skeleton
 - [x] TODO 2 — Port TODO markdown parsing and progress mutation
-- [ ] TODO 3 — Port TODO generation from raw input
+- [x] TODO 3 — Port TODO generation from raw input
 - [ ] TODO 4 — Port worker prompt and TASK_RESULT parsing
 - [ ] TODO 5 — Implement native Pi SDK worker session runner
 - [ ] TODO 6 — Implement coordinator orchestration loop
@@ -148,10 +148,10 @@ Keep regex compatibility with the current Python script, including both em dash 
 **Goal:** Convert raw `inputText` into coordinator-compatible TODO markdown.
 
 **Status:**
-- [ ] Detect existing coordinator TODO markdown
-- [ ] Convert simple bullet/numbered lists locally
-- [ ] Add TODO planner prompt builder for complex raw input
-- [ ] Validate generated TODO markdown
+- [x] Detect existing coordinator TODO markdown
+- [x] Convert simple bullet/numbered lists locally
+- [x] Add TODO planner prompt builder for complex raw input
+- [x] Validate generated TODO markdown
 
 **Implementation details:**
 Implement `src/todo_generator.ts`.
