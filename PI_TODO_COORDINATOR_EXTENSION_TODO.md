@@ -22,7 +22,7 @@ Global constraints for every task:
 - [x] TODO 3 — Port TODO generation from raw input
 - [x] TODO 4 — Port worker prompt and TASK_RESULT parsing
 - [x] TODO 5 — Implement native Pi SDK worker session runner
-- [ ] TODO 6 — Implement coordinator orchestration loop
+- [x] TODO 6 — Implement coordinator orchestration loop
 - [ ] TODO 7 — Implement git commit safety and artifact exclusion
 - [ ] TODO 8 — Add tool streaming updates and structured result details
 - [ ] TODO 9 — Add automated tests for pure coordinator logic
@@ -289,13 +289,13 @@ This task may need to consult Pi SDK docs/examples for exact `createAgentSession
 **Goal:** Wire TODO generation, parsing, worker sessions, result writing, retries, and completion marking into the main coordinator.
 
 **Status:**
-- [ ] Create run directory and artifact paths
-- [ ] Generate or normalize TODO markdown from `inputText`
-- [ ] Run incomplete tasks sequentially
-- [ ] Retry tasks up to internal max attempts
-- [ ] Mark tasks done when worker reports done
-- [ ] Append task results to result markdown
-- [ ] Return final coordinator summary
+- [x] Create run directory and artifact paths
+- [x] Generate or normalize TODO markdown from `inputText`
+- [x] Run incomplete tasks sequentially
+- [x] Retry tasks up to internal max attempts
+- [x] Mark tasks done when worker reports done
+- [x] Append task results to result markdown
+- [x] Return final coordinator summary
 
 **Implementation details:**
 Implement `src/coordinator.ts` with a public function called from the registered tool, for example:

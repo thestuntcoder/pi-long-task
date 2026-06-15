@@ -12,8 +12,24 @@ export const PiTodoCoordinatorParams = Type.Object(
 export type PiTodoCoordinatorInput = Static<typeof PiTodoCoordinatorParams>;
 
 export interface PiTodoCoordinatorResult {
-  status: "stub";
+  status: "done" | "failed";
   message: string;
-  inputTextLength: number;
+  summary: string;
+  runId: string;
+  runDir: string;
+  todoPath: string;
+  taskResultPath: string;
+  totalTasks: number;
+  completedTasks: number;
+  attemptedTasks: number;
+  attempts: Array<{
+    taskId: string;
+    title: string;
+    attempt: number;
+    reportedStatus: string;
+    done: boolean;
+    error?: string;
+  }>;
   commit: boolean;
+  error?: string;
 }
