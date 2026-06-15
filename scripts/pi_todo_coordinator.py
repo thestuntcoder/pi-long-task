@@ -948,6 +948,7 @@ async def run_pi_task(
     error: Optional[str] = None
     deadline = time.monotonic() + task_timeout if task_timeout and task_timeout > 0 else None
     time_limit_requested = False
+    next_idle_text_poll = 0.0
 
     prompt = build_task_prompt(
         todo_path=todo_path,
@@ -987,10 +988,22 @@ async def run_pi_task(
                 try:
                     event = await client.wait_event(timeout=5 if deadline is not None else None)
                 except asyncio.TimeoutError:
+                    now = time.monotonic()
+                    if now >= next_idle_text_poll:
+                        next_idle_text_poll = now + 15
+                        try:
+                            last_text_response = await client.command({"type": "get_last_assistant_text"}, timeout=5)
+                            latest_text = ((last_text_response.get("data") or {}).get("text")) or ""
+                            if latest_text:
+                                assistant_text = latest_text
+                        except Exception as exc:  # noqa: BLE001 - idle polling must not stop active workers
+                            if verbose:
+                                print(f"[coordinator] idle get_last_assistant_text unavailable: {exc}", file=sys.stderr)
+
                     if has_task_result_status(assistant_text):
-                        context_observations.append("idle wait: TASK_RESULT status seen; finishing session")
+                        context_observations.append("idle poll: TASK_RESULT status seen; finishing session")
                         print(
-                            f"\n[coordinator] {task.label}: TASK_RESULT seen during idle wait; finishing session",
+                            f"\n[coordinator] {task.label}: TASK_RESULT seen during idle poll; finishing session",
                             file=sys.stderr,
                         )
                         break
