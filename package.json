@@ -5,6 +5,10 @@
   "type": "module",
   "description": "Native Pi TODO coordinator extension package.",
   "keywords": ["pi-package"],
+  "files": [
+    "README.md",
+    "src"
+  ],
   "scripts": {
     "test": "node --experimental-strip-types --test"
   },
