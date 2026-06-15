@@ -74,10 +74,20 @@ assert.equal(hasTaskResult(missingStatus), true);
 assert.equal(hasTaskResultStatus(missingStatus), false);
 assert.equal(parseReportedStatus(missingStatus), "unknown");
 
+const partial = `TASK_RESULT:
+status: partial
+summary: Some work remains.`;
+assert.equal(parseReportedStatus(partial), "partial");
+
 const blocked = `TASK_RESULT:
 status: blocked
 summary: Out of scope.`;
 assert.equal(parseReportedStatus(blocked), "blocked");
+
+const failed = `TASK_RESULT:
+status: failed
+summary: Tests failed.`;
+assert.equal(parseReportedStatus(failed), "failed");
 assert.equal(isDoneStatus("success"), true);
 assert.equal(isDoneStatus("succeeded"), true);
 assert.equal(isPartialStatus("failure"), true);

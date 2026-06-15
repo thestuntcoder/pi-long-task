@@ -25,7 +25,7 @@ Global constraints for every task:
 - [x] TODO 6 — Implement coordinator orchestration loop
 - [x] TODO 7 — Implement git commit safety and artifact exclusion
 - [x] TODO 8 — Add tool streaming updates and structured result details
-- [ ] TODO 9 — Add automated tests for pure coordinator logic
+- [x] TODO 9 — Add automated tests for pure coordinator logic
 - [ ] TODO 10 — Add documentation and smoke-test instructions
 
 ---
@@ -444,12 +444,12 @@ A custom renderer is optional. If implemented, keep it compact and readable in c
 **Goal:** Cover the high-risk pure logic with automated tests.
 
 **Status:**
-- [ ] Add test runner configuration if needed
-- [ ] Test TODO parser
-- [ ] Test TODO generator
-- [ ] Test result parser
-- [ ] Test orchestration with mocked workers
-- [ ] Test git safety helpers where practical
+- [x] Add test runner configuration if needed
+- [x] Test TODO parser
+- [x] Test TODO generator
+- [x] Test result parser
+- [x] Test orchestration with mocked workers
+- [x] Test git safety helpers where practical
 
 **Implementation details:**
 Add a lightweight TypeScript test setup inside `~/Sites/pi-coordinator`. Use the project/package convention that fits best, for example Vitest, Node's built-in test runner, or another minimal setup.

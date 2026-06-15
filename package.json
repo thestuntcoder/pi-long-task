@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Native Pi TODO coordinator extension package.",
   "keywords": ["pi-package"],
+  "scripts": {
+    "test": "node --experimental-strip-types --test"
+  },
   "pi": {
     "extensions": ["./src/index.ts"]
   },
