@@ -1,0 +1,16 @@
+{
+  "name": "pi-coordinator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Native Pi TODO coordinator extension package.",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}
