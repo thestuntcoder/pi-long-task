@@ -24,7 +24,7 @@ Global constraints for every task:
 - [x] TODO 5 — Implement native Pi SDK worker session runner
 - [x] TODO 6 — Implement coordinator orchestration loop
 - [x] TODO 7 — Implement git commit safety and artifact exclusion
-- [ ] TODO 8 — Add tool streaming updates and structured result details
+- [x] TODO 8 — Add tool streaming updates and structured result details
 - [ ] TODO 9 — Add automated tests for pure coordinator logic
 - [ ] TODO 10 — Add documentation and smoke-test instructions
 
@@ -392,10 +392,10 @@ Safety requirements:
 **Goal:** Make the outer Pi tool pleasant to use while the coordinator runs.
 
 **Status:**
-- [ ] Emit progress through `onUpdate`
-- [ ] Return concise final text
-- [ ] Return structured details
-- [ ] Optionally add compact custom rendering
+- [x] Emit progress through `onUpdate`
+- [x] Return concise final text
+- [x] Return structured details
+- [x] Optionally add compact custom rendering
 
 **Implementation details:**
 In `src/index.ts` and/or `src/render.ts`, report progress like:

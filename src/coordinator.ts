@@ -2,8 +2,9 @@ import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { PiTodoCoordinatorInput } from "./types.ts";
+import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus, PiTodoCoordinatorInput } from "./types.ts";
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
+import { formatCoordinatorResultMessage } from "./render.ts";
 import { extractResultSummary } from "./result_writer.ts";
 import { buildTodoCreationPrompt, extractTodoMarkdown, todoMarkdownFromString, validateTodoMarkdown } from "./todo_generator.ts";
 import { incompleteTasks, markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
@@ -17,6 +18,8 @@ import {
   type WorkerSessionLike,
 } from "./worker_session.ts";
 
+export type { CoordinatorStatus } from "./types.ts";
+
 export const DEFAULT_COORDINATOR_OPTIONS = {
   maxAttemptsPerTask: 3,
   taskTimeoutMs: 900_000,
@@ -25,8 +28,33 @@ export const DEFAULT_COORDINATOR_OPTIONS = {
   todoThinking: "xhigh",
 } as const;
 
-export type CoordinatorStatus = "done" | "failed";
 export type WorkerRunner = (options: RunWorkerTaskOptions) => Promise<SessionOutcome>;
+export type CoordinatorProgressPhase =
+  | "planning"
+  | "planned"
+  | "task_start"
+  | "worker_tool"
+  | "task_done"
+  | "task_blocked"
+  | "task_failed"
+  | "complete";
+
+export interface CoordinatorProgressUpdate {
+  message: string;
+  phase: CoordinatorProgressPhase;
+  runId: string;
+  todoPath: string;
+  resultPath: string;
+  taskId?: string;
+  title?: string;
+  attempt?: number;
+  status?: CoordinatorStatus | string;
+  commitHash?: string;
+  commitError?: string;
+  totalTasks?: number;
+}
+
+export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
 export type TodoPlanner = (options: TodoPlannerOptions) => Promise<string>;
 
 export interface RunCoordinatorOptions extends PiTodoCoordinatorInput {
@@ -43,6 +71,7 @@ export interface RunCoordinatorOptions extends PiTodoCoordinatorInput {
   taskThinking?: string;
   todoThinking?: string;
   now?: () => Date;
+  onProgress?: CoordinatorProgressHandler;
 }
 
 export interface TodoPlannerOptions {
@@ -73,10 +102,16 @@ export interface CoordinatorResult {
   runId: string;
   runDir: string;
   todoPath: string;
+  resultPath: string;
   taskResultPath: string;
   totalTasks: number;
   completedTasks: number;
+  failedTasks: number;
+  blockedTasks: number;
   attemptedTasks: number;
+  remainingTasks: CoordinatorRemainingTask[];
+  outcomes: SessionOutcome[];
+  commits: CoordinatorCommitSummary[];
   attempts: TaskAttemptSummary[];
   commit: boolean;
   error?: string;
@@ -99,19 +134,28 @@ interface RuntimeOptions {
   workerSessionFactory?: WorkerSessionFactory;
   todoSessionFactory?: WorkerSessionFactory;
   now: () => Date;
+  onProgress?: CoordinatorProgressHandler;
 }
 
 export async function runCoordinator(options: RunCoordinatorOptions): Promise<CoordinatorResult> {
   const runtime = buildRuntimeOptions(options);
   const attempts: TaskAttemptSummary[] = [];
+  const outcomes: SessionOutcome[] = [];
+  const commits: CoordinatorCommitSummary[] = [];
 
   await mkdir(runtime.runDir, { recursive: true });
   await writeFile(runtime.taskResultPath, initialTaskResultMarkdown(runtime.runId), "utf8");
 
   try {
+    emitProgress(runtime, "Creating TODO plan...", { phase: "planning" });
     let todoMarkdown = await generateOrNormalizeTodoMarkdown(options.inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
     await writeFile(runtime.todoPath, todoMarkdown, "utf8");
+    const initialTasks = parseTasks(todoMarkdown);
+    emitProgress(runtime, `Created TODO plan with ${initialTasks.length} task(s).`, {
+      phase: "planned",
+      totalTasks: initialTasks.length,
+    });
 
     const previousAttempts = new Map<string, string[]>();
     let failure: string | undefined;
@@ -123,6 +167,12 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       }
 
       const attempt = (previousAttempts.get(nextTask.taskId)?.length ?? 0) + 1;
+      emitProgress(runtime, `Running TODO ${nextTask.taskId} — ${nextTask.title}${attempt > 1 ? ` (attempt ${attempt})` : ""}...`, {
+        phase: "task_start",
+        taskId: nextTask.taskId,
+        title: nextTask.title,
+        attempt,
+      });
       const preExistingDirtyPaths = options.commit
         ? await gitDirtyPaths(runtime.cwd, runtime.taskResultPath, runtime.todoPath, runtime.runDir)
         : new Set<string>();
@@ -140,7 +190,9 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         abortSignal: runtime.abortSignal,
         sessionFactory: runtime.workerSessionFactory,
         now: runtime.now,
+        onEvent: (event) => emitWorkerEventProgress(runtime, nextTask, attempt, event),
       });
+      outcomes.push(outcome);
 
       if (outcome.done) {
         todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
@@ -158,6 +210,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       attempts.push(attemptDetails);
       await appendTaskResult(runtime.taskResultPath, nextTask, outcome);
 
+      let taskCommitHash: string | undefined;
+      let taskCommitError: string | undefined;
       if (options.commit) {
         const commitResult = shouldCommitOutcome(outcome)
           ? await commitAfterSession({
@@ -172,8 +226,15 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         attemptDetails.commitHash = commitResult.hash;
         attemptDetails.commitError = commitResult.error;
         attemptDetails.commitSkipped = commitResult.skipped;
+        if (commitResult.hash || commitResult.error) {
+          commits.push({ taskId: nextTask.taskId, hash: commitResult.hash, error: commitResult.error });
+        }
+        taskCommitHash = commitResult.hash;
+        taskCommitError = commitResult.error;
         await appendCommitNote(runtime.taskResultPath, commitResult);
       }
+
+      emitTaskOutcomeProgress(runtime, nextTask, outcome, taskCommitHash, taskCommitError);
 
       const attemptSummary = resultTextForPreviousAttempt(outcome);
       previousAttempts.set(nextTask.taskId, [...(previousAttempts.get(nextTask.taskId) ?? []), attemptSummary]);
@@ -195,26 +256,41 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     const finalTodoMarkdown = await readFile(runtime.todoPath, "utf8");
     const finalTasks = parseTasks(finalTodoMarkdown);
     const completedTasks = finalTasks.filter((task) => task.done).length;
-    const status: CoordinatorStatus = failure ? "failed" : "done";
+    const remainingTasks = remainingTaskSummaries(finalTasks, attempts);
+    const blockedTasks = remainingTasks.filter((task) => task.status === "blocked").length;
+    const failedTasks = remainingTasks.filter((task) => task.status !== "blocked" && task.status !== "not_started").length;
+    const status = deriveCoordinatorStatus({ failure, completedTasks, totalTasks: finalTasks.length, blockedTasks, failedTasks });
     const summary = failure
-      ? `Coordinator failed: ${failure}`
+      ? `Coordinator ${status}: ${failure}`
       : `Coordinator completed ${completedTasks}/${finalTasks.length} task(s).`;
-
-    return {
+    const result: CoordinatorResult = {
       status,
       summary,
-      message: summary,
+      message: "",
       runId: runtime.runId,
       runDir: runtime.runDir,
       todoPath: runtime.todoPath,
+      resultPath: runtime.taskResultPath,
       taskResultPath: runtime.taskResultPath,
       totalTasks: finalTasks.length,
       completedTasks,
+      failedTasks,
+      blockedTasks,
       attemptedTasks: attempts.length,
+      remainingTasks,
+      outcomes,
+      commits,
       attempts,
       commit: options.commit,
       error: failure,
     };
+    result.message = formatCoordinatorResultMessage(result);
+    emitProgress(runtime, `Coordinator ${status}.`, {
+      phase: "complete",
+      status,
+      totalTasks: finalTasks.length,
+    });
+    return result;
   } catch (error) {
     const message = errorMessage(error);
     const summary = `Coordinator failed: ${message}`;
@@ -224,21 +300,30 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       // Best effort only; the original error is returned below.
     }
 
-    return {
+    const result: CoordinatorResult = {
       status: "failed",
       summary,
-      message: summary,
+      message: "",
       runId: runtime.runId,
       runDir: runtime.runDir,
       todoPath: runtime.todoPath,
+      resultPath: runtime.taskResultPath,
       taskResultPath: runtime.taskResultPath,
       totalTasks: 0,
       completedTasks: 0,
+      failedTasks: 0,
+      blockedTasks: 0,
       attemptedTasks: attempts.length,
+      remainingTasks: [],
+      outcomes,
+      commits,
       attempts,
       commit: options.commit,
       error: message,
     };
+    result.message = formatCoordinatorResultMessage(result);
+    emitProgress(runtime, "Coordinator failed.", { phase: "complete", status: "failed" });
+    return result;
   }
 }
 
@@ -309,7 +394,74 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerSessionFactory: options.workerSessionFactory,
     todoSessionFactory: options.todoSessionFactory,
     now: options.now ?? (() => new Date()),
+    onProgress: options.onProgress,
   };
+}
+
+function emitProgress(
+  runtime: RuntimeOptions,
+  message: string,
+  update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath">,
+): void {
+  runtime.onProgress?.({
+    message,
+    runId: runtime.runId,
+    todoPath: runtime.todoPath,
+    resultPath: runtime.taskResultPath,
+    ...update,
+  });
+}
+
+function emitWorkerEventProgress(
+  runtime: RuntimeOptions,
+  task: Pick<Task, "taskId" | "title">,
+  attempt: number,
+  event: { type: string; toolName?: string; isError?: boolean },
+): void {
+  if (!event.toolName || (event.type !== "tool_execution_start" && event.type !== "tool_execution_end")) {
+    return;
+  }
+  const action = event.type === "tool_execution_start" ? "started" : event.isError ? "failed" : "finished";
+  const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath"> = {
+    phase: "worker_tool",
+    taskId: task.taskId,
+    title: task.title,
+    attempt,
+  };
+  if (event.isError) {
+    update.status = "failed";
+  }
+  emitProgress(runtime, `TODO ${task.taskId}: worker tool ${event.toolName} ${action}.`, update);
+}
+
+function emitTaskOutcomeProgress(
+  runtime: RuntimeOptions,
+  task: Pick<Task, "taskId" | "title">,
+  outcome: SessionOutcome,
+  commitHash: string | undefined,
+  commitError: string | undefined,
+): void {
+  const commitText = commitHash ? `, commit ${commitHash}` : commitError ? `, commit failed` : "";
+  const statusText = outcome.done ? "done" : outcome.reportedStatus;
+  const phase: CoordinatorProgressPhase = outcome.done
+    ? "task_done"
+    : outcome.reportedStatus === "blocked"
+      ? "task_blocked"
+      : "task_failed";
+  const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath"> = {
+    phase,
+    taskId: task.taskId,
+    title: task.title,
+    attempt: outcome.attempt,
+    status: outcome.reportedStatus,
+  };
+  if (commitHash) {
+    update.commitHash = commitHash;
+  }
+  if (commitError) {
+    update.commitError = commitError;
+  }
+  emitProgress(runtime, `TODO ${task.taskId} ${statusText}${commitText}.`, update);
 }
 
 function initialTaskResultMarkdown(runId: string): string {
@@ -364,6 +516,40 @@ async function appendTaskResult(pathname: string, task: Task, outcome: SessionOu
 
   lines.push("", "```text", summary, "```", "");
   await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
+}
+
+function remainingTaskSummaries(tasks: Task[], attempts: TaskAttemptSummary[]): CoordinatorRemainingTask[] {
+  const lastAttemptByTask = new Map<string, TaskAttemptSummary>();
+  for (const attempt of attempts) {
+    lastAttemptByTask.set(attempt.taskId, attempt);
+  }
+
+  return tasks
+    .filter((task) => !task.done)
+    .map((task) => ({
+      taskId: task.taskId,
+      title: task.title,
+      status: lastAttemptByTask.get(task.taskId)?.reportedStatus ?? "not_started",
+    }));
+}
+
+function deriveCoordinatorStatus(options: {
+  failure: string | undefined;
+  completedTasks: number;
+  totalTasks: number;
+  blockedTasks: number;
+  failedTasks: number;
+}): CoordinatorStatus {
+  if (!options.failure && options.completedTasks === options.totalTasks) {
+    return "done";
+  }
+  if (options.blockedTasks > 0 && options.failedTasks === 0) {
+    return "blocked";
+  }
+  if (options.completedTasks > 0) {
+    return "partial";
+  }
+  return "failed";
 }
 
 function resultTextForPreviousAttempt(outcome: SessionOutcome): string {

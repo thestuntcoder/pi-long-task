@@ -34,18 +34,38 @@ try {
     return outcomeFor(options, "done");
   };
 
+  const progressUpdates: string[] = [];
   const sequential = await runCoordinator({
     inputText: "- First task\n- Second task",
     commit: false,
     cwd: tempRoot,
     runId: "sequential",
     workerRunner: sequentialWorker,
+    onProgress: (update) => progressUpdates.push(update.message),
   });
 
+  assert.deepEqual(progressUpdates, [
+    "Creating TODO plan...",
+    "Created TODO plan with 2 task(s).",
+    "Running TODO 1 — First task...",
+    "TODO 1 done.",
+    "Running TODO 2 — Second task...",
+    "TODO 2 done.",
+    "Coordinator done.",
+  ]);
   assert.equal(sequential.status, "done");
   assert.equal(sequential.totalTasks, 2);
   assert.equal(sequential.completedTasks, 2);
   assert.equal(sequential.attemptedTasks, 2);
+  assert.equal(sequential.failedTasks, 0);
+  assert.equal(sequential.blockedTasks, 0);
+  assert.equal(sequential.resultPath, sequential.taskResultPath);
+  assert.equal(sequential.outcomes.length, 2);
+  assert.deepEqual(sequential.commits, []);
+  assert.match(sequential.message, /Pi TODO coordinator: done/);
+  assert.match(sequential.message, /Tasks: 2 completed, 0 failed, 0 blocked, 0 remaining \(2 total\)\./);
+  assert.match(sequential.message, /Result file: /);
+  assert.match(sequential.message, /TODO file: /);
   assert.deepEqual(
     calls.map((call) => `${call.taskId}:${call.attempt}`),
     ["1:1", "2:1"],
@@ -117,6 +137,20 @@ try {
   const failedResult = await readFile(failed.taskResultPath, "utf8");
   assert.equal((failedResult.match(/## TODO 1 — Flaky task/g) ?? []).length, 3);
   assert.equal((failedResult.match(/## TODO 2 — Never reached/g) ?? []).length, 0);
+
+  const blocked = await runCoordinator({
+    inputText: generatedTodoMarkdown(["Blocked task"]),
+    commit: false,
+    cwd: tempRoot,
+    runId: "blocked",
+    workerRunner: async (options) => outcomeFor(options, "blocked"),
+    maxAttemptsPerTask: 1,
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.blockedTasks, 1);
+  assert.equal(blocked.failedTasks, 0);
+  assert.match(blocked.message, /Pi TODO coordinator: blocked/);
+  assert.match(blocked.message, /Remaining tasks:\n- TODO 1 — Blocked task \(blocked\)/);
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
 }
