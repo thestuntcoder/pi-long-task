@@ -1,2 +1,4 @@
 TASK_RESULT.md
 tmp/
+__pycache__/
+*.py[cod]
