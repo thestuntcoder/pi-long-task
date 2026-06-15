@@ -18,7 +18,7 @@ Global constraints for every task:
 ## Progress
 
 - [x] TODO 1 — Create standalone Pi package skeleton
-- [ ] TODO 2 — Port TODO markdown parsing and progress mutation
+- [x] TODO 2 — Port TODO markdown parsing and progress mutation
 - [ ] TODO 3 — Port TODO generation from raw input
 - [ ] TODO 4 — Port worker prompt and TASK_RESULT parsing
 - [ ] TODO 5 — Implement native Pi SDK worker session runner
@@ -97,11 +97,11 @@ The stub can return a placeholder response until later TODOs wire in real behavi
 **Goal:** Port the pure TODO parsing/progress logic from the Python coordinator into TypeScript.
 
 **Status:**
-- [ ] Define task-related types
-- [ ] Parse task headings
-- [ ] Parse progress checklist status
-- [ ] Parse per-task status checkboxes
-- [ ] Mark tasks done in markdown content
+- [x] Define task-related types
+- [x] Parse task headings
+- [x] Parse progress checklist status
+- [x] Parse per-task status checkboxes
+- [x] Mark tasks done in markdown content
 
 **Implementation details:**
 Implement `src/todo_parser.ts` with functions equivalent to the Python coordinator's pure parsing helpers:
