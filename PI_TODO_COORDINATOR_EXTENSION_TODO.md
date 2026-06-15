@@ -20,7 +20,7 @@ Global constraints for every task:
 - [x] TODO 1 — Create standalone Pi package skeleton
 - [x] TODO 2 — Port TODO markdown parsing and progress mutation
 - [x] TODO 3 — Port TODO generation from raw input
-- [ ] TODO 4 — Port worker prompt and TASK_RESULT parsing
+- [x] TODO 4 — Port worker prompt and TASK_RESULT parsing
 - [ ] TODO 5 — Implement native Pi SDK worker session runner
 - [ ] TODO 6 — Implement coordinator orchestration loop
 - [ ] TODO 7 — Implement git commit safety and artifact exclusion
@@ -195,11 +195,11 @@ The generated markdown must include:
 **Goal:** Port prompt construction and worker result parsing into TypeScript.
 
 **Status:**
-- [ ] Build assigned-task worker prompt
-- [ ] Build timeout/shutdown steering messages
-- [ ] Extract assistant text from Pi messages/events
-- [ ] Parse `TASK_RESULT` status
-- [ ] Summarize/truncate assistant result text
+- [x] Build assigned-task worker prompt
+- [x] Build timeout/shutdown steering messages
+- [x] Extract assistant text from Pi messages/events
+- [x] Parse `TASK_RESULT` status
+- [x] Summarize/truncate assistant result text
 
 **Implementation details:**
 Create or update `src/worker_session.ts` and `src/result_writer.ts` with pure helpers before wiring real SDK sessions.
