@@ -17,7 +17,7 @@ Global constraints for every task:
 
 ## Progress
 
-- [ ] TODO 1 — Create standalone Pi package skeleton
+- [x] TODO 1 — Create standalone Pi package skeleton
 - [ ] TODO 2 — Port TODO markdown parsing and progress mutation
 - [ ] TODO 3 — Port TODO generation from raw input
 - [ ] TODO 4 — Port worker prompt and TASK_RESULT parsing
@@ -35,10 +35,10 @@ Global constraints for every task:
 **Goal:** Create a standalone Pi extension package directory for the native coordinator.
 
 **Status:**
-- [ ] Create package structure
-- [ ] Add Pi package manifest
-- [ ] Register stub extension tool
-- [ ] Verify package loads in Pi
+- [x] Create package structure
+- [x] Add Pi package manifest
+- [x] Register stub extension tool
+- [x] Verify package loads in Pi
 
 **Implementation details:**
 Create the package directory at `~/Sites/pi-coordinator` (`/Users/dj/Sites/pi-coordinator`):
