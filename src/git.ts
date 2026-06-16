@@ -3,9 +3,15 @@ import { realpathSync } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
 
-import { taskLabel, type SessionOutcome } from "./worker_session.ts";
+import type { SessionOutcome } from "./worker_session.ts";
 
 const execFileAsync = promisify(execFile);
+
+const GENERATED_TODO_COMMIT_PREFIX_RE = /^(?:Complete|Progress)\s+TODO\s+\d+(?:\s+[—-]\s*)?/i;
+const TODO_LABEL_PREFIX_RE = /^TODO\s+\d+(?:\s+[—-]\s*)?/i;
+const CONVENTIONAL_SUBJECT_RE = /^([a-z][a-z0-9-]*)(\([^)]*\))?(!)?:\s+(.+)$/;
+const DEFAULT_COMMIT_SUBJECT = "Update project files";
+const RECENT_COMMIT_SUBJECT_LIMIT = 20;
 
 export interface GitRunResult {
   stdout: string;
@@ -104,8 +110,7 @@ export async function commitAfterSession(options: CommitAfterSessionOptions): Pr
     return { error: "not inside a git repository" };
   }
 
-  const messagePrefix = options.outcome.done ? "Complete" : "Progress";
-  const commitMessage = `${messagePrefix} ${taskLabel(options.outcome.task)}`;
+  const commitMessage = await commitMessageForOutcome(root, options.outcome);
 
   try {
     const add = await runGit(root, ["add", "-A"]);
@@ -152,6 +157,92 @@ export async function commitAfterSession(options: CommitAfterSessionOptions): Pr
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+async function commitMessageForOutcome(
+  root: string,
+  outcome: Pick<SessionOutcome, "task" | "reportedStatus" | "done" | "error" | "timedOut" | "aborted">,
+): Promise<string> {
+  const subject = normalizedTaskSubject(outcome.task.title);
+  const recentSubjects = await recentCommitSubjects(root);
+  return formatSubjectLikeRecentCommits(subject, recentSubjects);
+}
+
+async function recentCommitSubjects(root: string): Promise<string[]> {
+  const result = await runGit(root, ["log", `-${RECENT_COMMIT_SUBJECT_LIMIT}`, "--format=%s"]);
+  if (result.code !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/g)
+    .map((subject) => subject.trim())
+    .filter(Boolean)
+    .filter((subject) => !GENERATED_TODO_COMMIT_PREFIX_RE.test(subject))
+    .filter((subject) => !/^Merge\b/.test(subject) && !/^Revert\b/.test(subject));
+}
+
+function formatSubjectLikeRecentCommits(subject: string, recentSubjects: readonly string[]): string {
+  const sample = recentSubjects[0];
+  if (!sample) {
+    return ensureSafeCommitSubject(subject);
+  }
+
+  const conventional = CONVENTIONAL_SUBJECT_RE.exec(sample);
+  if (conventional) {
+    const prefix = `${conventional[1]}${conventional[2] ?? ""}${conventional[3] ?? ""}: `;
+    return ensureSafeCommitSubject(`${prefix}${formatSubjectBody(subject, conventional[4])}`);
+  }
+
+  return ensureSafeCommitSubject(formatSubjectBody(subject, sample));
+}
+
+function formatSubjectBody(subject: string, sampleBody: string): string {
+  let formatted = normalizedTaskSubject(subject);
+  const sampleFirstLetter = sampleBody.match(/[A-Za-z]/)?.[0];
+  if (sampleFirstLetter && sampleFirstLetter === sampleFirstLetter.toLowerCase()) {
+    formatted = lowercaseFirstLetter(formatted);
+  } else if (sampleFirstLetter && sampleFirstLetter === sampleFirstLetter.toUpperCase()) {
+    formatted = uppercaseFirstLetter(formatted);
+  }
+
+  formatted = formatted.replace(/[.!?]+$/g, "");
+  if (/\.$/.test(sampleBody.trim())) {
+    formatted = `${formatted}.`;
+  }
+  return formatted;
+}
+
+function normalizedTaskSubject(title: string): string {
+  const normalized = stripGeneratedTodoPrefix(title).replace(/\s+/g, " ").replace(/[.!?]+$/g, "").trim();
+  return normalized || DEFAULT_COMMIT_SUBJECT;
+}
+
+function ensureSafeCommitSubject(subject: string): string {
+  const normalized = stripGeneratedTodoPrefix(subject).replace(/\s+/g, " ").trim();
+  return normalized || DEFAULT_COMMIT_SUBJECT;
+}
+
+function stripGeneratedTodoPrefix(subject: string): string {
+  let cleaned = subject.trim();
+  let previous = "";
+  while (cleaned && cleaned !== previous) {
+    previous = cleaned;
+    cleaned = cleaned
+      .replace(GENERATED_TODO_COMMIT_PREFIX_RE, "")
+      .replace(TODO_LABEL_PREFIX_RE, "")
+      .replace(/^[:\s—-]+/g, "")
+      .trim();
+  }
+  return cleaned;
+}
+
+function lowercaseFirstLetter(value: string): string {
+  return value.replace(/[A-Za-z]/, (letter) => letter.toLowerCase());
+}
+
+function uppercaseFirstLetter(value: string): string {
+  return value.replace(/[A-Za-z]/, (letter) => letter.toUpperCase());
 }
 
 async function stagedArtifactPaths(root: string, runDir?: string): Promise<Set<string>> {

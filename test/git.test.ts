@@ -17,9 +17,10 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 function outcome(
   status = "done",
+  title = "Update git safety",
 ): Pick<SessionOutcome, "task" | "reportedStatus" | "done" | "error" | "timedOut" | "aborted"> {
   return {
-    task: { taskId: "7", title: "Git safety", section: "## TODO 7 — Git safety\n" },
+    task: { taskId: "7", title, section: `## TODO 7 — ${title}\n` },
     reportedStatus: status,
     done: status === "done",
     timedOut: false,
@@ -36,7 +37,7 @@ try {
   await writeFile(path.join(repo, "preexisting.txt"), "clean\n", "utf8");
   await writeFile(path.join(repo, "kept.txt"), "clean\n", "utf8");
   await git(repo, ["add", "."]);
-  await git(repo, ["commit", "-m", "initial"]);
+  await git(repo, ["commit", "-m", "Add baseline files"]);
 
   assert.equal(await gitRoot(repo), await realpath(repo));
 
@@ -66,6 +67,10 @@ try {
   });
   assert.match(commit.hash ?? "", /^[0-9a-f]+$/);
   assert.equal(commit.error, undefined);
+
+  const commitSubject = await git(repo, ["log", "-1", "--format=%s"]);
+  assert.equal(commitSubject.trim(), "Update git safety");
+  assert.doesNotMatch(commitSubject, /^Complete TODO\s+\d+\s+[—-]/i);
 
   const committedFiles = await git(repo, ["show", "--name-only", "--format=", "HEAD"]);
   assert.match(committedFiles, /kept\.txt/);
