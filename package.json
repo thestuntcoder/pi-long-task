@@ -10,7 +10,8 @@
     "src"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test"
+    "test": "node --experimental-strip-types --test",
+    "smoke:native": "node scripts/native_smoke.mjs"
   },
   "pi": {
     "extensions": ["./src/index.ts"]
