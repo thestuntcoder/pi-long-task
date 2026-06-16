@@ -24,7 +24,7 @@ A finished run gives you:
 
 ## Install
 
-After this package is published to npm, install it with:
+Install it from npm with:
 
 ```bash
 pi install npm:pi-long-task
