@@ -1,6 +1,6 @@
 {
   "name": "pi-coordinator",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Native Pi TODO coordinator extension package.",
@@ -8,6 +8,7 @@
     "pi-package"
   ],
   "files": [
+    "LICENSE",
     "README.md",
     "scripts",
     "src"
@@ -43,5 +44,15 @@
     "typebox": "^1.2.13",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.61.1"
-  }
+  },
+  "license": "MIT",
+  "author": "Dejan Jacimovic <dejan@stuntcoders.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thestuntcoder/pi-coordinator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thestuntcoder/pi-coordinator/issues"
+  },
+  "homepage": "https://github.com/thestuntcoder/pi-coordinator#readme"
 }

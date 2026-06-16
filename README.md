@@ -162,6 +162,10 @@ Suggested checks:
 
    Expected: eligible worker changes may be committed, while coordinator artifacts and any files dirty before the task remain uncommitted.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## Current limitations
 
 - Task execution is sequential initially.
