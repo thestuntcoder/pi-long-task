@@ -108,8 +108,7 @@ Suggested checks:
 
    ```bash
    cd ~/Sites/pi-coordinator
-   npm test
-   npm run typecheck
+   npm run check
    ```
 
 2. Offline load-only check, without loading your normal extension set:

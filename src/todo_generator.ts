@@ -88,7 +88,9 @@ export function validateTodoMarkdown(markdown: string): void {
   tasks.forEach((task, idx) => {
     const expectedId = String(idx + 1);
     if (task.taskId !== expectedId) {
-      throw new TodoGenerationError(`Task IDs must be sequential. Expected TODO ${expectedId}, found TODO ${task.taskId}.`);
+      throw new TodoGenerationError(
+        `Task IDs must be sequential. Expected TODO ${expectedId}, found TODO ${task.taskId}.`,
+      );
     }
 
     const progressLine = progressLineRegex(task.taskId, task.title);
@@ -171,9 +173,7 @@ function normalizeExistingTodoMarkdown(input: string): string {
 
   const globalInstructions = extractGlobalInstructions(input);
   const progress = tasks.map((task, idx) => `- [ ] TODO ${idx + 1} — ${task.title}`).join("\n");
-  const sections = tasks
-    .map((task, idx) => normalizeTaskSection({ ...task, taskId: String(idx + 1) }))
-    .join("\n\n");
+  const sections = tasks.map((task, idx) => normalizeTaskSection({ ...task, taskId: String(idx + 1) })).join("\n\n");
 
   const globalBlock = globalInstructions ? `\n\n${globalInstructions}` : "";
   return `# Pi Coordinator TODO${globalBlock}\n\n## Progress\n\n${progress}\n\n---\n\n${sections}\n`;
@@ -184,7 +184,7 @@ function extractExistingTasks(input: string): ExistingTask[] {
   const matches = [...input.matchAll(TODO_HEADING_RE)];
   return matches.map((match, idx) => {
     const bodyStart = (match.index ?? 0) + match[0].length;
-    const bodyEnd = idx + 1 < matches.length ? matches[idx + 1].index ?? input.length : input.length;
+    const bodyEnd = idx + 1 < matches.length ? (matches[idx + 1].index ?? input.length) : input.length;
     return {
       taskId: match[1],
       title: cleanTitle(match[2]),
@@ -269,7 +269,10 @@ function stripCheckboxMarker(value: string): string {
 }
 
 function cleanTitle(value: string): string {
-  return value.replace(/\s+/g, " ").trim().replace(/[.。]\s*$/, "");
+  return value
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.。]\s*$/, "");
 }
 
 function goalForTitle(title: string): string {

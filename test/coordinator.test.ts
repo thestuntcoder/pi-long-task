@@ -101,7 +101,11 @@ try {
 
   const retryCalls: Array<{ taskId: string; attempt: number; previousAttempts?: string }> = [];
   const retryWorker: WorkerRunner = async (options) => {
-    retryCalls.push({ taskId: options.task.taskId, attempt: options.attempt, previousAttempts: options.previousAttempts });
+    retryCalls.push({
+      taskId: options.task.taskId,
+      attempt: options.attempt,
+      previousAttempts: options.previousAttempts,
+    });
     return outcomeFor(options, "partial");
   };
 

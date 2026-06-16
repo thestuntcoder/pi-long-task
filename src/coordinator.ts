@@ -2,11 +2,21 @@ import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus, PiTodoCoordinatorInput } from "./types.ts";
+import type {
+  CoordinatorCommitSummary,
+  CoordinatorRemainingTask,
+  CoordinatorStatus,
+  PiTodoCoordinatorInput,
+} from "./types.ts";
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { extractResultSummary } from "./result_writer.ts";
-import { buildTodoCreationPrompt, extractTodoMarkdown, todoMarkdownFromString, validateTodoMarkdown } from "./todo_generator.ts";
+import {
+  buildTodoCreationPrompt,
+  extractTodoMarkdown,
+  todoMarkdownFromString,
+  validateTodoMarkdown,
+} from "./todo_generator.ts";
 import { incompleteTasks, markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
 import {
   createIsolatedWorkerSession,
@@ -167,12 +177,16 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       }
 
       const attempt = (previousAttempts.get(nextTask.taskId)?.length ?? 0) + 1;
-      emitProgress(runtime, `Running TODO ${nextTask.taskId} — ${nextTask.title}${attempt > 1 ? ` (attempt ${attempt})` : ""}...`, {
-        phase: "task_start",
-        taskId: nextTask.taskId,
-        title: nextTask.title,
-        attempt,
-      });
+      emitProgress(
+        runtime,
+        `Running TODO ${nextTask.taskId} — ${nextTask.title}${attempt > 1 ? ` (attempt ${attempt})` : ""}...`,
+        {
+          phase: "task_start",
+          taskId: nextTask.taskId,
+          title: nextTask.title,
+          attempt,
+        },
+      );
       const preExistingDirtyPaths = options.commit
         ? await gitDirtyPaths(runtime.cwd, runtime.taskResultPath, runtime.todoPath, runtime.runDir)
         : new Set<string>();
@@ -258,8 +272,16 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     const completedTasks = finalTasks.filter((task) => task.done).length;
     const remainingTasks = remainingTaskSummaries(finalTasks, attempts);
     const blockedTasks = remainingTasks.filter((task) => task.status === "blocked").length;
-    const failedTasks = remainingTasks.filter((task) => task.status !== "blocked" && task.status !== "not_started").length;
-    const status = deriveCoordinatorStatus({ failure, completedTasks, totalTasks: finalTasks.length, blockedTasks, failedTasks });
+    const failedTasks = remainingTasks.filter(
+      (task) => task.status !== "blocked" && task.status !== "not_started",
+    ).length;
+    const status = deriveCoordinatorStatus({
+      failure,
+      completedTasks,
+      totalTasks: finalTasks.length,
+      blockedTasks,
+      failedTasks,
+    });
     const summary = failure
       ? `Coordinator ${status}: ${failure}`
       : `Coordinator completed ${completedTasks}/${finalTasks.length} task(s).`;
@@ -385,7 +407,8 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     taskResultPath: path.join(runDir, "TASK_RESULT.md"),
     maxAttemptsPerTask: positiveInteger(options.maxAttemptsPerTask, DEFAULT_COORDINATOR_OPTIONS.maxAttemptsPerTask),
     taskTimeoutSeconds: positiveMilliseconds(options.taskTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.taskTimeoutMs) / 1000,
-    maxBashTimeoutSeconds: positiveMilliseconds(options.maxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
+    maxBashTimeoutSeconds:
+      positiveMilliseconds(options.maxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
     taskThinking: options.taskThinking ?? DEFAULT_COORDINATOR_OPTIONS.taskThinking,
     todoThinking: options.todoThinking ?? DEFAULT_COORDINATOR_OPTIONS.todoThinking,
     workerRunner: options.workerRunner ?? runWorkerTask,

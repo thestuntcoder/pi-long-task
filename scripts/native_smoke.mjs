@@ -101,9 +101,7 @@ async function runSmokeCase(testCase) {
   });
 
   if (result.code !== 0) {
-    throw new Error(
-      `[${testCase.name}] pi exited with ${result.code}. stdout: ${stdoutPath}; stderr: ${stderrPath}`,
-    );
+    throw new Error(`[${testCase.name}] pi exited with ${result.code}. stdout: ${stdoutPath}; stderr: ${stderrPath}`);
   }
 
   const events = parseJsonEvents(result.stdout);

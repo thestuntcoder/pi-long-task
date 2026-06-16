@@ -44,7 +44,9 @@ assert.match(prompt, /```markdown\nGlobal guardrail\.\n```/);
 assert.match(prompt, /Assigned task content only:/);
 assert.match(prompt, /Previous attempts for this same assigned task/);
 assert.match(prompt, /Do not run bash commands with timeout greater than 300 seconds/);
-assert.ok(prompt.endsWith("Only use `status: done` if the assigned task is fully complete and verified as far as practical."));
+assert.ok(
+  prompt.endsWith("Only use `status: done` if the assigned task is fully complete and verified as far as practical."),
+);
 
 const noCommitPrompt = buildTaskPrompt({
   todoPath: "/tmp/TODO.md",
@@ -91,7 +93,10 @@ assert.equal(
   "last",
 );
 assert.equal(assistantTextFromEvent({ message: { role: "assistant", content: "event message" } }), "event message");
-assert.equal(assistantTextFromEvent({ messages: [{ role: "assistant", content: "event messages" }] }), "event messages");
+assert.equal(
+  assistantTextFromEvent({ messages: [{ role: "assistant", content: "event messages" }] }),
+  "event messages",
+);
 assert.equal(assistantTextFromEvent({ role: "assistant", content: "direct event" }), "direct event");
 assert.equal(
   lastAssistantTextFromEvents([

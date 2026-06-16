@@ -3,6 +3,7 @@
 Goal: Build a standalone/native Pi extension package that replaces `scripts/pi_todo_coordinator.py` without wrapping or spawning that Python script. The resulting extension must expose only one public tool input shape: `{ inputText: string, commit: boolean }`.
 
 Global constraints for every task:
+
 - Do not run `git commit`; the outer coordinator handles commits if enabled.
 - Do not edit `TASK_RESULT.md`; the outer coordinator writes it.
 - Do not depend on `scripts/pi_todo_coordinator.py` from the new extension implementation.
@@ -35,6 +36,7 @@ Global constraints for every task:
 **Goal:** Create a standalone Pi extension package directory for the native coordinator.
 
 **Status:**
+
 - [x] Create package structure
 - [x] Add Pi package manifest
 - [x] Register stub extension tool
@@ -85,6 +87,7 @@ Use peer dependencies for Pi-provided packages:
 The stub can return a placeholder response until later TODOs wire in real behavior.
 
 **Verify:**
+
 - Run a command that loads the extension without executing real model work, for example `pi --offline --no-extensions -e ~/Sites/pi-coordinator --list-models`.
 - Confirm no TypeScript/runtime loading errors are reported.
 
@@ -97,6 +100,7 @@ The stub can return a placeholder response until later TODOs wire in real behavi
 **Goal:** Port the pure TODO parsing/progress logic from the Python coordinator into TypeScript.
 
 **Status:**
+
 - [x] Define task-related types
 - [x] Parse task headings
 - [x] Parse progress checklist status
@@ -136,6 +140,7 @@ export function todoGlobalInstructions(markdown: string, limit?: number): string
 Keep regex compatibility with the current Python script, including both em dash and hyphen separators.
 
 **Verify:**
+
 - Add focused tests or a small local script for parsing an example TODO markdown file.
 - Confirm marked-done output preserves the rest of the file content.
 
@@ -148,6 +153,7 @@ Keep regex compatibility with the current Python script, including both em dash 
 **Goal:** Convert raw `inputText` into coordinator-compatible TODO markdown.
 
 **Status:**
+
 - [x] Detect existing coordinator TODO markdown
 - [x] Convert simple bullet/numbered lists locally
 - [x] Add TODO planner prompt builder for complex raw input
@@ -157,6 +163,7 @@ Keep regex compatibility with the current Python script, including both em dash 
 Implement `src/todo_generator.ts`.
 
 Behavior:
+
 1. If input already contains task headings like `## TODO N — Title`, normalize it and add a progress checklist if missing.
 2. If input is a simple bullet/numbered list with multiple items, generate TODO markdown locally without model work.
 3. For complex raw input, provide a TODO planner flow that can use a native Pi SDK session in a later TODO or can be called by the coordinator once worker sessions exist.
@@ -184,6 +191,7 @@ The generated markdown must include:
 - `**Done when:**`
 
 **Verify:**
+
 - Add tests for existing TODO input, bullet list input, numbered list input, and complex single-paragraph input prompt construction.
 
 **Done when:** Raw text can be converted or prepared for conversion into valid coordinator-compatible TODO markdown.
@@ -195,6 +203,7 @@ The generated markdown must include:
 **Goal:** Port prompt construction and worker result parsing into TypeScript.
 
 **Status:**
+
 - [x] Build assigned-task worker prompt
 - [x] Build timeout/shutdown steering messages
 - [x] Extract assistant text from Pi messages/events
@@ -234,6 +243,7 @@ Keep status sets compatible with the Python script:
 - partial-like: `partial`, `incomplete`, `blocked`, `failed`, `failure`, `unknown`
 
 **Verify:**
+
 - Add tests for parsing final assistant messages with and without fenced text.
 - Add tests for status extraction from a `TASK_RESULT` block.
 
@@ -246,6 +256,7 @@ Keep status sets compatible with the Python script:
 **Goal:** Replace `pi --mode rpc` worker subprocesses with isolated native Pi SDK sessions.
 
 **Status:**
+
 - [x] Create isolated worker session factory
 - [x] Disable extension discovery for worker sessions
 - [x] Run one assigned task prompt
@@ -263,6 +274,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
 ```
 
 Worker session requirements:
+
 - Fresh isolated session per task.
 - Use `SessionManager.inMemory(cwd)` unless a debug option later enables persistence.
 - Use selected built-in coding tools.
@@ -277,6 +289,7 @@ Worker session requirements:
 This task may need to consult Pi SDK docs/examples for exact `createAgentSession`, `DefaultResourceLoader`, `SessionManager`, and extension-disabling APIs.
 
 **Verify:**
+
 - Add a fake or mocked worker-session test if practical.
 - If live model calls are available, run one minimal smoke task in a disposable directory with commit disabled.
 
@@ -289,6 +302,7 @@ This task may need to consult Pi SDK docs/examples for exact `createAgentSession
 **Goal:** Wire TODO generation, parsing, worker sessions, result writing, retries, and completion marking into the main coordinator.
 
 **Status:**
+
 - [x] Create run directory and artifact paths
 - [x] Generate or normalize TODO markdown from `inputText`
 - [x] Run incomplete tasks sequentially
@@ -338,6 +352,7 @@ tmp/pi-coordinator/<run-id>/
 Do not use a public tool parameter for artifact path, models, timeouts, attempts, or TODO file path.
 
 **Verify:**
+
 - Use mocked worker outcomes to test sequential orchestration.
 - Confirm done tasks are marked and failed tasks stop after max attempts.
 
@@ -350,6 +365,7 @@ Do not use a public tool parameter for artifact path, models, timeouts, attempts
 **Goal:** Add safe optional commit behavior matching the Python coordinator.
 
 **Status:**
+
 - [x] Detect git root
 - [x] Capture pre-existing dirty paths
 - [x] Stage worker changes after each task
@@ -370,6 +386,7 @@ Port these behaviors:
 - `commit_after_session`
 
 Safety requirements:
+
 - Never commit `TASK_RESULT.md`.
 - Never commit generated `TODO.md`.
 - Never commit any file under `tmp/pi-coordinator/<run-id>/`.
@@ -379,6 +396,7 @@ Safety requirements:
 - Use commit messages like `Complete TODO 1 — Title` or `Progress TODO 1 — Title`.
 
 **Verify:**
+
 - Add tests in a temporary git repository if practical.
 - Confirm pre-existing dirty files are left uncommitted.
 - Confirm coordinator artifacts are left uncommitted.
@@ -392,6 +410,7 @@ Safety requirements:
 **Goal:** Make the outer Pi tool pleasant to use while the coordinator runs.
 
 **Status:**
+
 - [x] Emit progress through `onUpdate`
 - [x] Return concise final text
 - [x] Return structured details
@@ -409,6 +428,7 @@ TODO 2 blocked
 ```
 
 Final tool result text should include:
+
 - overall status
 - completed/failed/blocked task counts
 - result file path
@@ -432,6 +452,7 @@ Structured `details` should include:
 A custom renderer is optional. If implemented, keep it compact and readable in collapsed mode.
 
 **Verify:**
+
 - Run a coordinator smoke test or mocked run and confirm progress updates are visible.
 - Confirm final result includes artifact paths and machine-usable details.
 
@@ -444,6 +465,7 @@ A custom renderer is optional. If implemented, keep it compact and readable in c
 **Goal:** Cover the high-risk pure logic with automated tests.
 
 **Status:**
+
 - [x] Add test runner configuration if needed
 - [x] Test TODO parser
 - [x] Test TODO generator
@@ -469,6 +491,7 @@ Test cases should include:
 Avoid live model calls in automated tests. Mock worker session outcomes.
 
 **Verify:**
+
 - Run the package test command.
 - Ensure tests do not require network/API keys.
 
@@ -481,6 +504,7 @@ Avoid live model calls in automated tests. Mock worker session outcomes.
 **Goal:** Document installation, usage, guarantees, and migration from the Python coordinator.
 
 **Status:**
+
 - [x] Add package README
 - [x] Document public tool schema
 - [x] Document safety guarantees
@@ -528,6 +552,7 @@ Use pi_todo_coordinator with inputText "add tests for X and fix failures" and co
 - smoke-test command suggestions.
 
 **Verify:**
+
 - Follow the README commands in a disposable project or with offline load-only checks.
 
 **Done when:** A future user can install, invoke, and validate the native extension without reading the implementation.

@@ -31,7 +31,10 @@ assert.match(normalized, /\*\*Goal:\*\*/);
 assert.match(normalized, /\*\*Verify:\*\*/);
 assert.match(normalized, /\*\*Done when:\*\*/);
 validateTodoMarkdown(normalized);
-assert.deepEqual(parseTasks(normalized).map((task) => [task.taskId, task.title]), [["1", "Wire coordinator"]]);
+assert.deepEqual(
+  parseTasks(normalized).map((task) => [task.taskId, task.title]),
+  [["1", "Wire coordinator"]],
+);
 
 const bulletMarkdown = todoMarkdownFromString(`- Add native parser
 - Implement worker runner
@@ -54,7 +57,8 @@ assert.deepEqual(
 );
 assert.match(numberedMarkdown, /\*\*Status:\*\*\n- \[ \] Complete read inputs/);
 
-const rawParagraph = "Build a native coordinator that can split a broad request into safe worker tasks and report progress.";
+const rawParagraph =
+  "Build a native coordinator that can split a broad request into safe worker tasks and report progress.";
 assert.equal(todoMarkdownFromString(rawParagraph), undefined);
 const prompt = buildTodoCreationPrompt(rawParagraph);
 assert.match(prompt, /Convert the following raw project request/);

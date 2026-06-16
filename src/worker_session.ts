@@ -511,7 +511,10 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
         timedOut = true;
         await requestGracefulTaskResult(buildTimeLimitMessage(taskTimeoutSeconds), { shutdown: true });
         if (gracefulShutdownSeconds > 0) {
-          schedule(() => abortSession(`task exceeded ${taskTimeoutSeconds.toFixed(0)}s timeout`), gracefulShutdownSeconds * 1000);
+          schedule(
+            () => abortSession(`task exceeded ${taskTimeoutSeconds.toFixed(0)}s timeout`),
+            gracefulShutdownSeconds * 1000,
+          );
         }
       }, taskTimeoutSeconds * 1000);
     }
@@ -540,7 +543,9 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
   }
 
   if ((error || aborted || timedOut) && !hasTaskResult(assistantText)) {
-    assistantText = buildCoordinatorFailureTaskResult(error ?? (timedOut ? "task timed out" : "worker session aborted"));
+    assistantText = buildCoordinatorFailureTaskResult(
+      error ?? (timedOut ? "task timed out" : "worker session aborted"),
+    );
   }
 
   const reportedStatus = parseReportedStatus(assistantText);

@@ -15,7 +15,9 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return result.stdout;
 }
 
-function outcome(status = "done"): Pick<SessionOutcome, "task" | "reportedStatus" | "done" | "error" | "timedOut" | "aborted"> {
+function outcome(
+  status = "done",
+): Pick<SessionOutcome, "task" | "reportedStatus" | "done" | "error" | "timedOut" | "aborted"> {
   return {
     task: { taskId: "7", title: "Git safety", section: "## TODO 7 — Git safety\n" },
     reportedStatus: status,
