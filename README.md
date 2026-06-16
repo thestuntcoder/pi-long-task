@@ -119,7 +119,20 @@ Suggested checks:
 
    Expected: Pi starts, emits a JSON session line, and exits without extension-load errors.
 
-3. Disposable real run with commits disabled:
+3. Automated native end-to-end smoke through Pi:
+
+   ```bash
+   npm run smoke:native
+   ```
+
+   This creates disposable git repos, invokes `pi_todo_coordinator` through `pi -p --mode json --no-extensions -e <this package>`, and verifies both `commit: false` and `commit: true`. It requires usable model/API credentials for Pi and the coordinator worker model. Useful options:
+
+   ```bash
+   PI_SMOKE_MODEL=openai-codex/gpt-5.5:minimal npm run smoke:native
+   PI_SMOKE_KEEP=1 npm run smoke:native
+   ```
+
+4. Manual disposable real run with commits disabled:
 
    ```bash
    tmpdir=$(mktemp -d)
@@ -138,7 +151,7 @@ Suggested checks:
 
    Expected: the tool runs only if a usable model/API login is available; no commits are created because `commit` is `false`.
 
-4. Optional disposable commit check:
+5. Optional manual disposable commit check:
 
    Repeat the previous test with `commit true`, then inspect:
 
