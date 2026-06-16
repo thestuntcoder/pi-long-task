@@ -644,7 +644,7 @@ async function resolveWorkerModel(modelRegistry: unknown, modelName: string): Pr
   return undefined;
 }
 
-function disableExtensionsForWorker(
+export function disableExtensionsForWorker(
   resourceLoader: unknown,
   createRuntime: () => unknown,
 ): {

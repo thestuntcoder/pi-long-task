@@ -6,6 +6,7 @@ import {
   buildCompactionInstructions,
   buildMissingTaskResultMessage,
   buildShutdownMessage,
+  disableExtensionsForWorker,
   buildTaskPrompt,
   buildTimeLimitMessage,
   lastAssistantTextFromEvents,
@@ -206,3 +207,65 @@ assert.ok(
     item.includes("missing TASK_RESULT status after initial prompt"),
   ),
 );
+
+const missingCredentialsOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => {
+    throw new Error("No API credentials available for worker model");
+  },
+});
+assert.equal(missingCredentialsOutcome.reportedStatus, "partial");
+assert.equal(missingCredentialsOutcome.done, false);
+assert.equal(missingCredentialsOutcome.error, "No API credentials available for worker model");
+assert.match(missingCredentialsOutcome.assistantText, /Coordinator\/session error: No API credentials available/);
+assert.equal(missingCredentialsOutcome.aborted, false);
+
+const extensionLoaderCalls: string[] = [];
+const fakeResourceLoader = {
+  getExtensions() {
+    extensionLoaderCalls.push("getExtensions");
+    return { extensions: ["must not leak"], errors: ["must not leak"], runtime: "must not leak" };
+  },
+  getSkills() {
+    return { skills: ["skill"], diagnostics: [] };
+  },
+  getPrompts() {
+    return { prompts: ["prompt"], diagnostics: [] };
+  },
+  getThemes() {
+    return { themes: ["theme"], diagnostics: [] };
+  },
+  getAgentsFiles() {
+    return { agentsFiles: ["AGENTS.md"] };
+  },
+  getSystemPrompt() {
+    return "system";
+  },
+  getAppendSystemPrompt() {
+    return ["append"];
+  },
+  extendResources(paths: unknown) {
+    extensionLoaderCalls.push(`extendResources:${String(paths)}`);
+  },
+  async reload() {
+    extensionLoaderCalls.push("reload");
+  },
+};
+const runtime = { runtime: true };
+const isolatedLoader = disableExtensionsForWorker(fakeResourceLoader, () => runtime);
+assert.deepEqual(isolatedLoader.getExtensions(), { extensions: [], errors: [], runtime });
+assert.deepEqual(isolatedLoader.getSkills(), { skills: ["skill"], diagnostics: [] });
+assert.deepEqual(isolatedLoader.getPrompts(), { prompts: ["prompt"], diagnostics: [] });
+assert.deepEqual(isolatedLoader.getThemes(), { themes: ["theme"], diagnostics: [] });
+assert.deepEqual(isolatedLoader.getAgentsFiles(), { agentsFiles: ["AGENTS.md"] });
+assert.equal(isolatedLoader.getSystemPrompt(), "system");
+assert.deepEqual(isolatedLoader.getAppendSystemPrompt(), ["append"]);
+isolatedLoader.extendResources("extra");
+await isolatedLoader.reload();
+assert.deepEqual(extensionLoaderCalls, ["extendResources:extra", "reload"]);
