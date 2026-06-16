@@ -49,6 +49,7 @@ assert.deepEqual(
     done: task.done,
     progressDone: task.progressDone,
     statusCheckboxes: task.statusCheckboxes,
+    statusItems: task.statusItems,
   })),
   [
     {
@@ -57,6 +58,10 @@ assert.deepEqual(
       done: false,
       progressDone: false,
       statusCheckboxes: [false, true],
+      statusItems: [
+        { text: "Define behavior", done: false },
+        { text: "Keep existing checks", done: true },
+      ],
     },
     {
       taskId: "2",
@@ -64,6 +69,7 @@ assert.deepEqual(
       done: true,
       progressDone: true,
       statusCheckboxes: [false],
+      statusItems: [{ text: "Progress overrides this unchecked status", done: false }],
     },
     {
       taskId: "10",
@@ -71,6 +77,7 @@ assert.deepEqual(
       done: false,
       progressDone: false,
       statusCheckboxes: [true],
+      statusItems: [{ text: "Already done internally", done: true }],
     },
   ],
 );

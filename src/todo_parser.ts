@@ -1,3 +1,8 @@
+export interface TaskStatusItem {
+  text: string;
+  done: boolean;
+}
+
 export interface Task {
   taskId: string;
   title: string;
@@ -7,6 +12,7 @@ export interface Task {
   done: boolean;
   progressDone?: boolean;
   statusCheckboxes: boolean[];
+  statusItems: TaskStatusItem[];
 }
 
 export class TodoParseError extends Error {
@@ -78,10 +84,10 @@ function findProgressDone(lines: string[], taskId: string): boolean | undefined 
   return undefined;
 }
 
-function findStatusCheckboxes(lines: string[], startIdx: number, endIdx: number): boolean[] {
+function findStatusItems(lines: string[], startIdx: number, endIdx: number): TaskStatusItem[] {
   let inStatus = false;
   let seenCheckbox = false;
-  const checkboxes: boolean[] = [];
+  const items: TaskStatusItem[] = [];
 
   for (let idx = startIdx; idx < endIdx; idx += 1) {
     const stripped = lines[idx].trim();
@@ -97,7 +103,10 @@ function findStatusCheckboxes(lines: string[], startIdx: number, endIdx: number)
     const checkbox = CHECKBOX_RE.exec(stripLineBreaks(lines[idx]));
     if (checkbox) {
       seenCheckbox = true;
-      checkboxes.push(checkbox[2].toLowerCase() === "x");
+      items.push({
+        text: checkbox[3].replace(/^\]\s*/, "").trim(),
+        done: checkbox[2].toLowerCase() === "x",
+      });
       continue;
     }
 
@@ -110,7 +119,7 @@ function findStatusCheckboxes(lines: string[], startIdx: number, endIdx: number)
     }
   }
 
-  return checkboxes;
+  return items;
 }
 
 function markStatusBlockDone(lines: string[], startIdx: number, endIdx: number): void {
@@ -161,7 +170,8 @@ export function parseTasks(markdown: string): Task[] {
     const endIdx = pos + 1 < headings.length ? headings[pos + 1].startIdx : lines.length;
     const section = `${lines.slice(heading.startIdx, endIdx).join("").trimEnd()}\n`;
     const progressDone = findProgressDone(lines, heading.taskId);
-    const statusCheckboxes = findStatusCheckboxes(lines, heading.startIdx, endIdx);
+    const statusItems = findStatusItems(lines, heading.startIdx, endIdx);
+    const statusCheckboxes = statusItems.map((item) => item.done);
     const done = progressDone ?? (statusCheckboxes.length > 0 ? statusCheckboxes.every(Boolean) : false);
 
     const task: Task = {
@@ -172,6 +182,7 @@ export function parseTasks(markdown: string): Task[] {
       endLine: endIdx,
       done,
       statusCheckboxes,
+      statusItems,
     };
     if (progressDone !== undefined) {
       task.progressDone = progressDone;
