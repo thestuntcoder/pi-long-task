@@ -214,7 +214,10 @@ function formatSubjectBody(subject: string, sampleBody: string): string {
 }
 
 function normalizedTaskSubject(title: string): string {
-  const normalized = stripGeneratedTodoPrefix(title).replace(/\s+/g, " ").replace(/[.!?]+$/g, "").trim();
+  const normalized = stripGeneratedTodoPrefix(title)
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "")
+    .trim();
   return normalized || DEFAULT_COMMIT_SUBJECT;
 }
 
