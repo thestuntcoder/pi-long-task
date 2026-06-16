@@ -630,7 +630,8 @@ async function resolveWorkerModel(modelRegistry: unknown, modelName: string): Pr
   try {
     const ai = await import("@earendil-works/pi-ai");
     if (typeof ai.getModel === "function" && provider && modelId) {
-      return ai.getModel(provider, modelId);
+      const getModel = ai.getModel as (providerName: string, modelId: string) => unknown;
+      return getModel(provider, modelId);
     }
   } catch {
     // Optional peer resolution can fail in tests that inject a session factory.

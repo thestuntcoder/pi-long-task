@@ -104,11 +104,12 @@ If you previously enabled Python-side commits, pass `commit true` instead. The n
 
 Suggested checks:
 
-1. Run package tests from the extension directory:
+1. Run package checks from the extension directory:
 
    ```bash
    cd ~/Sites/pi-coordinator
    npm test
+   npm run typecheck
    ```
 
 2. Offline load-only check, without loading your normal extension set:
