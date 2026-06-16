@@ -269,3 +269,152 @@ assert.deepEqual(isolatedLoader.getAppendSystemPrompt(), ["append"]);
 isolatedLoader.extendResources("extra");
 await isolatedLoader.reload();
 assert.deepEqual(extensionLoaderCalls, ["extendResources:extra", "reload"]);
+
+class AbortableWorkerSession {
+  prompts: string[] = [];
+  messages: unknown[] = [];
+  abortCalls = 0;
+  disposeCalls = 0;
+  private listeners: Array<(event: unknown) => void> = [];
+  private resolvePromptStarted: (() => void) | undefined;
+  private resolvePrompt: (() => void) | undefined;
+  readonly promptStarted = new Promise<void>((resolve) => {
+    this.resolvePromptStarted = resolve;
+  });
+
+  subscribe(listener: (event: unknown) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((item) => item !== listener);
+    };
+  }
+
+  async prompt(text: string): Promise<void> {
+    this.prompts.push(text);
+    this.resolvePromptStarted?.();
+    await new Promise<void>((resolve) => {
+      this.resolvePrompt = resolve;
+    });
+  }
+
+  async abort(): Promise<void> {
+    this.abortCalls += 1;
+    this.resolvePrompt?.();
+  }
+
+  dispose(): void {
+    this.disposeCalls += 1;
+  }
+}
+
+const abortController = new AbortController();
+const abortableSession = new AbortableWorkerSession();
+const abortOutcomePromise = runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  abortSignal: abortController.signal,
+  sessionFactory: async () => ({ session: abortableSession }),
+});
+await abortableSession.promptStarted;
+abortController.abort();
+const abortOutcome = await abortOutcomePromise;
+assert.equal(abortableSession.abortCalls, 1);
+assert.equal(abortableSession.disposeCalls, 1);
+assert.equal(abortOutcome.aborted, true);
+assert.equal(abortOutcome.shutdownRequested, true);
+assert.equal(abortOutcome.error, "worker session aborted by outer signal");
+assert.equal(abortOutcome.reportedStatus, "partial");
+assert.match(abortOutcome.assistantText, /Coordinator\/session error: worker session aborted by outer signal/);
+
+class RunningBashWorkerSession {
+  prompts: string[] = [];
+  steers: string[] = [];
+  messages: unknown[] = [];
+  isBashRunning = false;
+  isStreaming = false;
+  abortBashCalls = 0;
+  private listeners: Array<(event: unknown) => void> = [];
+  private resolvePrompt: (() => void) | undefined;
+
+  subscribe(listener: (event: unknown) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((item) => item !== listener);
+    };
+  }
+
+  async prompt(text: string): Promise<void> {
+    this.prompts.push(text);
+    this.isBashRunning = true;
+    this.emit({ type: "tool_execution_start", toolName: "bash", args: { command: "sleep 60", timeout: 60 } });
+    await new Promise<void>((resolve) => {
+      this.resolvePrompt = resolve;
+    });
+  }
+
+  async steer(text: string): Promise<void> {
+    this.steers.push(text);
+    this.isBashRunning = false;
+    const response = `TASK_RESULT:
+status: partial
+summary: stopped at coordinator timeout
+changes:
+- none
+verification:
+- not completed
+remaining:
+- retry task`;
+    const message = { role: "assistant", content: response };
+    this.messages.push(message);
+    this.emit({ type: "message_start", message: { role: "assistant" } });
+    this.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: response } });
+    this.emit({ type: "message_end", message });
+    this.emit({ type: "tool_execution_end", toolName: "bash", isError: true });
+    this.emit({ type: "turn_end", message, toolResults: [] });
+    this.emit({ type: "agent_end", messages: this.messages });
+    this.resolvePrompt?.();
+  }
+
+  abortBash(): void {
+    this.abortBashCalls += 1;
+  }
+
+  getLastAssistantText(): string | undefined {
+    return lastAssistantTextFromMessages(this.messages);
+  }
+
+  dispose(): void {}
+
+  private emit(event: unknown): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+}
+
+const runningBashSession = new RunningBashWorkerSession();
+const timeoutOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0.001,
+  gracefulShutdownSeconds: 0,
+  sessionFactory: async () => ({ session: runningBashSession }),
+});
+assert.equal(timeoutOutcome.timedOut, true);
+assert.equal(timeoutOutcome.shutdownRequested, true);
+assert.equal(timeoutOutcome.aborted, false);
+assert.equal(timeoutOutcome.reportedStatus, "partial");
+assert.equal(runningBashSession.abortBashCalls, 1);
+assert.equal(runningBashSession.steers.length, 1);
+assert.match(runningBashSession.steers[0], /reached its 0s time budget/);
+assert.ok(timeoutOutcome.compactionEvents.includes("aborted running bash before graceful shutdown request"));
+assert.ok(timeoutOutcome.events.some((event) => event.type === "tool_execution_start" && event.toolName === "bash"));
