@@ -8,7 +8,7 @@ import {
   TodoParseError,
 } from "../src/todo_parser.ts";
 
-const markdown = `# Pi Coordinator TODO
+const markdown = `# Pi Long Task TODO
 
 Global guardrail line.
 
@@ -81,7 +81,7 @@ assert.deepEqual(
   ["1", "10"],
 );
 
-const expectedMarked = `# Pi Coordinator TODO
+const expectedMarked = `# Pi Long Task TODO
 
 Global guardrail line.
 
@@ -129,7 +129,7 @@ const statusOnly = `## TODO 3 — Status only
 - [X] Step two
 `;
 assert.equal(parseTasks(statusOnly)[0].done, true);
-assert.equal(todoGlobalInstructions(markdown), "# Pi Coordinator TODO\n\nGlobal guardrail line.");
+assert.equal(todoGlobalInstructions(markdown), "# Pi Long Task TODO\n\nGlobal guardrail line.");
 assert.equal(todoGlobalInstructions("Intro\n## TODO 1 — Direct task\nbody"), "Intro");
-assert.equal(todoGlobalInstructions("abcdef", 3), "abc\n\n[truncated by coordinator]");
+assert.equal(todoGlobalInstructions("abcdef", 3), "abc\n\n[truncated by Pi Long Task]");
 assert.throws(() => parseTasks("# no tasks\n"), TodoParseError);

@@ -39,7 +39,7 @@ assert.match(prompt, /You are one Pi SDK worker session assigned to exactly one 
 assert.match(prompt, /Assigned TODO file path: `\/tmp\/TODO.md`/);
 assert.match(prompt, /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
 assert.match(prompt, /Attempt: 2/);
-assert.match(prompt, /The coordinator will commit after your session if needed\. Do not run git commit\./);
+assert.match(prompt, /Pi Long Task will commit after your session if needed\. Do not run git commit\./);
 assert.match(prompt, /Global instructions from the TODO file apply to this task:/);
 assert.match(prompt, /```markdown\nGlobal guardrail\.\n```/);
 assert.match(prompt, /Assigned task content only:/);
@@ -56,16 +56,16 @@ const noCommitPrompt = buildTaskPrompt({
   commitRequested: false,
   maxBashTimeoutSeconds: 120,
 });
-assert.match(noCommitPrompt, /Do not run git commit\. The coordinator was started with commits disabled\./);
+assert.match(noCommitPrompt, /Do not run git commit\. Pi Long Task was started with commits disabled\./);
 assert.doesNotMatch(noCommitPrompt, /Previous attempts for this same assigned task/);
 
 assert.equal(
   buildTimeLimitMessage(12.4),
-  "Coordinator notice: this worker session has reached its 12s time budget.\nStop after the current safe point. Do not start more implementation work.\nFinish with the required TASK_RESULT block now.\nUse `status: done` only if the assigned task is actually complete; otherwise use `status: partial`.",
+  "Pi Long Task notice: this worker session has reached its 12s time budget.\nStop after the current safe point. Do not start more implementation work.\nFinish with the required TASK_RESULT block now.\nUse `status: done` only if the assigned task is actually complete; otherwise use `status: partial`.",
 );
 assert.equal(
   buildShutdownMessage(91.23),
-  "Coordinator notice: context usage is 91.2%, above the 85% shutdown threshold.\nStop after the current safe point. Do not start more implementation work.\nLeave files in a safe state and finish with the required TASK_RESULT block.\nUse `status: done` only if the assigned task is actually complete; otherwise use `status: partial`.",
+  "Pi Long Task notice: context usage is 91.2%, above the 85% shutdown threshold.\nStop after the current safe point. Do not start more implementation work.\nLeave files in a safe state and finish with the required TASK_RESULT block.\nUse `status: done` only if the assigned task is actually complete; otherwise use `status: partial`.",
 );
 assert.equal(
   buildCompactionInstructions(task),
@@ -223,7 +223,7 @@ const missingCredentialsOutcome = await runWorkerTask({
 assert.equal(missingCredentialsOutcome.reportedStatus, "partial");
 assert.equal(missingCredentialsOutcome.done, false);
 assert.equal(missingCredentialsOutcome.error, "No API credentials available for worker model");
-assert.match(missingCredentialsOutcome.assistantText, /Coordinator\/session error: No API credentials available/);
+assert.match(missingCredentialsOutcome.assistantText, /Pi Long Task\/session error: No API credentials available/);
 assert.equal(missingCredentialsOutcome.aborted, false);
 
 const extensionLoaderCalls: string[] = [];
@@ -329,7 +329,7 @@ assert.equal(abortOutcome.aborted, true);
 assert.equal(abortOutcome.shutdownRequested, true);
 assert.equal(abortOutcome.error, "worker session aborted by outer signal");
 assert.equal(abortOutcome.reportedStatus, "partial");
-assert.match(abortOutcome.assistantText, /Coordinator\/session error: worker session aborted by outer signal/);
+assert.match(abortOutcome.assistantText, /Pi Long Task\/session error: worker session aborted by outer signal/);
 
 class RunningBashWorkerSession {
   prompts: string[] = [];
@@ -362,7 +362,7 @@ class RunningBashWorkerSession {
     this.isBashRunning = false;
     const response = `TASK_RESULT:
 status: partial
-summary: stopped at coordinator timeout
+summary: stopped at Pi Long Task timeout
 changes:
 - none
 verification:

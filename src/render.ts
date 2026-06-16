@@ -28,7 +28,7 @@ export function formatCoordinatorResultMessage(result: CoordinatorResultForRende
   const commits = result.commits ?? [];
   const remainingCount = Math.max(0, result.totalTasks - result.completedTasks);
   const lines = [
-    `Pi TODO coordinator: ${result.status}`,
+    `Pi Long Task: ${result.status}`,
     `Tasks: ${result.completedTasks} completed, ${result.failedTasks} failed, ${result.blockedTasks} blocked, ${remainingCount} remaining (${result.totalTasks} total).`,
     `Result file: ${resultPath}`,
     `TODO file: ${result.todoPath}`,
@@ -60,50 +60,46 @@ export function formatCoordinatorResultMessage(result: CoordinatorResultForRende
   return lines.join("\n");
 }
 
-export function renderCoordinatorToolCall(args: { inputText?: string; commit?: boolean }, theme: Theme): Text {
+export function renderLongTaskToolCall(args: { inputText?: string; commit?: boolean }, theme: Theme): Text {
   const commit = args.commit ? theme.fg("warning", "commit:on") : theme.fg("dim", "commit:off");
   const input = oneLine(args.inputText ?? "");
   const preview = input ? ` ${theme.fg("muted", quote(truncatePlain(input, 96)))}` : "";
-  return new Text(`${theme.fg("toolTitle", theme.bold("pi_todo_coordinator"))} ${commit}${preview}`, 0, 0);
+  return new Text(`${theme.fg("toolTitle", theme.bold("pi_long_task"))} ${commit}${preview}`, 0, 0);
 }
 
-export function renderCoordinatorToolResult(
+export function renderLongTaskToolResult(
   result: AgentToolResult<unknown>,
   options: ToolRenderResultOptions,
   theme: Theme,
 ): Text {
   const details = recordOrUndefined(result.details);
   if (options.isPartial) {
-    return new Text(renderCoordinatorProgress(details, contentText(result), theme), 0, 0);
+    return new Text(renderLongTaskProgress(details, contentText(result), theme), 0, 0);
   }
 
-  const finalDetails = coordinatorDetails(details);
+  const finalDetails = longTaskDetails(details);
   if (!finalDetails) {
     return new Text(contentText(result), 0, 0);
   }
 
-  return new Text(renderCoordinatorSummary(finalDetails, options.expanded, theme), 0, 0);
+  return new Text(renderLongTaskSummary(finalDetails, options.expanded, theme), 0, 0);
 }
 
-function renderCoordinatorProgress(
-  details: Record<string, unknown> | undefined,
-  fallback: string,
-  theme: Theme,
-): string {
-  const message = stringValue(details?.message) || firstLine(fallback) || "Coordinator is running...";
+function renderLongTaskProgress(details: Record<string, unknown> | undefined, fallback: string, theme: Theme): string {
+  const message = stringValue(details?.message) || firstLine(fallback) || "Pi Long Task is running...";
   const phase = stringValue(details?.phase);
   const toolName = stringValue(details?.toolName);
   const prefix = phase === "worker_tool" && toolName ? `worker ${toolName}` : phase || "progress";
   return `${theme.fg("accent", "●")} ${theme.fg("muted", prefix)} ${message}`;
 }
 
-function renderCoordinatorSummary(details: CoordinatorToolRenderDetails, expanded: boolean, theme: Theme): string {
+function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: boolean, theme: Theme): string {
   const remainingCount = Math.max(0, details.totalTasks - details.completedTasks);
   const statusStyle = statusColor(details.status);
   const icon = details.status === "done" ? "✓" : details.status === "failed" ? "✗" : "!";
   const commitCount = (details.commits ?? []).filter((commit) => commit.hash).length;
   const summary = [
-    `${theme.fg(statusStyle, icon)} ${theme.fg("toolTitle", theme.bold("Pi TODO coordinator"))} ${theme.fg(statusStyle, details.status)}`,
+    `${theme.fg(statusStyle, icon)} ${theme.fg("toolTitle", theme.bold("Pi Long Task"))} ${theme.fg(statusStyle, details.status)}`,
     theme.fg("muted", `${details.completedTasks}/${details.totalTasks} tasks`),
     details.failedTasks ? theme.fg("error", `${details.failedTasks} failed`) : undefined,
     details.blockedTasks ? theme.fg("warning", `${details.blockedTasks} blocked`) : undefined,
@@ -145,7 +141,7 @@ function renderCoordinatorSummary(details: CoordinatorToolRenderDetails, expande
   return lines.join("\n");
 }
 
-function coordinatorDetails(details: Record<string, unknown> | undefined): CoordinatorToolRenderDetails | undefined {
+function longTaskDetails(details: Record<string, unknown> | undefined): CoordinatorToolRenderDetails | undefined {
   if (!details) {
     return undefined;
   }

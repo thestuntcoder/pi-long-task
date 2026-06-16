@@ -3,15 +3,15 @@ import { Type } from "typebox";
 
 import type { SessionOutcome } from "./worker_session.ts";
 
-export const PiTodoCoordinatorParams = Type.Object(
+export const PiLongTaskParams = Type.Object(
   {
-    inputText: Type.String({ description: "TODO file content or coordinator instructions to process." }),
-    commit: Type.Boolean({ description: "Whether the coordinator may commit completed worker changes." }),
+    inputText: Type.String({ description: "TODO file content or long-task instructions to process." }),
+    commit: Type.Boolean({ description: "Whether Pi Long Task may commit completed worker changes." }),
   },
   { additionalProperties: false },
 );
 
-export type PiTodoCoordinatorInput = Static<typeof PiTodoCoordinatorParams>;
+export type PiLongTaskInput = Static<typeof PiLongTaskParams>;
 
 export type CoordinatorStatus = "done" | "partial" | "blocked" | "failed";
 
@@ -27,7 +27,7 @@ export interface CoordinatorRemainingTask {
   status: string;
 }
 
-export interface PiTodoCoordinatorResult {
+export interface PiLongTaskResult {
   status: CoordinatorStatus;
   message: string;
   summary: string;

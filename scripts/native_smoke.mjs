@@ -22,7 +22,7 @@ const cases = [
     markerFile: "SMOKE_FALSE.txt",
     markerText: "commit false smoke ok",
     title: "Create non-commit smoke marker",
-    goal: "Verify the native coordinator worker can modify the disposable repo while commits are disabled.",
+    goal: "Verify Pi Long Task can modify the disposable repo while commits are disabled.",
   },
   {
     name: "commit-true",
@@ -30,15 +30,15 @@ const cases = [
     markerFile: "SMOKE_TRUE.txt",
     markerText: "commit true smoke ok",
     title: "Create commit smoke marker",
-    goal: "Verify the native coordinator worker can modify the disposable repo and the coordinator can commit eligible changes.",
+    goal: "Verify Pi Long Task can modify the disposable repo and commit eligible changes.",
   },
 ];
 
-const smokeRoot = await mkdtemp(path.join(os.tmpdir(), "pi-coordinator-native-smoke-"));
+const smokeRoot = await mkdtemp(path.join(os.tmpdir(), "pi-long-task-native-smoke-"));
 let success = false;
 
 try {
-  console.log(`Native Pi coordinator smoke root: ${smokeRoot}`);
+  console.log(`Native Pi Long Task smoke root: ${smokeRoot}`);
   console.log(`Extension: ${EXTENSION_PATH}`);
   console.log(`Outer model: ${MODEL}`);
 
@@ -48,9 +48,9 @@ try {
   }
 
   success = true;
-  console.log("\nNative Pi coordinator smoke passed:");
+  console.log("\nNative Pi Long Task smoke passed:");
   for (const summary of summaries) {
-    const commitText = summary.commitHash ? `, coordinator commit ${summary.commitHash}` : "";
+    const commitText = summary.commitHash ? `, Pi Long Task commit ${summary.commitHash}` : "";
     console.log(`- ${summary.name}: ${summary.status}, marker verified${commitText}`);
   }
 } finally {
@@ -82,7 +82,7 @@ async function runSmokeCase(testCase) {
     "--no-skills",
     "--no-prompt-templates",
     "--tools",
-    "pi_todo_coordinator",
+    "pi_long_task",
     "--model",
     MODEL,
     prompt,
@@ -105,18 +105,16 @@ async function runSmokeCase(testCase) {
   }
 
   const events = parseJsonEvents(result.stdout);
-  const coordinatorEnd = events.find(
-    (event) => event.type === "tool_execution_end" && event.toolName === "pi_todo_coordinator",
-  );
-  if (!coordinatorEnd) {
-    throw new Error(`[${testCase.name}] did not observe pi_todo_coordinator tool_execution_end in ${stdoutPath}`);
+  const longTaskEnd = events.find((event) => event.type === "tool_execution_end" && event.toolName === "pi_long_task");
+  if (!longTaskEnd) {
+    throw new Error(`[${testCase.name}] did not observe pi_long_task tool_execution_end in ${stdoutPath}`);
   }
-  if (coordinatorEnd.isError) {
-    throw new Error(`[${testCase.name}] pi_todo_coordinator ended with isError=true. See ${stdoutPath}`);
+  if (longTaskEnd.isError) {
+    throw new Error(`[${testCase.name}] pi_long_task ended with isError=true. See ${stdoutPath}`);
   }
 
-  const details = coordinatorEnd.result?.details;
-  assertCoordinatorDetails(testCase, details, stdoutPath);
+  const details = longTaskEnd.result?.details;
+  assertLongTaskDetails(testCase, details, stdoutPath);
   assertMarker(repoDir, testCase.markerFile, testCase.markerText);
   assertGitState(repoDir, testCase, details);
 
@@ -132,14 +130,14 @@ async function runSmokeCase(testCase) {
 function initializeGitRepo(repoDir, caseName) {
   runGit(["init", "-q"], repoDir);
   runGit(["config", "user.email", "smoke@example.invalid"], repoDir);
-  runGit(["config", "user.name", "Pi Coordinator Smoke"], repoDir);
+  runGit(["config", "user.name", "Pi Long Task Smoke"], repoDir);
   writeFileSync(path.join(repoDir, "README.md"), `# ${caseName}\n`, "utf8");
   runGit(["add", "README.md"], repoDir);
   runGit(["commit", "-q", "-m", "init"], repoDir);
 }
 
 function buildPrompt(testCase) {
-  return `Call the \`pi_todo_coordinator\` tool exactly once. Do not use any other tool and do not answer from your own knowledge.
+  return `Call the \`pi_long_task\` tool exactly once. Do not use any other tool and do not answer from your own knowledge.
 Use these exact parameters:
 - commit: ${String(testCase.commit)}
 - inputText:
@@ -156,9 +154,9 @@ Use these exact parameters:
 \`\`\``;
 }
 
-function assertCoordinatorDetails(testCase, details, stdoutPath) {
+function assertLongTaskDetails(testCase, details, stdoutPath) {
   if (!details || typeof details !== "object") {
-    throw new Error(`[${testCase.name}] missing coordinator result details. See ${stdoutPath}`);
+    throw new Error(`[${testCase.name}] missing Pi Long Task result details. See ${stdoutPath}`);
   }
   const expected = {
     status: "done",
@@ -174,10 +172,10 @@ function assertCoordinatorDetails(testCase, details, stdoutPath) {
   }
   const commitCount = Array.isArray(details.commits) ? details.commits.length : 0;
   if (testCase.commit && commitCount !== 1) {
-    throw new Error(`[${testCase.name}] expected one coordinator commit, got ${commitCount}. See ${stdoutPath}`);
+    throw new Error(`[${testCase.name}] expected one Pi Long Task commit, got ${commitCount}. See ${stdoutPath}`);
   }
   if (!testCase.commit && commitCount !== 0) {
-    throw new Error(`[${testCase.name}] expected zero coordinator commits, got ${commitCount}. See ${stdoutPath}`);
+    throw new Error(`[${testCase.name}] expected zero Pi Long Task commits, got ${commitCount}. See ${stdoutPath}`);
   }
 }
 
@@ -212,7 +210,7 @@ function assertGitState(repoDir, testCase, details) {
       );
     }
     if (!details.commits?.[0]?.hash) {
-      throw new Error(`[${testCase.name}] missing commit hash in coordinator details`);
+      throw new Error(`[${testCase.name}] missing commit hash in Pi Long Task details`);
     }
     if (status.includes(testCase.markerFile)) {
       throw new Error(`[${testCase.name}] committed marker still appears dirty in git status:\n${status}`);
@@ -226,9 +224,9 @@ function assertGitState(repoDir, testCase, details) {
     }
   }
 
-  const trackedArtifacts = runGit(["ls-files", "tmp/pi-coordinator"], repoDir).trim();
+  const trackedArtifacts = runGit(["ls-files", "tmp/pi-long-task"], repoDir).trim();
   if (trackedArtifacts) {
-    throw new Error(`[${testCase.name}] coordinator artifacts were tracked unexpectedly:\n${trackedArtifacts}`);
+    throw new Error(`[${testCase.name}] Pi Long Task artifacts were tracked unexpectedly:\n${trackedArtifacts}`);
   }
 }
 

@@ -22,8 +22,8 @@ export function taskLabel(task: Pick<Task, "taskId" | "title">): string {
 
 export function buildTaskPrompt(options: WorkerTaskPromptOptions): string {
   const commitText = options.commitRequested
-    ? "The coordinator will commit after your session if needed. Do not run git commit."
-    : "Do not run git commit. The coordinator was started with commits disabled.";
+    ? "Pi Long Task will commit after your session if needed. Do not run git commit."
+    : "Do not run git commit. Pi Long Task was started with commits disabled.";
 
   const previousAttempts = (options.previousAttempts || "").trim();
   const previousText = previousAttempts
@@ -55,8 +55,8 @@ Attempt: ${options.attempt}
 
 Rules:
 - Work only on the assigned task below. Do not start or fix other TODO tasks.
-- The coordinator is responsible for marking TODO progress. Do not edit \`${options.todoPath}\` unless it is directly necessary for the assigned task implementation itself.
-- Do not edit \`TASK_RESULT.md\`; the coordinator writes it.
+- Pi Long Task is responsible for marking TODO progress. Do not edit \`${options.todoPath}\` unless it is directly necessary for the assigned task implementation itself.
+- Do not edit \`TASK_RESULT.md\`; Pi Long Task writes it.
 - ${commitText}
 - If you need to stop because context is high or the work is blocked, leave the repository in a safe state and report \`status: partial\` or \`status: blocked\`.
 - Use the repository's AGENTS.md/project instructions.
@@ -88,14 +88,14 @@ Only use \`status: done\` if the assigned task is fully complete and verified as
 export const buildAssignedTaskPrompt = buildTaskPrompt;
 
 export function buildTimeLimitMessage(seconds: number): string {
-  return `Coordinator notice: this worker session has reached its ${seconds.toFixed(0)}s time budget.
+  return `Pi Long Task notice: this worker session has reached its ${seconds.toFixed(0)}s time budget.
 Stop after the current safe point. Do not start more implementation work.
 Finish with the required TASK_RESULT block now.
 Use \`status: done\` only if the assigned task is actually complete; otherwise use \`status: partial\`.`;
 }
 
 export function buildShutdownMessage(percent: number): string {
-  return `Coordinator notice: context usage is ${percent.toFixed(1)}%, above the 85% shutdown threshold.
+  return `Pi Long Task notice: context usage is ${percent.toFixed(1)}%, above the 85% shutdown threshold.
 Stop after the current safe point. Do not start more implementation work.
 Leave files in a safe state and finish with the required TASK_RESULT block.
 Use \`status: done\` only if the assigned task is actually complete; otherwise use \`status: partial\`.`;
@@ -268,7 +268,7 @@ export interface SessionOutcome {
 }
 
 export function buildMissingTaskResultMessage(): string {
-  return `Coordinator notice: your previous response did not include a complete machine-readable TASK_RESULT block.
+  return `Pi Long Task notice: your previous response did not include a complete machine-readable TASK_RESULT block.
 Reply now with only the required block:
 
 TASK_RESULT:
@@ -543,9 +543,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
   }
 
   if ((error || aborted || timedOut) && !hasTaskResult(assistantText)) {
-    assistantText = buildCoordinatorFailureTaskResult(
-      error ?? (timedOut ? "task timed out" : "worker session aborted"),
-    );
+    assistantText = buildLongTaskFailureTaskResult(error ?? (timedOut ? "task timed out" : "worker session aborted"));
   }
 
   const reportedStatus = parseReportedStatus(assistantText);
@@ -821,16 +819,16 @@ function latestAssistantText(session: WorkerSessionLike, fallback: string): stri
   return fromMessages || fallback;
 }
 
-function buildCoordinatorFailureTaskResult(reason: string): string {
+function buildLongTaskFailureTaskResult(reason: string): string {
   return `TASK_RESULT:
 status: partial
-summary: Coordinator stopped the session before the worker produced a final result.
+summary: Pi Long Task stopped the session before the worker produced a final result.
 changes:
 - unknown; inspect git diff and session state
 verification:
 - not completed by worker
 remaining:
-- Coordinator/session error: ${reason}`;
+- Pi Long Task/session error: ${reason}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

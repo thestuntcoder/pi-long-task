@@ -26,7 +26,7 @@ function outcomeFor(options: RunWorkerTaskOptions, status: string): SessionOutco
   };
 }
 
-const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-coordinator-test-"));
+const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-long-task-test-"));
 try {
   const calls: Array<{ taskId: string; attempt: number; previousAttempts?: string }> = [];
   const sequentialWorker: WorkerRunner = async (options) => {
@@ -51,7 +51,7 @@ try {
     "TODO 1 done.",
     "Running TODO 2 — Second task...",
     "TODO 2 done.",
-    "Coordinator done.",
+    "Pi Long Task done.",
   ]);
   assert.equal(sequential.status, "done");
   assert.equal(sequential.totalTasks, 2);
@@ -62,7 +62,7 @@ try {
   assert.equal(sequential.resultPath, sequential.taskResultPath);
   assert.equal(sequential.outcomes.length, 2);
   assert.deepEqual(sequential.commits, []);
-  assert.match(sequential.message, /Pi TODO coordinator: done/);
+  assert.match(sequential.message, /Pi Long Task: done/);
   assert.match(sequential.message, /Tasks: 2 completed, 0 failed, 0 blocked, 0 remaining \(2 total\)\./);
   assert.match(sequential.message, /Result file: /);
   assert.match(sequential.message, /TODO file: /);
@@ -153,7 +153,7 @@ try {
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.blockedTasks, 1);
   assert.equal(blocked.failedTasks, 0);
-  assert.match(blocked.message, /Pi TODO coordinator: blocked/);
+  assert.match(blocked.message, /Pi Long Task: blocked/);
   assert.match(blocked.message, /Remaining tasks:\n- TODO 1 — Blocked task \(blocked\)/);
 
   const workerToolUpdates: CoordinatorProgressUpdate[] = [];

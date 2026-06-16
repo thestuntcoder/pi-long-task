@@ -27,7 +27,7 @@ function outcome(
   };
 }
 
-const repo = await mkdtemp(path.join(os.tmpdir(), "pi-coordinator-git-test-"));
+const repo = await mkdtemp(path.join(os.tmpdir(), "pi-long-task-git-test-"));
 try {
   await git(repo, ["init"]);
   await git(repo, ["config", "user.name", "Pi Test"]);
@@ -40,7 +40,7 @@ try {
 
   assert.equal(await gitRoot(repo), await realpath(repo));
 
-  const runDir = path.join(repo, "tmp", "pi-coordinator", "run-1");
+  const runDir = path.join(repo, "tmp", "pi-long-task", "run-1");
   const resultPath = path.join(runDir, "TASK_RESULT.md");
   const todoPath = path.join(runDir, "TODO.md");
   await mkdir(runDir, { recursive: true });
@@ -72,7 +72,7 @@ try {
   assert.match(committedFiles, /new-worker-file\.txt/);
   assert.doesNotMatch(committedFiles, /preexisting\.txt/);
   assert.doesNotMatch(committedFiles, /TASK_RESULT\.md/);
-  assert.doesNotMatch(committedFiles, /tmp\/pi-coordinator/);
+  assert.doesNotMatch(committedFiles, /tmp\/pi-long-task/);
 
   assert.equal(await readFile(path.join(repo, "preexisting.txt"), "utf8"), "dirty before worker\n");
   const status = await git(repo, ["status", "--short"]);

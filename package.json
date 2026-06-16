@@ -1,12 +1,12 @@
 {
-  "name": "pi-todo-coordinator",
+  "name": "pi-long-task",
   "version": "0.1.0",
   "type": "module",
-  "description": "Pi extension that coordinates TODO-style coding work across task-focused worker sessions.",
+  "description": "Pi extension for breaking down and running long coding tasks safely.",
   "keywords": [
     "pi-package",
-    "todo",
-    "coordinator",
+    "long-task",
+    "task-runner",
     "coding-agent",
     "pi-extension"
   ],
@@ -54,10 +54,10 @@
   "author": "Dejan Jacimovic <dejan@stuntcoders.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thestuntcoder/pi-coordinator.git"
+    "url": "git+https://github.com/thestuntcoder/pi-long-task.git"
   },
   "bugs": {
-    "url": "https://github.com/thestuntcoder/pi-coordinator/issues"
+    "url": "https://github.com/thestuntcoder/pi-long-task/issues"
   },
-  "homepage": "https://github.com/thestuntcoder/pi-coordinator#readme"
+  "homepage": "https://github.com/thestuntcoder/pi-long-task#readme"
 }

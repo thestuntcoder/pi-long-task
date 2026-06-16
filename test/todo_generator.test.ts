@@ -13,7 +13,7 @@ const existing = `# Some source plan
 
 Global constraint.
 
-## TODO 7 - Wire coordinator
+## TODO 7 - Wire long-task runner
 
 Keep this note.
 
@@ -23,9 +23,9 @@ Keep this note.
 
 const normalized = todoMarkdownFromString(existing);
 assert.ok(normalized);
-assert.ok(normalized.startsWith("# Pi Coordinator TODO\n\n# Some source plan\n\nGlobal constraint."));
-assert.match(normalized, /## Progress\n\n- \[ \] TODO 1 — Wire coordinator/);
-assert.match(normalized, /## TODO 1 — Wire coordinator/);
+assert.ok(normalized.startsWith("# Pi Long Task TODO\n\n# Some source plan\n\nGlobal constraint."));
+assert.match(normalized, /## Progress\n\n- \[ \] TODO 1 — Wire long-task runner/);
+assert.match(normalized, /## TODO 1 — Wire long-task runner/);
 assert.match(normalized, /Keep this note/);
 assert.match(normalized, /\*\*Goal:\*\*/);
 assert.match(normalized, /\*\*Verify:\*\*/);
@@ -33,7 +33,7 @@ assert.match(normalized, /\*\*Done when:\*\*/);
 validateTodoMarkdown(normalized);
 assert.deepEqual(
   parseTasks(normalized).map((task) => [task.taskId, task.title]),
-  [["1", "Wire coordinator"]],
+  [["1", "Wire long-task runner"]],
 );
 
 const bulletMarkdown = todoMarkdownFromString(`- Add native parser
@@ -58,17 +58,17 @@ assert.deepEqual(
 assert.match(numberedMarkdown, /\*\*Status:\*\*\n- \[ \] Complete read inputs/);
 
 const rawParagraph =
-  "Build a native coordinator that can split a broad request into safe worker tasks and report progress.";
+  "Build a long-task runner that can split a broad request into safe worker tasks and report progress.";
 assert.equal(todoMarkdownFromString(rawParagraph), undefined);
 const prompt = buildTodoCreationPrompt(rawParagraph);
 assert.match(prompt, /Convert the following raw project request/);
-assert.match(prompt, /# Pi Coordinator TODO/);
+assert.match(prompt, /# Pi Long Task TODO/);
 assert.match(prompt, /## Progress/);
 assert.match(prompt, /\*\*Goal:\*\*/);
 assert.match(prompt, /\*\*Status:\*\*/);
 assert.match(prompt, /\*\*Verify:\*\*/);
 assert.match(prompt, /\*\*Done when:\*\*/);
-assert.match(prompt, /Build a native coordinator/);
+assert.match(prompt, /Build a long-task runner/);
 
 const generated = generatedTodoMarkdown(["First task", "Second task"]);
 assert.equal(extractTodoMarkdown(`Here is the plan:\n\n\`\`\`markdown\n${generated}\`\`\``), generated);

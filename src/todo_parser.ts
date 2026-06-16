@@ -223,7 +223,7 @@ export function todoGlobalInstructions(markdown: string, limit = 6000): string {
 
   let text = selected.join("\n").trim();
   if (text.length > limit) {
-    text = `${text.slice(0, limit).trimEnd()}\n\n[truncated by coordinator]`;
+    text = `${text.slice(0, limit).trimEnd()}\n\n[truncated by Pi Long Task]`;
   }
   return text;
 }

@@ -6,7 +6,7 @@ import type {
   CoordinatorCommitSummary,
   CoordinatorRemainingTask,
   CoordinatorStatus,
-  PiTodoCoordinatorInput,
+  PiLongTaskInput,
 } from "./types.ts";
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
@@ -71,7 +71,7 @@ export interface CoordinatorProgressUpdate {
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
 export type TodoPlanner = (options: TodoPlannerOptions) => Promise<string>;
 
-export interface RunCoordinatorOptions extends PiTodoCoordinatorInput {
+export interface RunCoordinatorOptions extends PiLongTaskInput {
   cwd?: string;
   runId?: string;
   abortSignal?: AbortSignal;
@@ -270,7 +270,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     }
 
     if (runtime.abortSignal?.aborted && !failure) {
-      failure = "Coordinator run aborted.";
+      failure = "Pi Long Task run aborted.";
     }
 
     const finalTodoMarkdown = await readFile(runtime.todoPath, "utf8");
@@ -289,8 +289,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       failedTasks,
     });
     const summary = failure
-      ? `Coordinator ${status}: ${failure}`
-      : `Coordinator completed ${completedTasks}/${finalTasks.length} task(s).`;
+      ? `Pi Long Task ${status}: ${failure}`
+      : `Pi Long Task completed ${completedTasks}/${finalTasks.length} task(s).`;
     const result: CoordinatorResult = {
       status,
       summary,
@@ -313,7 +313,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       error: failure,
     };
     result.message = formatCoordinatorResultMessage(result);
-    emitProgress(runtime, `Coordinator ${status}.`, {
+    emitProgress(runtime, `Pi Long Task ${status}.`, {
       phase: "complete",
       status,
       totalTasks: finalTasks.length,
@@ -321,9 +321,9 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     return result;
   } catch (error) {
     const message = errorMessage(error);
-    const summary = `Coordinator failed: ${message}`;
+    const summary = `Pi Long Task failed: ${message}`;
     try {
-      await appendFile(runtime.taskResultPath, `\n## Coordinator failure\n\n${message}\n`, "utf8");
+      await appendFile(runtime.taskResultPath, `\n## Pi Long Task failure\n\n${message}\n`, "utf8");
     } catch {
       // Best effort only; the original error is returned below.
     }
@@ -350,7 +350,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       error: message,
     };
     result.message = formatCoordinatorResultMessage(result);
-    emitProgress(runtime, "Coordinator failed.", { phase: "complete", status: "failed" });
+    emitProgress(runtime, "Pi Long Task failed.", { phase: "complete", status: "failed" });
     return result;
   }
 }
@@ -403,7 +403,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
 function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const runId = sanitizeRunId(options.runId ?? defaultRunId(options.now?.() ?? new Date()));
-  const runDir = path.join(cwd, "tmp", "pi-coordinator", runId);
+  const runDir = path.join(cwd, "tmp", "pi-long-task", runId);
 
   return {
     cwd,
@@ -508,7 +508,7 @@ function emitTaskOutcomeProgress(
 }
 
 function initialTaskResultMarkdown(runId: string): string {
-  return `# Pi Coordinator TASK_RESULT\n\nRun: ${runId}\n`;
+  return `# Pi Long Task TASK_RESULT\n\nRun: ${runId}\n`;
 }
 
 async function appendCommitNote(pathname: string, result: CommitAfterSessionResult): Promise<void> {

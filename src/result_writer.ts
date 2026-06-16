@@ -47,7 +47,7 @@ export function extractResultSummary(assistantText: string, limit = 8000): strin
   }
 
   if (text.length > limit) {
-    return `${text.slice(0, limit)}\n\n[truncated by coordinator]\n`;
+    return `${text.slice(0, limit)}\n\n[truncated by Pi Long Task]\n`;
   }
   return text;
 }

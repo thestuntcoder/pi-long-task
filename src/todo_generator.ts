@@ -56,13 +56,13 @@ export function generatedTodoMarkdown(items: string[]): string {
     })
     .join("\n\n");
 
-  return `# Pi Coordinator TODO\n\n## Progress\n\n${progress}\n\n---\n\n${sections}\n`;
+  return `# Pi Long Task TODO\n\n## Progress\n\n${progress}\n\n---\n\n${sections}\n`;
 }
 
 export function validateTodoMarkdown(markdown: string): void {
   const trimmed = markdown.trim();
-  if (!trimmed.startsWith("# Pi Coordinator TODO")) {
-    throw new TodoGenerationError("TODO markdown must start with `# Pi Coordinator TODO`.");
+  if (!trimmed.startsWith("# Pi Long Task TODO")) {
+    throw new TodoGenerationError("TODO markdown must start with `# Pi Long Task TODO`.");
   }
   if (!PROGRESS_HEADING_RE.test(trimmed)) {
     throw new TodoGenerationError("TODO markdown must include a `## Progress` section.");
@@ -117,7 +117,7 @@ export function validateTodoMarkdown(markdown: string): void {
 }
 
 export function buildTodoCreationPrompt(rawInput: string): string {
-  return `Convert the following raw project request into coordinator-compatible TODO markdown.\n\nRequirements:\n- Output only markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Coordinator TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n\nRaw input:\n\n${rawInput.trim()}\n`;
+  return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.\n\nRequirements:\n- Output only markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n\nRaw input:\n\n${rawInput.trim()}\n`;
 }
 
 export function extractTodoMarkdown(assistantText: string): string {
@@ -128,7 +128,7 @@ export function extractTodoMarkdown(assistantText: string): string {
     }
   }
 
-  const headerIndex = assistantText.indexOf("# Pi Coordinator TODO");
+  const headerIndex = assistantText.indexOf("# Pi Long Task TODO");
   if (headerIndex >= 0) {
     const candidate = normalizeCandidate(assistantText.slice(headerIndex));
     if (candidate) {
@@ -144,7 +144,7 @@ export function extractTodoMarkdown(assistantText: string): string {
     }
   }
 
-  throw new TodoGenerationError("Could not extract valid coordinator TODO markdown from assistant text.");
+  throw new TodoGenerationError("Could not extract valid Pi Long Task TODO markdown from assistant text.");
 }
 
 function normalizeCandidate(candidate: string): string | undefined {
@@ -176,7 +176,7 @@ function normalizeExistingTodoMarkdown(input: string): string {
   const sections = tasks.map((task, idx) => normalizeTaskSection({ ...task, taskId: String(idx + 1) })).join("\n\n");
 
   const globalBlock = globalInstructions ? `\n\n${globalInstructions}` : "";
-  return `# Pi Coordinator TODO${globalBlock}\n\n## Progress\n\n${progress}\n\n---\n\n${sections}\n`;
+  return `# Pi Long Task TODO${globalBlock}\n\n## Progress\n\n${progress}\n\n---\n\n${sections}\n`;
 }
 
 function extractExistingTasks(input: string): ExistingTask[] {
@@ -201,7 +201,7 @@ function extractGlobalInstructions(input: string): string {
     if (TODO_HEADING_LINE_RE.test(line.trim()) || /^##\s+Progress\s*$/i.test(line.trim())) {
       break;
     }
-    if (/^#\s+Pi Coordinator TODO\s*$/i.test(line.trim())) {
+    if (/^#\s+Pi Long Task TODO\s*$/i.test(line.trim())) {
       continue;
     }
     selected.push(line);

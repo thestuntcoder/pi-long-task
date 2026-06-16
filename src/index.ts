@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { runCoordinator, type CoordinatorProgressUpdate, type CoordinatorResult } from "./coordinator.ts";
-import { renderCoordinatorToolCall, renderCoordinatorToolResult } from "./render.ts";
-import { PiTodoCoordinatorParams } from "./types.ts";
+import { renderLongTaskToolCall, renderLongTaskToolResult } from "./render.ts";
+import { PiLongTaskParams } from "./types.ts";
 
 function toolDetails(result: CoordinatorResult) {
   return {
@@ -21,14 +21,14 @@ function toolDetails(result: CoordinatorResult) {
   };
 }
 
-export default function registerPiCoordinatorExtension(pi: ExtensionAPI) {
+export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
   pi.registerTool({
-    name: "pi_todo_coordinator",
-    label: "Pi TODO Coordinator",
-    description: "Coordinate Pi TODO worker sessions from a TODO description.",
-    parameters: PiTodoCoordinatorParams,
-    renderCall: renderCoordinatorToolCall,
-    renderResult: renderCoordinatorToolResult,
+    name: "pi_long_task",
+    label: "Pi Long Task",
+    description: "Break down and run long coding tasks from a request or TODO plan.",
+    parameters: PiLongTaskParams,
+    renderCall: renderLongTaskToolCall,
+    renderResult: renderLongTaskToolResult,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const publishProgress = (update: CoordinatorProgressUpdate) => {
         onUpdate?.({

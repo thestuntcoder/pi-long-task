@@ -93,4 +93,7 @@ assert.equal(isDoneStatus("succeeded"), true);
 assert.equal(isPartialStatus("failure"), true);
 assert.equal(isPartialStatus("unknown"), true);
 
-assert.equal(extractResultSummary(`${plain}\nextra text`, 20), "TASK_RESULT:\nstatus:\n\n[truncated by coordinator]\n");
+assert.equal(
+  extractResultSummary(`${plain}\nextra text`, 20),
+  "TASK_RESULT:\nstatus:\n\n[truncated by Pi Long Task]\n",
+);
