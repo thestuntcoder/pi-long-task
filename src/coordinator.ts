@@ -61,6 +61,10 @@ export interface CoordinatorProgressUpdate {
   status?: CoordinatorStatus | string;
   commitHash?: string;
   commitError?: string;
+  commitSkipped?: string;
+  toolName?: string;
+  workerEventType?: string;
+  isError?: boolean;
   totalTasks?: number;
 }
 
@@ -226,6 +230,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
 
       let taskCommitHash: string | undefined;
       let taskCommitError: string | undefined;
+      let taskCommitSkipped: string | undefined;
       if (options.commit) {
         const commitResult = shouldCommitOutcome(outcome)
           ? await commitAfterSession({
@@ -245,10 +250,11 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         }
         taskCommitHash = commitResult.hash;
         taskCommitError = commitResult.error;
+        taskCommitSkipped = commitResult.skipped;
         await appendCommitNote(runtime.taskResultPath, commitResult);
       }
 
-      emitTaskOutcomeProgress(runtime, nextTask, outcome, taskCommitHash, taskCommitError);
+      emitTaskOutcomeProgress(runtime, nextTask, outcome, taskCommitHash, taskCommitError, taskCommitSkipped);
 
       const attemptSummary = resultTextForPreviousAttempt(outcome);
       previousAttempts.set(nextTask.taskId, [...(previousAttempts.get(nextTask.taskId) ?? []), attemptSummary]);
@@ -450,6 +456,10 @@ function emitWorkerEventProgress(
     taskId: task.taskId,
     title: task.title,
     attempt,
+    status: action,
+    toolName: event.toolName,
+    workerEventType: event.type,
+    isError: event.isError,
   };
   if (event.isError) {
     update.status = "failed";
@@ -463,8 +473,15 @@ function emitTaskOutcomeProgress(
   outcome: SessionOutcome,
   commitHash: string | undefined,
   commitError: string | undefined,
+  commitSkipped: string | undefined,
 ): void {
-  const commitText = commitHash ? `, commit ${commitHash}` : commitError ? `, commit failed` : "";
+  const commitText = commitHash
+    ? `, commit ${commitHash}`
+    : commitError
+      ? `, commit failed`
+      : commitSkipped
+        ? `, commit skipped: ${commitSkipped}`
+        : "";
   const statusText = outcome.done ? "done" : outcome.reportedStatus;
   const phase: CoordinatorProgressPhase = outcome.done
     ? "task_done"
@@ -483,6 +500,9 @@ function emitTaskOutcomeProgress(
   }
   if (commitError) {
     update.commitError = commitError;
+  }
+  if (commitSkipped) {
+    update.commitSkipped = commitSkipped;
   }
   emitProgress(runtime, `TODO ${task.taskId} ${statusText}${commitText}.`, update);
 }

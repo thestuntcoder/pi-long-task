@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { runCoordinator, type WorkerRunner } from "../src/coordinator.ts";
+import { runCoordinator, type CoordinatorProgressUpdate, type WorkerRunner } from "../src/coordinator.ts";
 import { generatedTodoMarkdown } from "../src/todo_generator.ts";
 import { parseTasks } from "../src/todo_parser.ts";
 import type { RunWorkerTaskOptions, SessionOutcome } from "../src/worker_session.ts";
@@ -155,6 +155,47 @@ try {
   assert.equal(blocked.failedTasks, 0);
   assert.match(blocked.message, /Pi TODO coordinator: blocked/);
   assert.match(blocked.message, /Remaining tasks:\n- TODO 1 — Blocked task \(blocked\)/);
+
+  const workerToolUpdates: CoordinatorProgressUpdate[] = [];
+  const workerToolRun = await runCoordinator({
+    inputText: generatedTodoMarkdown(["Emit worker tool progress"]),
+    commit: false,
+    cwd: tempRoot,
+    runId: "worker-tool-progress",
+    workerRunner: async (options) => {
+      options.onEvent?.({ type: "tool_execution_start", toolName: "bash" });
+      options.onEvent?.({ type: "tool_execution_end", toolName: "bash", isError: true });
+      return outcomeFor(options, "done");
+    },
+    onProgress: (update) => workerToolUpdates.push(update),
+  });
+  assert.equal(workerToolRun.status, "done");
+  const bashStart = workerToolUpdates.find(
+    (update) => update.phase === "worker_tool" && update.workerEventType === "tool_execution_start",
+  );
+  assert.equal(bashStart?.toolName, "bash");
+  assert.equal(bashStart?.status, "started");
+  const bashEnd = workerToolUpdates.find(
+    (update) => update.phase === "worker_tool" && update.workerEventType === "tool_execution_end",
+  );
+  assert.equal(bashEnd?.toolName, "bash");
+  assert.equal(bashEnd?.status, "failed");
+  assert.equal(bashEnd?.isError, true);
+
+  const commitSkipUpdates: CoordinatorProgressUpdate[] = [];
+  const commitSkipped = await runCoordinator({
+    inputText: generatedTodoMarkdown(["Skip commit for failed outcome"]),
+    commit: true,
+    cwd: tempRoot,
+    runId: "commit-skip-progress",
+    workerRunner: async (options) => outcomeFor(options, "failed"),
+    maxAttemptsPerTask: 1,
+    onProgress: (update) => commitSkipUpdates.push(update),
+  });
+  assert.equal(commitSkipped.status, "failed");
+  const failedUpdate = commitSkipUpdates.find((update) => update.phase === "task_failed");
+  assert.equal(failedUpdate?.commitSkipped, "outcome is not eligible for commit");
+  assert.match(failedUpdate?.message ?? "", /commit skipped: outcome is not eligible for commit/);
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
 }
