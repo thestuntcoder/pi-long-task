@@ -49,6 +49,19 @@ export type CoordinatorProgressPhase =
   | "task_failed"
   | "complete";
 
+export type CoordinatorProgressItemStatus = "empty" | "in_progress" | "done";
+
+export interface CoordinatorProgressTask {
+  taskId: string;
+  title: string;
+  status: CoordinatorProgressItemStatus;
+}
+
+export interface CoordinatorProgressSubtask {
+  text: string;
+  status: CoordinatorProgressItemStatus;
+}
+
 export interface CoordinatorProgressUpdate {
   message: string;
   phase: CoordinatorProgressPhase;
@@ -66,6 +79,8 @@ export interface CoordinatorProgressUpdate {
   workerEventType?: string;
   isError?: boolean;
   totalTasks?: number;
+  currentTask?: CoordinatorProgressTask;
+  subtasks?: CoordinatorProgressSubtask[];
 }
 
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
@@ -189,6 +204,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           taskId: nextTask.taskId,
           title: nextTask.title,
           attempt,
+          ...currentTaskProgress(nextTask, "in_progress"),
         },
       );
       const preExistingDirtyPaths = options.commit
@@ -441,9 +457,40 @@ function emitProgress(
   });
 }
 
+function currentTaskProgress(
+  task: Pick<Task, "taskId" | "title" | "statusItems">,
+  status: CoordinatorProgressItemStatus,
+): Pick<CoordinatorProgressUpdate, "currentTask" | "subtasks"> {
+  return {
+    currentTask: {
+      taskId: task.taskId,
+      title: task.title,
+      status,
+    },
+    subtasks: subtaskProgress(task, status),
+  };
+}
+
+function subtaskProgress(
+  task: Pick<Task, "statusItems">,
+  taskStatus: CoordinatorProgressItemStatus,
+): CoordinatorProgressSubtask[] {
+  let markedInProgress = false;
+  return task.statusItems.map((item) => {
+    if (item.done || taskStatus === "done") {
+      return { text: item.text, status: "done" };
+    }
+    if (taskStatus === "in_progress" && !markedInProgress) {
+      markedInProgress = true;
+      return { text: item.text, status: "in_progress" };
+    }
+    return { text: item.text, status: "empty" };
+  });
+}
+
 function emitWorkerEventProgress(
   runtime: RuntimeOptions,
-  task: Pick<Task, "taskId" | "title">,
+  task: Pick<Task, "taskId" | "title" | "statusItems">,
   attempt: number,
   event: { type: string; toolName?: string; isError?: boolean },
 ): void {
@@ -460,6 +507,7 @@ function emitWorkerEventProgress(
     toolName: event.toolName,
     workerEventType: event.type,
     isError: event.isError,
+    ...currentTaskProgress(task, "in_progress"),
   };
   if (event.isError) {
     update.status = "failed";
@@ -469,7 +517,7 @@ function emitWorkerEventProgress(
 
 function emitTaskOutcomeProgress(
   runtime: RuntimeOptions,
-  task: Pick<Task, "taskId" | "title">,
+  task: Pick<Task, "taskId" | "title" | "statusItems">,
   outcome: SessionOutcome,
   commitHash: string | undefined,
   commitError: string | undefined,
@@ -494,6 +542,7 @@ function emitTaskOutcomeProgress(
     title: task.title,
     attempt: outcome.attempt,
     status: outcome.reportedStatus,
+    ...currentTaskProgress(task, outcome.done ? "done" : "in_progress"),
   };
   if (commitHash) {
     update.commitHash = commitHash;

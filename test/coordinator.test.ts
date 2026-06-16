@@ -170,17 +170,30 @@ try {
     onProgress: (update) => workerToolUpdates.push(update),
   });
   assert.equal(workerToolRun.status, "done");
+  const taskStart = workerToolUpdates.find((update) => update.phase === "task_start");
+  assert.deepEqual(taskStart?.currentTask, {
+    taskId: "1",
+    title: "Emit worker tool progress",
+    status: "in_progress",
+  });
+  assert.deepEqual(taskStart?.subtasks, [{ text: "Complete emit worker tool progress", status: "in_progress" }]);
+
   const bashStart = workerToolUpdates.find(
     (update) => update.phase === "worker_tool" && update.workerEventType === "tool_execution_start",
   );
   assert.equal(bashStart?.toolName, "bash");
   assert.equal(bashStart?.status, "started");
+  assert.equal(bashStart?.currentTask?.status, "in_progress");
+  assert.deepEqual(bashStart?.subtasks, [{ text: "Complete emit worker tool progress", status: "in_progress" }]);
   const bashEnd = workerToolUpdates.find(
     (update) => update.phase === "worker_tool" && update.workerEventType === "tool_execution_end",
   );
   assert.equal(bashEnd?.toolName, "bash");
   assert.equal(bashEnd?.status, "failed");
   assert.equal(bashEnd?.isError, true);
+  const taskDone = workerToolUpdates.find((update) => update.phase === "task_done");
+  assert.equal(taskDone?.currentTask?.status, "done");
+  assert.deepEqual(taskDone?.subtasks, [{ text: "Complete emit worker tool progress", status: "done" }]);
 
   const commitSkipUpdates: CoordinatorProgressUpdate[] = [];
   const commitSkipped = await runCoordinator({
