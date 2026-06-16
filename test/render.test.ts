@@ -79,6 +79,35 @@ const progress = renderLongTaskToolResult(
 );
 assert.equal(renderText(progress), "● worker bash TODO 1: worker tool bash started.");
 
+const progressWithSubtasks = renderLongTaskToolResult(
+  {
+    content: [{ type: "text", text: "TODO 2: worker tool bash started." }],
+    details: {
+      phase: "worker_tool",
+      message: "TODO 2: worker tool bash started.",
+      toolName: "bash",
+      currentTask: { taskId: "2", title: "Wire progress UI", status: "in_progress" },
+      subtasks: [
+        { text: "Parse status checkboxes", status: "done" },
+        { text: "Render active subtask", status: "in_progress" },
+        { text: "Add coverage", status: "empty" },
+      ],
+    },
+  } satisfies AgentToolResult<unknown>,
+  { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+  theme,
+);
+assert.equal(
+  renderText(progressWithSubtasks),
+  [
+    "● worker bash TODO 2 — Wire progress UI",
+    "  TODO 2: worker tool bash started.",
+    "  ● Parse status checkboxes",
+    "  ● Render active subtask",
+    "  ○ Add coverage",
+  ].join("\n"),
+);
+
 const call = renderLongTaskToolCall(
   {
     commit: true,

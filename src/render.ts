@@ -22,6 +22,19 @@ export interface CoordinatorToolRenderDetails extends CoordinatorResultForRender
   runId?: string;
 }
 
+type ProgressItemStatus = "empty" | "in_progress" | "done";
+
+interface ProgressTaskRenderDetails {
+  taskId: string;
+  title: string;
+  status: ProgressItemStatus;
+}
+
+interface ProgressSubtaskRenderDetails {
+  text: string;
+  status: ProgressItemStatus;
+}
+
 export function formatCoordinatorResultMessage(result: CoordinatorResultForRendering): string {
   const resultPath = result.resultPath ?? result.taskResultPath ?? "unknown";
   const remaining = result.remainingTasks ?? [];
@@ -90,7 +103,26 @@ function renderLongTaskProgress(details: Record<string, unknown> | undefined, fa
   const phase = stringValue(details?.phase);
   const toolName = stringValue(details?.toolName);
   const prefix = phase === "worker_tool" && toolName ? `worker ${toolName}` : phase || "progress";
-  return `${theme.fg("accent", "●")} ${theme.fg("muted", prefix)} ${message}`;
+  const currentTask = progressTaskDetails(details?.currentTask);
+  if (!currentTask) {
+    return `${theme.fg("accent", "●")} ${theme.fg("muted", prefix)} ${message}`;
+  }
+
+  const taskLabel = `TODO ${currentTask.taskId} — ${currentTask.title}`;
+  const lines = [
+    `${progressBubble(currentTask.status, theme)} ${theme.fg("muted", prefix)} ${theme.fg(progressTextColor(currentTask.status), taskLabel)}`,
+  ];
+  if (message && !message.includes(taskLabel)) {
+    lines.push(`  ${theme.fg("dim", message)}`);
+  }
+
+  for (const subtask of progressSubtaskDetails(details?.subtasks)) {
+    lines.push(
+      `  ${progressBubble(subtask.status, theme)} ${theme.fg(progressTextColor(subtask.status), subtask.text)}`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: boolean, theme: Theme): string {
@@ -139,6 +171,50 @@ function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: 
   }
 
   return lines.join("\n");
+}
+
+function progressTaskDetails(value: unknown): ProgressTaskRenderDetails | undefined {
+  const record = recordOrUndefined(value);
+  const taskId = stringValue(record?.taskId);
+  const title = stringValue(record?.title);
+  const status = progressItemStatus(record?.status);
+  if (!taskId || !title || !status) {
+    return undefined;
+  }
+  return { taskId, title, status };
+}
+
+function progressSubtaskDetails(value: unknown): ProgressSubtaskRenderDetails[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    const record = recordOrUndefined(item);
+    const text = stringValue(record?.text);
+    const status = progressItemStatus(record?.status);
+    if (!text || !status) {
+      return [];
+    }
+    return [{ text, status }];
+  });
+}
+
+function progressItemStatus(value: unknown): ProgressItemStatus | undefined {
+  return value === "empty" || value === "in_progress" || value === "done" ? value : undefined;
+}
+
+function progressBubble(status: ProgressItemStatus, theme: Theme): string {
+  return status === "empty" ? theme.fg("dim", "○") : theme.fg(progressTextColor(status), "●");
+}
+
+function progressTextColor(status: ProgressItemStatus): "success" | "warning" | "dim" {
+  if (status === "done") {
+    return "success";
+  }
+  if (status === "in_progress") {
+    return "warning";
+  }
+  return "dim";
 }
 
 function longTaskDetails(details: Record<string, unknown> | undefined): CoordinatorToolRenderDetails | undefined {
