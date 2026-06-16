@@ -1,11 +1,14 @@
 {
-  "name": "pi-coordinator",
+  "name": "pi-todo-coordinator",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Native Pi TODO coordinator extension package.",
+  "description": "Pi extension that coordinates TODO-style coding work across task-focused worker sessions.",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "todo",
+    "coordinator",
+    "coding-agent",
+    "pi-extension"
   ],
   "files": [
     "LICENSE",

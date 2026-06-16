@@ -24,13 +24,19 @@ A finished run gives you:
 
 ## Install
 
-From the project where you want to use it, load this local checkout for one Pi session:
+After this package is published to npm, install it with:
+
+```bash
+pi install npm:pi-todo-coordinator
+```
+
+For local development, load this checkout for one Pi session:
 
 ```bash
 pi -e ~/Sites/pi-coordinator
 ```
 
-Or install it so Pi can load it normally:
+Or install the local checkout so Pi can load it normally:
 
 ```bash
 pi install ~/Sites/pi-coordinator
