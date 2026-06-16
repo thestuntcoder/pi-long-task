@@ -34,7 +34,7 @@ const prompt = buildTaskPrompt({
   maxBashTimeoutSeconds: 300,
 });
 
-assert.match(prompt, /You are one Pi RPC worker session assigned to exactly one TODO task\./);
+assert.match(prompt, /You are one Pi SDK worker session assigned to exactly one TODO task\./);
 assert.match(prompt, /Assigned TODO file path: `\/tmp\/TODO.md`/);
 assert.match(prompt, /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
 assert.match(prompt, /Attempt: 2/);

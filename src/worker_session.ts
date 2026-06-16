@@ -47,7 +47,7 @@ ${globalInstructions}
 `
     : "";
 
-  return `You are one Pi RPC worker session assigned to exactly one TODO task.
+  return `You are one Pi SDK worker session assigned to exactly one TODO task.
 
 Assigned TODO file path: \`${options.todoPath}\`
 Assigned task: \`${taskLabel(options.task)}\`
