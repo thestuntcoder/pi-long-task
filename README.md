@@ -6,19 +6,22 @@ It is useful when you want Pi to handle a multi-step change without losing track
 
 ## What you get
 
-When you ask Pi to use `pi_long_task`, it will:
+When you ask Pi to run a long task, it will:
 
-1. Create or clean up a TODO plan from your request.
-2. Work through each unfinished TODO task in order.
-3. Record progress and final results under `tmp/pi-long-task/<run-id>/`.
-4. Return a summary with completed, failed, blocked, and remaining task counts.
-5. Optionally commit completed work after each task.
+1. Recognize natural-language requests like "run a long task with commits" and route them to `pi_long_task`.
+2. Create or clean up a TODO plan from your request.
+3. Work through each unfinished TODO task in order.
+4. Show the current task and inferred subtask progress while it runs.
+5. Record progress and final results under `tmp/pi-long-task/<run-id>/`.
+6. Return a summary with completed, failed, blocked, and remaining task counts.
+7. Optionally commit completed work after each task.
 
 A finished run gives you:
 
 - a concise status summary in Pi
 - a generated `TODO.md`
 - a generated `TASK_RESULT.md`
+- live progress for the active task and its `**Status:**` checkbox subtasks
 - commit hashes when commits were enabled and created
 - any remaining or blocked tasks clearly listed
 
@@ -42,11 +45,23 @@ Or install the local checkout so Pi can load it normally:
 pi install /path/to/pi-long-task
 ```
 
-After installing, start `pi` in your target project and ask it to use the `pi_long_task` tool.
+After installing, start `pi` in your target project and ask it to run a long task.
+
+To update an existing npm install:
+
+```bash
+pi update npm:pi-long-task
+```
+
+Or update all installed Pi extension packages:
+
+```bash
+pi update --extensions
+```
 
 ## Usage
 
-Use natural language:
+Use natural language; you do not need to mention `pi_long_task` explicitly:
 
 ```text
 Run a long task without commits to add tests for the parser and fix any failures.
@@ -92,7 +107,21 @@ The tool has two inputs:
 
 For natural-language requests, Pi Long Task routes phrases like "run a long task with commits" to the tool with commits enabled. If you ask for a long task without mentioning commits, commits stay disabled.
 
+Natural-language routing intentionally avoids informational questions, such as "How do I run a long task with commits?", and explicit tool calls are left unchanged.
+
 No other public options are required.
+
+## Progress display
+
+While a task is running, Pi Long Task shows the active TODO and subtasks parsed from that task's `**Status:**` checkbox list.
+
+Status markers are:
+
+- `○` not started
+- green `●` done
+- orange `●` inferred as in progress
+
+Because workers currently report structured results at the end of a task, in-progress subtask state is inferred: the first unchecked status item is shown as in progress while the task runs.
 
 ## Commits and files
 
@@ -105,6 +134,8 @@ When `commit` is `true`, it may commit eligible task changes after a task report
 - files that were already dirty before the task started
 
 This lets you keep existing local work separate from Pi Long Task changes.
+
+Commit messages are generated from the task title and adjusted to resemble recent commit-message style in the repository. Pi Long Task does not prefix commits with generated labels like `Complete TODO 1 — ...`.
 
 ## Validate the install
 
