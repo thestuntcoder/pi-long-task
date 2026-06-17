@@ -5,8 +5,13 @@ import type { SessionOutcome } from "./worker_session.ts";
 
 export const PiLongTaskParams = Type.Object(
   {
-    inputText: Type.String({ description: "TODO file content or long-task instructions to process." }),
-    commit: Type.Boolean({ description: "Whether Pi Long Task may commit completed worker changes." }),
+    inputText: Type.String({
+      description: "TODO file content or the user's long-task instructions to process.",
+    }),
+    commit: Type.Boolean({
+      description:
+        "Whether Pi Long Task may commit completed worker changes. Use true when the user asks for commits or committing as work progresses; otherwise use false.",
+    }),
   },
   { additionalProperties: false },
 );
