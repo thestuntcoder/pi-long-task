@@ -46,6 +46,18 @@ After installing, start `pi` in your target project and ask it to use the `pi_lo
 
 ## Usage
 
+Use natural language:
+
+```text
+Run a long task without commits to add tests for the parser and fix any failures.
+```
+
+```text
+Run a long task with commits to implement the TODOs in @TODO.md.
+```
+
+You can also call the tool explicitly.
+
 Run without commits:
 
 ```text
@@ -77,6 +89,8 @@ The tool has two inputs:
 
 - `inputText` is the request or TODO markdown to work on.
 - `commit` controls whether Pi Long Task may create git commits.
+
+For natural-language requests, Pi Long Task routes phrases like "run a long task with commits" to the tool with commits enabled. If you ask for a long task without mentioning commits, commits stay disabled.
 
 No other public options are required.
 
