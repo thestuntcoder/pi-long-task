@@ -26,6 +26,20 @@ function outcomeFor(options: RunWorkerTaskOptions, status: string): SessionOutco
   };
 }
 
+function assertProgressStatuses(
+  updates: readonly CoordinatorProgressUpdate[],
+  phase: CoordinatorProgressUpdate["phase"],
+  taskId: string | undefined,
+  expected: Array<[string, string, string]>,
+): void {
+  const update = updates.find((item) => item.phase === phase && (taskId === undefined || item.taskId === taskId));
+  assert.ok(update, `expected ${phase}${taskId ? ` for TODO ${taskId}` : ""} progress update`);
+  assert.deepEqual(
+    update.taskProgress?.tasks.map((task) => [task.taskId, task.status, task.position]),
+    expected,
+  );
+}
+
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-long-task-test-"));
 try {
   const calls: Array<{ taskId: string; attempt: number; previousAttempts?: string }> = [];
@@ -34,24 +48,47 @@ try {
     return outcomeFor(options, "done");
   };
 
-  const progressUpdates: string[] = [];
+  const progressUpdates: CoordinatorProgressUpdate[] = [];
   const sequential = await runCoordinator({
     inputText: "- First task\n- Second task",
     commit: false,
     cwd: tempRoot,
     runId: "sequential",
     workerRunner: sequentialWorker,
-    onProgress: (update) => progressUpdates.push(update.message),
+    onProgress: (update) => progressUpdates.push(update),
   });
 
-  assert.deepEqual(progressUpdates, [
-    "Creating TODO plan...",
-    "Created TODO plan with 2 task(s).",
-    "Running TODO 1 — First task...",
-    "TODO 1 done.",
-    "Running TODO 2 — Second task...",
-    "TODO 2 done.",
-    "Pi Long Task done.",
+  assert.deepEqual(
+    progressUpdates.map((update) => update.message),
+    [
+      "Creating TODO plan...",
+      "Created TODO plan with 2 task(s).",
+      "Running TODO 1 — First task...",
+      "TODO 1 done.",
+      "Running TODO 2 — Second task...",
+      "TODO 2 done.",
+      "Pi Long Task done.",
+    ],
+  );
+  assertProgressStatuses(progressUpdates, "task_start", "1", [
+    ["1", "current", "current"],
+    ["2", "pending", "future"],
+  ]);
+  assertProgressStatuses(progressUpdates, "task_done", "1", [
+    ["1", "completed", "current"],
+    ["2", "pending", "future"],
+  ]);
+  assertProgressStatuses(progressUpdates, "task_start", "2", [
+    ["1", "completed", "past"],
+    ["2", "current", "current"],
+  ]);
+  assertProgressStatuses(progressUpdates, "task_done", "2", [
+    ["1", "completed", "past"],
+    ["2", "completed", "current"],
+  ]);
+  assertProgressStatuses(progressUpdates, "complete", undefined, [
+    ["1", "completed", "past"],
+    ["2", "completed", "past"],
   ]);
   assert.equal(sequential.status, "done");
   assert.equal(sequential.totalTasks, 2);
@@ -109,12 +146,14 @@ try {
     return outcomeFor(options, "partial");
   };
 
+  const failedProgressUpdates: CoordinatorProgressUpdate[] = [];
   const failed = await runCoordinator({
     inputText: "- Flaky task\n- Never reached",
     commit: true,
     cwd: tempRoot,
     runId: "retry-stop",
     workerRunner: retryWorker,
+    onProgress: (update) => failedProgressUpdates.push(update),
   });
 
   assert.equal(failed.status, "failed");
@@ -122,6 +161,15 @@ try {
   assert.equal(failed.completedTasks, 0);
   assert.equal(failed.attemptedTasks, 3);
   assert.match(failed.error ?? "", /did not report done after 3 attempt/);
+  assertProgressStatuses(failedProgressUpdates, "task_failed", "1", [
+    ["1", "failed", "current"],
+    ["2", "pending", "future"],
+  ]);
+  assertProgressStatuses(failedProgressUpdates, "complete", undefined, [
+    ["1", "failed", "current"],
+    ["2", "pending", "future"],
+  ]);
+  assert.equal(failed.taskProgress.currentTaskId, "1");
   assert.deepEqual(
     retryCalls.map((call) => `${call.taskId}:${call.attempt}`),
     ["1:1", "1:2", "1:3"],
@@ -142,6 +190,7 @@ try {
   assert.equal((failedResult.match(/## TODO 1 — Flaky task/g) ?? []).length, 3);
   assert.equal((failedResult.match(/## TODO 2 — Never reached/g) ?? []).length, 0);
 
+  const blockedProgressUpdates: CoordinatorProgressUpdate[] = [];
   const blocked = await runCoordinator({
     inputText: generatedTodoMarkdown(["Blocked task"]),
     commit: false,
@@ -149,10 +198,14 @@ try {
     runId: "blocked",
     workerRunner: async (options) => outcomeFor(options, "blocked"),
     maxAttemptsPerTask: 1,
+    onProgress: (update) => blockedProgressUpdates.push(update),
   });
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.blockedTasks, 1);
   assert.equal(blocked.failedTasks, 0);
+  assertProgressStatuses(blockedProgressUpdates, "task_blocked", "1", [["1", "blocked", "current"]]);
+  assertProgressStatuses(blockedProgressUpdates, "complete", undefined, [["1", "blocked", "current"]]);
+  assert.equal(blocked.taskProgress.currentTaskId, "1");
   assert.match(blocked.message, /Pi Long Task: blocked/);
   assert.match(blocked.message, /Remaining tasks:\n- TODO 1 — Blocked task \(blocked\)/);
 
@@ -214,6 +267,8 @@ try {
   assert.equal(commitSkipped.status, "failed");
   const failedUpdate = commitSkipUpdates.find((update) => update.phase === "task_failed");
   assert.equal(failedUpdate?.commitSkipped, "outcome is not eligible for commit");
+  assert.equal(failedUpdate?.currentTask?.status, "failed");
+  assert.deepEqual(failedUpdate?.subtasks, [{ text: "Complete skip commit for failed outcome", status: "failed" }]);
   assert.match(failedUpdate?.message ?? "", /commit skipped: outcome is not eligible for commit/);
 } finally {
   await rm(tempRoot, { recursive: true, force: true });

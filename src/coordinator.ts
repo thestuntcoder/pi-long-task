@@ -50,7 +50,7 @@ export type CoordinatorProgressPhase =
   | "task_failed"
   | "complete";
 
-export type CoordinatorProgressItemStatus = "empty" | "in_progress" | "done";
+export type CoordinatorProgressItemStatus = "empty" | "in_progress" | "done" | "failed" | "blocked";
 
 export interface CoordinatorProgressTask {
   taskId: string;
@@ -323,7 +323,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       blockedTasks,
       failedTasks,
     });
-    const taskProgress = buildTaskProgressModel({ tasks: finalTasks, attempts });
+    const taskProgress = buildCompletionTaskProgressModel(finalTasks, attempts, status);
     const summary = failure
       ? `Pi Long Task ${status}: ${failure}`
       : `Pi Long Task completed ${completedTasks}/${finalTasks.length} task(s).`;
@@ -502,14 +502,14 @@ function subtaskProgress(
   task: Pick<Task, "statusItems">,
   taskStatus: CoordinatorProgressItemStatus,
 ): CoordinatorProgressSubtask[] {
-  let markedInProgress = false;
+  let markedActive = false;
   return task.statusItems.map((item) => {
     if (item.done || taskStatus === "done") {
       return { text: item.text, status: "done" };
     }
-    if (taskStatus === "in_progress" && !markedInProgress) {
-      markedInProgress = true;
-      return { text: item.text, status: "in_progress" };
+    if ((taskStatus === "in_progress" || taskStatus === "failed" || taskStatus === "blocked") && !markedActive) {
+      markedActive = true;
+      return { text: item.text, status: taskStatus };
     }
     return { text: item.text, status: "empty" };
   });
@@ -574,7 +574,7 @@ function emitTaskOutcomeProgress(
     title: task.title,
     attempt: outcome.attempt,
     status: outcome.reportedStatus,
-    ...currentTaskProgress(task, outcome.done ? "done" : "in_progress"),
+    ...currentTaskProgress(task, outcomeProgressItemStatus(outcome)),
     taskProgress: buildTaskProgressModel({
       tasks,
       attempts,
@@ -594,9 +594,43 @@ function emitTaskOutcomeProgress(
   emitProgress(runtime, `TODO ${task.taskId} ${statusText}${commitText}.`, update);
 }
 
+function buildCompletionTaskProgressModel(
+  tasks: readonly Task[],
+  attempts: readonly TaskAttemptSummary[],
+  status: CoordinatorStatus,
+): TaskProgressModel {
+  if (status === "done") {
+    return buildTaskProgressModel({ tasks, attempts });
+  }
+
+  const lastIncompleteAttempt = [...attempts].reverse().find((attempt) => !attempt.done);
+  if (!lastIncompleteAttempt) {
+    return buildTaskProgressModel({ tasks, attempts });
+  }
+
+  return buildTaskProgressModel({
+    tasks,
+    attempts,
+    currentTaskId: lastIncompleteAttempt.taskId,
+    currentTaskStatus: outcomeTaskProgressStatus(lastIncompleteAttempt),
+  });
+}
+
 function outcomeTaskProgressStatus(outcome: Pick<SessionOutcome, "done" | "reportedStatus">): TaskProgressStatus {
   if (outcome.done) {
     return "completed";
+  }
+  if (outcome.reportedStatus === "blocked") {
+    return "blocked";
+  }
+  return "failed";
+}
+
+function outcomeProgressItemStatus(
+  outcome: Pick<SessionOutcome, "done" | "reportedStatus">,
+): CoordinatorProgressItemStatus {
+  if (outcome.done) {
+    return "done";
   }
   if (outcome.reportedStatus === "blocked") {
     return "blocked";

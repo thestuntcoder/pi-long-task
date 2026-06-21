@@ -24,7 +24,7 @@ export interface CoordinatorToolRenderDetails extends CoordinatorResultForRender
   runId?: string;
 }
 
-type ProgressItemStatus = "empty" | "in_progress" | "done";
+type ProgressItemStatus = "empty" | "in_progress" | "done" | "failed" | "blocked";
 
 interface ProgressTaskRenderDetails {
   taskId: string;
@@ -436,18 +436,32 @@ function progressSubtaskDetails(value: unknown): ProgressSubtaskRenderDetails[] 
 }
 
 function progressItemStatus(value: unknown): ProgressItemStatus | undefined {
-  return value === "empty" || value === "in_progress" || value === "done" ? value : undefined;
+  return value === "empty" || value === "in_progress" || value === "done" || value === "failed" || value === "blocked"
+    ? value
+    : undefined;
 }
 
 function progressBubble(status: ProgressItemStatus, theme: Theme): string {
-  return status === "empty" ? theme.fg("dim", "○") : theme.fg(progressTextColor(status), "●");
+  switch (status) {
+    case "empty":
+      return theme.fg("dim", "○");
+    case "failed":
+      return theme.fg("error", "✗");
+    case "blocked":
+      return theme.fg("warning", "!");
+    default:
+      return theme.fg(progressTextColor(status), "●");
+  }
 }
 
-function progressTextColor(status: ProgressItemStatus): "success" | "warning" | "dim" {
+function progressTextColor(status: ProgressItemStatus): "success" | "warning" | "dim" | "error" {
   if (status === "done") {
     return "success";
   }
-  if (status === "in_progress") {
+  if (status === "failed") {
+    return "error";
+  }
+  if (status === "in_progress" || status === "blocked") {
     return "warning";
   }
   return "dim";
