@@ -232,3 +232,33 @@ assert.equal(renderRequests, 2);
 sidebar.close();
 assert.equal(widgetCalls.at(-1)?.content, undefined);
 assert.ok(overlayClosed);
+
+assert.equal(createLongTaskSidebarController(undefined), undefined);
+assert.equal(createLongTaskSidebarController({ hasUI: false } as never), undefined);
+
+const fallbackWidgetCalls: Array<{ key: string; content: string[] | undefined; placement?: string }> = [];
+let fallbackCustomCalled = false;
+const fallbackSidebar = createLongTaskSidebarController({
+  hasUI: true,
+  mode: "json",
+  ui: {
+    setWidget(key: string, content: string[] | undefined, options?: { placement?: string }) {
+      fallbackWidgetCalls.push({ key, content, placement: options?.placement });
+    },
+    custom<T>(): Promise<T> {
+      fallbackCustomCalled = true;
+      throw new Error("overlay should not be registered outside TUI mode");
+    },
+  },
+} as never);
+assert.ok(fallbackSidebar);
+assert.equal(fallbackCustomCalled, false);
+assert.deepEqual(fallbackWidgetCalls[0], {
+  key: "pi-long-task-sidebar",
+  content: ["Pi Long Task: preparing sidebar..."],
+  placement: "aboveEditor",
+});
+fallbackSidebar.update(sidebarUpdate);
+assert.match(fallbackWidgetCalls.at(-1)?.content?.join("\n") ?? "", /Focus: TODO 2/);
+fallbackSidebar.close();
+assert.equal(fallbackWidgetCalls.at(-1)?.content, undefined);

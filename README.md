@@ -1,13 +1,13 @@
 # Pi Long Task
 
-Pi Long Task is a Pi extension that breaks large coding requests into tracked TODOs, executes them in isolated worker sessions, shows progress in a sidebar, and optionally commits completed work.
+Pi Long Task is a Pi extension that breaks large coding requests into tracked TODOs, executes them in isolated worker sessions, registers a real Pi TUI progress sidebar while a run is active, and optionally commits completed work.
 
 Use it when a coding request is bigger than one focused interaction. Pi Long Task creates or cleans up the TODO plan, hands each TODO to a fresh worker session, tracks every attempt, and keeps the run artifacts so you can inspect what happened later.
 
 ## Why use it
 
 - **Take on bigger tasks:** split broad product, refactor, testing, or cleanup requests into smaller TODOs that Pi can complete one at a time.
-- **Track progress visibly:** see the active TODO, inferred `**Status:**` subtasks, completed/failed/blocked counts, and remaining work in Pi's long-task sidebar.
+- **Track progress visibly:** in Pi TUI, see the active TODO, inferred `**Status:**` subtasks, completed/failed/blocked counts, and remaining work in the Pi Long Task sidebar while the run is active.
 - **Recover with retries:** tasks that do not report completion can be retried with context from previous attempts instead of losing the thread.
 - **Commit safely when asked:** enable commits for completed task work, while generated run files and pre-existing dirty files are kept out of those commits.
 - **Keep task artifacts:** every run writes a generated `TODO.md`, generated `TASK_RESULT.md`, attempt summaries, and final status under `tmp/pi-long-task/<run-id>/`.
@@ -20,18 +20,18 @@ When you ask Pi to run a long task, Pi Long Task:
 1. Recognizes natural-language requests like "run a long task with commits" and routes them to `pi_long_task`.
 2. Creates or cleans up a TODO plan from your request.
 3. Works through each unfinished TODO task in order using isolated worker sessions.
-4. Shows the current task and inferred subtask progress in a sidebar while it runs.
+4. Registers a Pi TUI sidebar/widget when UI support is available and updates it with the current task, inferred subtask progress, and full task timeline while the run is active.
 5. Retries unfinished tasks up to the configured attempt limit.
 6. Records progress, task artifacts, and final results under `tmp/pi-long-task/<run-id>/`.
 7. Returns a summary with completed, failed, blocked, and remaining task counts, plus worker spend when available.
 8. Optionally commits completed work after each task.
 
-A finished run gives you:
+During and after a run you get:
 
 - a concise status summary in Pi
 - a generated `TODO.md`
 - a generated `TASK_RESULT.md`
-- live sidebar progress for the active task and its `**Status:**` checkbox subtasks
+- live TUI sidebar progress during the run for the active task and its `**Status:**` checkbox subtasks
 - task attempt history and any remaining or blocked tasks clearly listed
 - worker spend when cost data is available
 - commit hashes when commits were enabled and created
@@ -96,7 +96,7 @@ Run a long task without commits to audit the README examples and leave the final
 
 ## What it looks like
 
-Pi keeps the active worker transcript in the main content area and shows the run timeline in the sidebar:
+In Pi TUI, Pi Long Task keeps worker activity in the main tool result flow and registers a real right-side TUI sidebar for the run timeline:
 
 ```text
 ┌─ Main content: active worker activity ─────────┬─ Pi Long Task sidebar ─────────┐
@@ -114,7 +114,7 @@ Pi keeps the active worker transcript in the main content area and shows the run
 └────────────────────────────────────────────────┴────────────────────────────────┘
 ```
 
-The real TUI uses responsive layout and colors; this README mockup stays narrow enough to avoid wrapping in package galleries.
+The actual sidebar is a Pi TUI overlay anchored on the right when the terminal is large enough, with a Pi widget fallback for UI contexts where the overlay is unavailable. It is cleared when the run finishes; this README mockup stays narrow enough to avoid wrapping in package galleries.
 
 ## How it works
 
@@ -122,15 +122,15 @@ Pi Long Task coordinates a long request from planning through task completion:
 
 1. **Plan the work:** it creates a TODO plan from your request, or normalizes pasted TODO markdown so each item can be tracked consistently.
 2. **Run isolated workers:** each TODO is assigned to its own fresh worker session with the relevant task text, global instructions, attempt history, and commit setting.
-3. **Stream progress back:** the active worker's activity streams into the main Pi thread, so you can follow commands, edits, verification, and the final `TASK_RESULT` as they happen.
-4. **Show every task in the sidebar:** the sidebar lists the full run timeline, including completed, active, upcoming, failed, or blocked tasks and inferred subtask progress from each task's `**Status:**` checklist.
+3. **Stream progress back:** the active worker's activity streams into the main Pi thread as partial tool results, so you can follow commands, edits, verification, and the final `TASK_RESULT` as they happen.
+4. **Update the Pi TUI sidebar:** when Pi provides UI support, the extension uses Pi's TUI UI APIs to maintain a real sidebar/widget that lists the full run timeline, including completed, active, upcoming, failed, or blocked tasks and inferred subtask progress from each task's `**Status:**` checklist.
 5. **Write run artifacts:** the coordinator writes the generated/normalized `TODO.md`, `TASK_RESULT.md`, attempt summaries, and final run details to `tmp/pi-long-task/<run-id>/`.
 6. **Commit only when enabled:** if `commit` is `true`, Pi Long Task may create a commit after each completed task using only eligible task changes. If commits are disabled, no commits are created; even when enabled, commits can be skipped when there are no eligible changes or the task outcome is not commit-worthy.
 
 ## Feature reference
 
-- **Sidebar task timeline:** every TODO appears in the sidebar with past, current, and future statuses so you can distinguish completed, active, upcoming, failed, blocked, and remaining work at a glance.
-- **Main-thread worker activity:** the active worker streams commands, edits, verification, and its per-task `TASK_RESULT` back into the main Pi conversation.
+- **Real Pi TUI sidebar:** in TUI sessions, every TODO appears in a registered sidebar/widget with past, current, and future statuses so you can distinguish completed, active, upcoming, failed, blocked, and remaining work at a glance.
+- **Main-thread worker activity:** the active worker still streams commands, edits, verification, and its per-task `TASK_RESULT` back into the main Pi conversation; the sidebar does not replace tool-result rendering.
 - **Cost visibility:** worker spend is included in Pi Long Task progress and is added to the main Pi `$ spent` total when cost data is available.
 - **Result and TODO artifacts:** each run keeps the generated or normalized `TODO.md`, aggregate `TASK_RESULT.md`, per-attempt summaries, and final run details under `tmp/pi-long-task/<run-id>/`.
 - **Commit-safe behavior:** when commits are enabled, Pi Long Task commits only eligible completed-task changes and skips generated run files.
@@ -180,7 +180,7 @@ No other public options are required.
 
 ## Progress display
 
-While a task is running, Pi Long Task shows the active TODO and subtasks parsed from that task's `**Status:**` checkbox list.
+While a task is running, Pi Long Task shows the active TODO and subtasks parsed from that task's `**Status:**` checkbox list. In Pi TUI this appears in the live sidebar/widget; in headless or non-UI contexts the same progress is still published through partial tool results.
 
 Status markers are:
 
