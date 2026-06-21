@@ -1,4 +1,4 @@
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
@@ -77,9 +77,9 @@ function toolDetails(result: CoordinatorResult) {
 
 const LONG_TASK_WIDGET_KEY = "pi-long-task-sidebar";
 
-type UiContext = NonNullable<Parameters<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>[4]>;
+type UiContext = ExtensionContext;
 
-interface LongTaskSidebarController {
+export interface LongTaskSidebarController {
   update(update: CoordinatorProgressUpdate): void;
   close(): void;
 }
@@ -106,7 +106,7 @@ class PiLongTaskSidebarComponent implements Component {
   }
 }
 
-function createLongTaskSidebarController(ctx: UiContext | undefined): LongTaskSidebarController | undefined {
+export function createLongTaskSidebarController(ctx: UiContext | undefined): LongTaskSidebarController | undefined {
   if (!ctx?.hasUI) {
     return undefined;
   }
@@ -172,10 +172,10 @@ function createLongTaskSidebarController(ctx: UiContext | undefined): LongTaskSi
       }
       closed = true;
       ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, undefined);
-      if (overlayHandle) {
-        overlayHandle.hide();
+      if (overlayDone) {
+        overlayDone(undefined);
       } else {
-        overlayDone?.(undefined);
+        overlayHandle?.hide();
       }
       overlayComponent = undefined;
       overlayTui = undefined;

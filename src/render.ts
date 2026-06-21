@@ -1,7 +1,7 @@
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Text, type Component } from "@earendil-works/pi-tui";
 
-import type { TaskProgressModel, TaskProgressStatus, TaskProgressTask } from "./task_progress.ts";
+import type { TaskProgressModel } from "./task_progress.ts";
 import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus } from "./types.ts";
 
 export interface CoordinatorResultForRendering {
@@ -36,72 +36,6 @@ interface ProgressTaskRenderDetails {
 interface ProgressSubtaskRenderDetails {
   text: string;
   status: ProgressItemStatus;
-}
-
-const SIDEBAR_MIN_SIDE_BY_SIDE_WIDTH = 84;
-const SIDEBAR_MIN_WIDTH = 26;
-const SIDEBAR_MAX_WIDTH = 40;
-const SIDEBAR_GAP = 2;
-
-class LongTaskSidebarShell implements Component {
-  private readonly mainText: string;
-  private readonly taskProgress: TaskProgressModel;
-  private readonly workerCostTotal: number | undefined;
-  private readonly theme: Theme;
-
-  constructor(mainText: string, taskProgress: TaskProgressModel, theme: Theme, workerCostTotal?: number) {
-    this.mainText = mainText;
-    this.taskProgress = taskProgress;
-    this.workerCostTotal = workerCostTotal;
-    this.theme = theme;
-  }
-
-  render(width: number): string[] {
-    if (width < SIDEBAR_MIN_SIDE_BY_SIDE_WIDTH) {
-      return this.renderStacked(width);
-    }
-
-    const sidebarWidth = clamp(Math.floor(width * 0.32), SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-    const mainWidth = width - sidebarWidth - SIDEBAR_GAP;
-    if (mainWidth < 40) {
-      return this.renderStacked(width);
-    }
-
-    const mainLines = renderWrappedLines(this.mainText, mainWidth);
-    const sidebarLines = this.renderSidebar(sidebarWidth);
-    const height = Math.max(mainLines.length, sidebarLines.length);
-    const lines: string[] = [];
-    for (let idx = 0; idx < height; idx += 1) {
-      const main = padLine(mainLines[idx] ?? "", mainWidth);
-      const sidebar = sidebarLines[idx] ?? "";
-      lines.push(truncateToWidth(`${main}${" ".repeat(SIDEBAR_GAP)}${sidebar}`, width));
-    }
-    return lines;
-  }
-
-  invalidate(): void {
-    // Rendering is computed from current state on each pass.
-  }
-
-  private renderStacked(width: number): string[] {
-    const mainLines = renderWrappedLines(this.mainText, width);
-    const sidebarLines = this.renderSidebar(width);
-    return [...mainLines, ...sidebarLines].map((line) => truncateToWidth(line, width));
-  }
-
-  private renderSidebar(width: number): string[] {
-    if (width < 8) {
-      return [];
-    }
-
-    const innerWidth = Math.max(0, width - 2);
-    const rows = sidebarRows(this.taskProgress, this.theme, this.workerCostTotal);
-    return [
-      sidebarBorder("Long Task", width, this.theme),
-      ...rows.map((row) => sidebarRow(row, innerWidth, this.theme)),
-      this.theme.fg("borderMuted", `└${"─".repeat(innerWidth)}┘`),
-    ];
-  }
 }
 
 export function formatCoordinatorResultMessage(result: CoordinatorResultForRendering): string {
@@ -160,10 +94,7 @@ export function renderLongTaskToolResult(
 ): Component {
   const details = recordOrUndefined(result.details);
   if (options.isPartial) {
-    const taskProgress = taskProgressModel(details?.taskProgress);
-    const workerCostTotal = numberValue(details?.workerCostTotal);
-    const main = renderLongTaskProgress(details, contentText(result), theme);
-    return taskProgress ? new LongTaskSidebarShell(main, taskProgress, theme, workerCostTotal) : new Text(main, 0, 0);
+    return new Text(renderLongTaskProgress(details, contentText(result), theme), 0, 0);
   }
 
   const finalDetails = longTaskDetails(details);
@@ -171,10 +102,7 @@ export function renderLongTaskToolResult(
     return new Text(contentText(result), 0, 0);
   }
 
-  const main = renderLongTaskSummary(finalDetails, options.expanded, theme);
-  return finalDetails.taskProgress
-    ? new LongTaskSidebarShell(main, finalDetails.taskProgress, theme, finalDetails.workerCostTotal)
-    : new Text(main, 0, 0);
+  return new Text(renderLongTaskSummary(finalDetails, options.expanded, theme), 0, 0);
 }
 
 function renderLongTaskProgress(details: Record<string, unknown> | undefined, fallback: string, theme: Theme): string {
@@ -253,172 +181,12 @@ function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: 
   return lines.join("\n");
 }
 
-function renderWrappedLines(text: string, width: number): string[] {
-  return new Text(text, 0, 0).render(Math.max(1, width)).map((line) => truncateToWidth(line, Math.max(1, width)));
-}
-
-function padLine(line: string, width: number): string {
-  return truncateToWidth(line, width, "…", true);
-}
-
-function sidebarRows(taskProgress: TaskProgressModel, theme: Theme, workerCostTotal?: number): string[] {
-  const summary = normalizedTaskProgressSummary(taskProgress);
-  const rows = [theme.fg("toolTitle", theme.bold("Task sidebar")), theme.fg("dim", "Centered timeline")];
-  if (workerCostTotal) {
-    rows.push(theme.fg("muted", `Worker spend: ${formatCost(workerCostTotal)}`));
-  }
-  if (summary.totalTasks === 0) {
-    rows.push("", theme.fg("muted", "Waiting for TODO plan..."));
-    return rows;
-  }
-
-  rows.push("", progressBarLine(summary.completedTasks, summary.totalTasks, summary.completedPercent, theme));
-  rows.push(progressCountsLine(summary, theme));
-
-  const currentIndex = focusedTaskIndex(taskProgress);
-  if (currentIndex >= 0) {
-    rows.push(theme.fg("warning", `Focus: TODO ${taskProgress.tasks[currentIndex]?.taskId ?? "?"}`));
-  } else {
-    rows.push(theme.fg("success", "No active task"));
-  }
-
-  rows.push("", theme.fg("muted", "Timeline"));
-  for (const [index, task] of taskProgress.tasks.entries()) {
-    if (currentIndex >= 0 && index === currentIndex && index > 0) {
-      rows.push(theme.fg("dim", "──── current ────"));
-    }
-    rows.push(renderSidebarTaskRow(task, theme));
-    if (currentIndex >= 0 && index === currentIndex && index < taskProgress.tasks.length - 1) {
-      rows.push(theme.fg("dim", "──── future ─────"));
-    }
-  }
-
-  return rows;
-}
-
-interface NormalizedTaskProgressSummary {
-  totalTasks: number;
-  completedTasks: number;
-  failedTasks: number;
-  blockedTasks: number;
-  pendingTasks: number;
-  currentTasks: number;
-  completedPercent: number;
-}
-
-function normalizedTaskProgressSummary(taskProgress: TaskProgressModel): NormalizedTaskProgressSummary {
-  const totalTasks = taskProgress.summary?.totalTasks ?? taskProgress.tasks.length;
-  const completedTasks = taskProgress.summary?.completedTasks ?? countTasksByStatus(taskProgress.tasks, "completed");
-  const failedTasks = taskProgress.summary?.failedTasks ?? countTasksByStatus(taskProgress.tasks, "failed");
-  const blockedTasks = taskProgress.summary?.blockedTasks ?? countTasksByStatus(taskProgress.tasks, "blocked");
-  const pendingTasks = taskProgress.summary?.pendingTasks ?? countTasksByStatus(taskProgress.tasks, "pending");
-  const currentTasks = taskProgress.summary?.currentTasks ?? countTasksByStatus(taskProgress.tasks, "current");
-  const completedPercent =
-    taskProgress.summary?.completedPercent ??
-    (totalTasks === 0 ? 100 : Math.round((completedTasks / totalTasks) * 100));
-
-  return {
-    totalTasks,
-    completedTasks,
-    failedTasks,
-    blockedTasks,
-    pendingTasks,
-    currentTasks,
-    completedPercent,
-  };
-}
-
-function countTasksByStatus(tasks: readonly TaskProgressTask[], status: TaskProgressStatus): number {
-  return tasks.filter((task) => task.status === status).length;
-}
-
-function progressBarLine(completedTasks: number, totalTasks: number, percent: number, theme: Theme): string {
-  const width = 10;
-  const filled = clamp(totalTasks === 0 ? width : Math.round((completedTasks / totalTasks) * width), 0, width);
-  const empty = Math.max(0, width - filled);
-  return `${theme.fg("muted", "Progress")} [${theme.fg("success", "#".repeat(filled))}${theme.fg(
-    "dim",
-    "-".repeat(empty),
-  )}] ${completedTasks}/${totalTasks} ${percent}%`;
-}
-
-function progressCountsLine(summary: NormalizedTaskProgressSummary, theme: Theme): string {
-  const parts = [
-    theme.fg("success", `✓ ${summary.completedTasks}`),
-    summary.currentTasks ? theme.fg("warning", `▶ ${summary.currentTasks}`) : undefined,
-    summary.pendingTasks ? theme.fg("dim", `○ ${summary.pendingTasks}`) : undefined,
-    summary.failedTasks ? theme.fg("error", `✗ ${summary.failedTasks}`) : undefined,
-    summary.blockedTasks ? theme.fg("warning", `! ${summary.blockedTasks}`) : undefined,
-  ].filter(Boolean);
-  return parts.join(" · ");
-}
-
-function focusedTaskIndex(taskProgress: TaskProgressModel): number {
-  if (typeof taskProgress.currentIndex === "number" && taskProgress.currentIndex >= 0) {
-    return taskProgress.currentIndex;
-  }
-
-  const currentIndex = taskProgress.tasks.findIndex((task) => task.status === "current" || task.position === "current");
-  if (currentIndex >= 0) {
-    return currentIndex;
-  }
-
-  if (typeof taskProgress.nextIndex === "number" && taskProgress.nextIndex >= 0) {
-    return taskProgress.nextIndex;
-  }
-  return taskProgress.tasks.findIndex((task) => task.status === "pending");
-}
-
-function renderSidebarTaskRow(task: TaskProgressTask, theme: Theme): string {
-  const { icon, color, label } = sidebarTaskStatusDetails(task.status);
-  const attempts =
-    task.attempts > 0 && task.status !== "completed"
-      ? ` · ${task.attempts} attempt${task.attempts === 1 ? "" : "s"}`
-      : "";
-  const text = `${icon} [${label}] TODO ${task.taskId} — ${task.title}${attempts}`;
-  return task.status === "current" ? theme.fg(color, theme.bold(text)) : theme.fg(color, text);
-}
-
-function sidebarTaskStatusDetails(status: TaskProgressStatus): {
-  icon: string;
-  color: "success" | "warning" | "error" | "dim" | "muted";
-  label: string;
-} {
-  switch (status) {
-    case "completed":
-      return { icon: "✓", color: "success", label: "completed" };
-    case "current":
-      return { icon: "▶", color: "warning", label: "current" };
-    case "failed":
-      return { icon: "✗", color: "error", label: "failed" };
-    case "blocked":
-      return { icon: "!", color: "warning", label: "blocked" };
-    case "pending":
-      return { icon: "○", color: "dim", label: "pending" };
-  }
-}
-
-function sidebarBorder(title: string, width: number, theme: Theme): string {
-  const innerWidth = Math.max(0, width - 2);
-  const titleText = truncateToWidth(` ${title} `, innerWidth, "");
-  const remaining = Math.max(0, innerWidth - visibleWidth(titleText));
-  return theme.fg("borderMuted", `┌${titleText}${"─".repeat(remaining)}┐`);
-}
-
-function sidebarRow(row: string, innerWidth: number, theme: Theme): string {
-  return `${theme.fg("borderMuted", "│")}${truncateToWidth(row, innerWidth, "…", true)}${theme.fg("borderMuted", "│")}`;
-}
-
 function taskProgressModel(value: unknown): TaskProgressModel | undefined {
   const record = recordOrUndefined(value);
   if (!record || !Array.isArray(record.tasks)) {
     return undefined;
   }
   return value as TaskProgressModel;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function progressTaskDetails(value: unknown): ProgressTaskRenderDetails | undefined {
