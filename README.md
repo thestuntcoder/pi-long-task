@@ -1,8 +1,17 @@
 # Pi Long Task
 
-Pi Long Task is a Pi extension that turns a larger coding request into a clear TODO plan, works through the tasks one by one, and reports the result.
+Pi Long Task is a Pi extension that breaks large coding requests into tracked TODOs, executes them in isolated worker sessions, shows progress in a sidebar, and optionally commits completed work.
 
-It is useful when you want Pi to handle a multi-step change without losing track of what has been done, what is still left, and whether changes should be committed.
+Use it when a coding request is bigger than one focused interaction: a coordinator creates or cleans up the TODO plan, hands each TODO to a fresh worker session, tracks every attempt, and keeps the run artifacts so you can inspect what happened later.
+
+## Why use it
+
+- **Take on bigger tasks:** split broad product, refactor, testing, or cleanup requests into smaller TODOs that Pi can complete one at a time.
+- **Track progress visibly:** see the active TODO, inferred `**Status:**` subtasks, completed/failed/blocked counts, and remaining work in Pi's long-task sidebar.
+- **Recover with retries:** tasks that do not report completion can be retried with context from previous attempts instead of losing the thread.
+- **Commit safely when asked:** enable commits for completed task work, while generated run files and pre-existing dirty files are kept out of those commits.
+- **Keep task artifacts:** every run writes a generated `TODO.md`, generated `TASK_RESULT.md`, attempt summaries, and final status under `tmp/pi-long-task/<run-id>/`.
+- **Watch cost visibility:** worker spend is captured and surfaced in progress and final summaries when usage cost data is available.
 
 ## What you get
 
@@ -10,20 +19,22 @@ When you ask Pi to run a long task, it will:
 
 1. Recognize natural-language requests like "run a long task with commits" and route them to `pi_long_task`.
 2. Create or clean up a TODO plan from your request.
-3. Work through each unfinished TODO task in order.
-4. Show the current task and inferred subtask progress while it runs.
-5. Record progress and final results under `tmp/pi-long-task/<run-id>/`.
-6. Return a summary with completed, failed, blocked, and remaining task counts.
-7. Optionally commit completed work after each task.
+3. Work through each unfinished TODO task in order using isolated worker sessions.
+4. Show the current task and inferred subtask progress in a sidebar while it runs.
+5. Retry unfinished tasks up to the configured attempt limit.
+6. Record progress, task artifacts, and final results under `tmp/pi-long-task/<run-id>/`.
+7. Return a summary with completed, failed, blocked, and remaining task counts, plus worker spend when available.
+8. Optionally commit completed work after each task.
 
 A finished run gives you:
 
 - a concise status summary in Pi
 - a generated `TODO.md`
 - a generated `TASK_RESULT.md`
-- live progress for the active task and its `**Status:**` checkbox subtasks
+- live sidebar progress for the active task and its `**Status:**` checkbox subtasks
+- task attempt history and any remaining or blocked tasks clearly listed
+- worker spend when cost data is available
 - commit hashes when commits were enabled and created
-- any remaining or blocked tasks clearly listed
 
 ## Install
 
