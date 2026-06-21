@@ -20,6 +20,7 @@ function outcomeFor(options: RunWorkerTaskOptions, status: string): SessionOutco
     contextObservations: [],
     compactionEvents: [],
     events: [],
+    workerCostTotal: 0,
     shutdownRequested: false,
     timedOut: false,
     aborted: false,

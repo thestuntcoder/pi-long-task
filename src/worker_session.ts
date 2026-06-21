@@ -201,7 +201,7 @@ export interface WorkerSessionLike {
   compact?(customInstructions?: string): Promise<unknown>;
   dispose?(): void;
   getLastAssistantText?(): string | undefined;
-  getSessionStats?(): unknown;
+  getSessionStats?(): unknown | Promise<unknown>;
   getContextUsage?(): unknown;
   sessionFile?: string;
   sessionId?: string;
@@ -246,6 +246,7 @@ export interface CapturedWorkerEvent {
   toolName?: string;
   isError?: boolean;
   note?: string;
+  usageCostTotal?: number;
 }
 
 export interface SessionOutcome {
@@ -261,6 +262,8 @@ export interface SessionOutcome {
   contextObservations: string[];
   compactionEvents: string[];
   events: CapturedWorkerEvent[];
+  workerCostTotal: number;
+  workerCostSource?: string;
   shutdownRequested: boolean;
   timedOut: boolean;
   aborted: boolean;
@@ -345,6 +348,9 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
   let error: string | undefined;
   let finished = false;
   let turnCount = 0;
+  let messageUsageCostTotal = 0;
+  let hasMessageUsageCost = false;
+  let sessionStatsCostTotal: number | undefined;
 
   const prompt = buildTaskPrompt(options);
   const taskTimeoutSeconds = options.taskTimeoutSeconds ?? DEFAULT_TASK_TIMEOUT_SECONDS;
@@ -364,6 +370,14 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
       clearTimeout(timer);
     }
     timers.clear();
+  };
+
+  const recordWorkerUsageCost = (cost: number | undefined) => {
+    if (cost === undefined) {
+      return;
+    }
+    hasMessageUsageCost = true;
+    messageUsageCostTotal += cost;
   };
 
   const schedule = (fn: () => void | Promise<void>, ms: number) => {
@@ -458,6 +472,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
           if (messageText) {
             assistantText = messageText;
           }
+          recordWorkerUsageCost(workerUsageCostFromEvent(event));
           break;
         }
         case "turn_end": {
@@ -538,6 +553,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
       assistantText = latestAssistantText(session, assistantText);
       sessionFile = session.sessionFile ?? sessionFile;
       sessionId = session.sessionId ?? sessionId;
+      sessionStatsCostTotal = await workerUsageCostFromSessionStats(session);
       session.dispose?.();
     }
   }
@@ -547,6 +563,10 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
   }
 
   const reportedStatus = parseReportedStatus(assistantText);
+  const capturedWorkerCost = selectWorkerCostTotal({
+    messageCostTotal: hasMessageUsageCost ? messageUsageCostTotal : undefined,
+    statsCostTotal: sessionStatsCostTotal,
+  });
   return {
     task: options.task,
     attempt: options.attempt,
@@ -560,6 +580,8 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     contextObservations,
     compactionEvents,
     events,
+    workerCostTotal: capturedWorkerCost.total,
+    workerCostSource: capturedWorkerCost.source,
     shutdownRequested,
     timedOut,
     aborted: aborted || Boolean(options.abortSignal?.aborted),
@@ -723,9 +745,13 @@ function summarizeWorkerEvent(event: unknown): CapturedWorkerEvent | undefined {
     };
   }
 
+  if (event.type === "message_end") {
+    const usageCostTotal = workerUsageCostFromEvent(event);
+    return usageCostTotal === undefined ? { type: event.type } : { type: event.type, usageCostTotal };
+  }
+
   if (
     event.type === "turn_end" ||
-    event.type === "message_end" ||
     event.type === "compaction_start" ||
     event.type === "compaction_end" ||
     event.type === "agent_end" ||
@@ -736,6 +762,81 @@ function summarizeWorkerEvent(event: unknown): CapturedWorkerEvent | undefined {
   }
 
   return undefined;
+}
+
+export function workerUsageCostFromEvent(event: unknown): number | undefined {
+  if (!isRecord(event)) {
+    return undefined;
+  }
+
+  for (const candidate of [event.assistantMessage, event.message, event]) {
+    const cost = workerUsageCostFromAssistantMessage(candidate);
+    if (cost !== undefined) {
+      return cost;
+    }
+  }
+  return undefined;
+}
+
+export function workerUsageCostFromAssistantMessage(message: unknown): number | undefined {
+  if (!isRecord(message)) {
+    return undefined;
+  }
+  return usageCostTotal(message.usage);
+}
+
+export function workerUsageCostFromStats(stats: unknown): number | undefined {
+  if (!isRecord(stats)) {
+    return undefined;
+  }
+
+  const directCost = finiteNonNegativeNumber(stats.cost);
+  if (directCost !== undefined) {
+    return directCost;
+  }
+
+  return usageCostTotal(stats.usage) ?? usageCostTotal(stats);
+}
+
+async function workerUsageCostFromSessionStats(session: WorkerSessionLike): Promise<number | undefined> {
+  if (!session.getSessionStats) {
+    return undefined;
+  }
+
+  try {
+    return workerUsageCostFromStats(await session.getSessionStats());
+  } catch {
+    return undefined;
+  }
+}
+
+function usageCostTotal(usage: unknown): number | undefined {
+  if (!isRecord(usage)) {
+    return undefined;
+  }
+
+  const cost = usage.cost;
+  if (isRecord(cost)) {
+    return finiteNonNegativeNumber(cost.total);
+  }
+  return finiteNonNegativeNumber(cost);
+}
+
+function selectWorkerCostTotal(options: {
+  messageCostTotal: number | undefined;
+  statsCostTotal: number | undefined;
+}): { total: number; source?: string } {
+  if (options.statsCostTotal !== undefined) {
+    return { total: options.statsCostTotal, source: "session_stats" };
+  }
+  if (options.messageCostTotal !== undefined) {
+    return { total: options.messageCostTotal, source: "message_end" };
+  }
+  return { total: 0 };
+}
+
+function finiteNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function captureContextUsage(

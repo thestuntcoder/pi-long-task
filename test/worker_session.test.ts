@@ -12,6 +12,8 @@ import {
   lastAssistantTextFromEvents,
   lastAssistantTextFromMessages,
   runWorkerTask,
+  workerUsageCostFromEvent,
+  workerUsageCostFromStats,
 } from "../src/worker_session.ts";
 
 const task = {
@@ -100,6 +102,14 @@ assert.equal(
 );
 assert.equal(assistantTextFromEvent({ role: "assistant", content: "direct event" }), "direct event");
 assert.equal(
+  workerUsageCostFromEvent({
+    type: "message_end",
+    assistantMessage: { role: "assistant", usage: { cost: { total: 0.0123 } } },
+  }),
+  0.0123,
+);
+assert.equal(workerUsageCostFromStats({ cost: 0.0456 }), 0.0456);
+assert.equal(
   lastAssistantTextFromEvents([
     { message: { role: "assistant", content: "first event" } },
     { messages: [{ role: "assistant", content: "last event" }] },
@@ -113,9 +123,13 @@ class FakeWorkerSession {
   messages: unknown[] = [];
   private listeners: Array<(event: unknown) => void> = [];
   private readonly responses: string[];
+  private readonly responseCosts: Array<number | undefined>;
+  private readonly statsCost: number | undefined;
 
-  constructor(responses: string[]) {
+  constructor(responses: string[], options: { responseCosts?: Array<number | undefined>; statsCost?: number } = {}) {
     this.responses = responses;
+    this.responseCosts = [...(options.responseCosts ?? [])];
+    this.statsCost = options.statsCost;
   }
 
   subscribe(listener: (event: unknown) => void): () => void {
@@ -130,7 +144,11 @@ class FakeWorkerSession {
     const response = this.responses.shift() ?? "";
     this.emit({ type: "message_start", message: { role: "assistant" } });
     this.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: response } });
-    const message = { role: "assistant", content: response };
+    const cost = this.responseCosts.shift();
+    const message =
+      cost === undefined
+        ? { role: "assistant", content: response }
+        : { role: "assistant", content: response, usage: { cost: { total: cost } } };
     this.messages.push(message);
     this.emit({ type: "message_end", message });
     this.emit({ type: "turn_end", message, toolResults: [] });
@@ -139,6 +157,10 @@ class FakeWorkerSession {
 
   getLastAssistantText(): string | undefined {
     return this.responses.length < 2 ? lastAssistantTextFromMessages(this.messages) : undefined;
+  }
+
+  getSessionStats(): unknown {
+    return this.statsCost === undefined ? undefined : { cost: this.statsCost };
   }
 
   dispose(): void {}
@@ -176,6 +198,61 @@ assert.equal(fakeDoneOutcome.done, true);
 assert.equal(fakeDoneSession.prompts.length, 1);
 assert.match(fakeDoneSession.prompts[0], /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
 assert.ok(fakeDoneOutcome.events.some((event) => event.type === "message_update" && event.textDelta));
+
+const fakeCostSession = new FakeWorkerSession(
+  [
+    `TASK_RESULT:
+status: done
+summary: ok
+changes:
+- none
+verification:
+- not run
+remaining:
+- none`,
+  ],
+  { responseCosts: [0.0012], statsCost: 0.0012 },
+);
+const fakeCostOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({ session: fakeCostSession }),
+});
+assert.equal(fakeCostOutcome.workerCostTotal, 0.0012);
+assert.equal(fakeCostOutcome.workerCostSource, "session_stats");
+assert.ok(fakeCostOutcome.events.some((event) => event.type === "message_end" && event.usageCostTotal === 0.0012));
+
+const fakeEventCostSession = new FakeWorkerSession(
+  [
+    `TASK_RESULT:
+status: done
+summary: ok
+changes:
+- none
+verification:
+- not run
+remaining:
+- none`,
+  ],
+  { responseCosts: [0.0023] },
+);
+const fakeEventCostOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({ session: fakeEventCostSession }),
+});
+assert.equal(fakeEventCostOutcome.workerCostTotal, 0.0023);
+assert.equal(fakeEventCostOutcome.workerCostSource, "message_end");
 
 const fakeMissingResultSession = new FakeWorkerSession([
   "I finished but forgot the block.",
