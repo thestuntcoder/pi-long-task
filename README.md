@@ -116,6 +116,17 @@ Pi keeps the active worker transcript in the main content area and shows the run
 └──────────────────────────────────────────────────────┴──────────────────────────────────────┘
 ```
 
+## How it works
+
+Pi Long Task coordinates a long request from planning through task completion:
+
+1. **Plan the work:** it creates a TODO plan from your request, or normalizes pasted TODO markdown so the coordinator can track each item consistently.
+2. **Run isolated workers:** each TODO is assigned to its own fresh worker session with the relevant task text, global instructions, attempt history, and commit setting.
+3. **Stream progress back:** the active worker's activity streams into the main Pi thread, so you can follow commands, edits, verification, and the final `TASK_RESULT` as they happen.
+4. **Show every task in the sidebar:** the sidebar lists the full run timeline, including completed, active, upcoming, failed, or blocked tasks and inferred subtask progress from each task's `**Status:**` checklist.
+5. **Write run artifacts:** the coordinator writes the generated/normalized `TODO.md`, `TASK_RESULT.md`, attempt summaries, and final run details to `tmp/pi-long-task/<run-id>/`.
+6. **Commit only when enabled:** if `commit` is `true`, Pi Long Task may create a commit after each completed task using only eligible task changes. If commits are disabled, no commits are created; even when enabled, commits can be skipped when there are no eligible changes or the task outcome is not commit-worthy.
+
 ## Usage
 
 You can also call the tool explicitly.
