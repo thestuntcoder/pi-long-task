@@ -1,5 +1,5 @@
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 import type { TaskProgressModel } from "./task_progress.ts";
 import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus } from "./types.ts";
@@ -35,6 +35,70 @@ interface ProgressTaskRenderDetails {
 interface ProgressSubtaskRenderDetails {
   text: string;
   status: ProgressItemStatus;
+}
+
+const SIDEBAR_MIN_SIDE_BY_SIDE_WIDTH = 84;
+const SIDEBAR_MIN_WIDTH = 26;
+const SIDEBAR_MAX_WIDTH = 40;
+const SIDEBAR_GAP = 2;
+
+class LongTaskSidebarShell implements Component {
+  private readonly mainText: string;
+  private readonly taskProgress: TaskProgressModel;
+  private readonly theme: Theme;
+
+  constructor(mainText: string, taskProgress: TaskProgressModel, theme: Theme) {
+    this.mainText = mainText;
+    this.taskProgress = taskProgress;
+    this.theme = theme;
+  }
+
+  render(width: number): string[] {
+    if (width < SIDEBAR_MIN_SIDE_BY_SIDE_WIDTH) {
+      return this.renderStacked(width);
+    }
+
+    const sidebarWidth = clamp(Math.floor(width * 0.32), SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    const mainWidth = width - sidebarWidth - SIDEBAR_GAP;
+    if (mainWidth < 40) {
+      return this.renderStacked(width);
+    }
+
+    const mainLines = renderWrappedLines(this.mainText, mainWidth);
+    const sidebarLines = this.renderSidebar(sidebarWidth);
+    const height = Math.max(mainLines.length, sidebarLines.length);
+    const lines: string[] = [];
+    for (let idx = 0; idx < height; idx += 1) {
+      const main = padLine(mainLines[idx] ?? "", mainWidth);
+      const sidebar = sidebarLines[idx] ?? "";
+      lines.push(truncateToWidth(`${main}${" ".repeat(SIDEBAR_GAP)}${sidebar}`, width));
+    }
+    return lines;
+  }
+
+  invalidate(): void {
+    // Rendering is computed from current state on each pass.
+  }
+
+  private renderStacked(width: number): string[] {
+    const mainLines = renderWrappedLines(this.mainText, width);
+    const sidebarLines = this.renderSidebar(width);
+    return [...mainLines, ...sidebarLines].map((line) => truncateToWidth(line, width));
+  }
+
+  private renderSidebar(width: number): string[] {
+    if (width < 8) {
+      return [];
+    }
+
+    const innerWidth = Math.max(0, width - 2);
+    const rows = sidebarRows(this.taskProgress, this.theme);
+    return [
+      sidebarBorder("Long Task", width, this.theme),
+      ...rows.map((row) => sidebarRow(row, innerWidth, this.theme)),
+      this.theme.fg("borderMuted", `└${"─".repeat(innerWidth)}┘`),
+    ];
+  }
 }
 
 export function formatCoordinatorResultMessage(result: CoordinatorResultForRendering): string {
@@ -86,10 +150,12 @@ export function renderLongTaskToolResult(
   result: AgentToolResult<unknown>,
   options: ToolRenderResultOptions,
   theme: Theme,
-): Text {
+): Component {
   const details = recordOrUndefined(result.details);
   if (options.isPartial) {
-    return new Text(renderLongTaskProgress(details, contentText(result), theme), 0, 0);
+    const taskProgress = taskProgressModel(details?.taskProgress);
+    const main = renderLongTaskProgress(details, contentText(result), theme);
+    return taskProgress ? new LongTaskSidebarShell(main, taskProgress, theme) : new Text(main, 0, 0);
   }
 
   const finalDetails = longTaskDetails(details);
@@ -97,7 +163,10 @@ export function renderLongTaskToolResult(
     return new Text(contentText(result), 0, 0);
   }
 
-  return new Text(renderLongTaskSummary(finalDetails, options.expanded, theme), 0, 0);
+  const main = renderLongTaskSummary(finalDetails, options.expanded, theme);
+  return finalDetails.taskProgress
+    ? new LongTaskSidebarShell(main, finalDetails.taskProgress, theme)
+    : new Text(main, 0, 0);
 }
 
 function renderLongTaskProgress(details: Record<string, unknown> | undefined, fallback: string, theme: Theme): string {
@@ -173,6 +242,57 @@ function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: 
   }
 
   return lines.join("\n");
+}
+
+function renderWrappedLines(text: string, width: number): string[] {
+  return new Text(text, 0, 0).render(Math.max(1, width)).map((line) => truncateToWidth(line, Math.max(1, width)));
+}
+
+function padLine(line: string, width: number): string {
+  return truncateToWidth(line, width, "…", true);
+}
+
+function sidebarRows(taskProgress: TaskProgressModel, theme: Theme): string[] {
+  const total = taskProgress.summary?.totalTasks || taskProgress.tasks.length;
+  const rows = [theme.fg("toolTitle", theme.bold("Task sidebar")), theme.fg("dim", "Timeline pane")];
+  if (total === 0) {
+    rows.push("", theme.fg("muted", "Waiting for TODO plan..."));
+    return rows;
+  }
+
+  rows.push("", `${total} TODO${total === 1 ? "" : "s"} loaded`);
+  if (taskProgress.currentTask) {
+    rows.push(theme.fg("warning", `Current: TODO ${taskProgress.currentTask.taskId}`));
+  } else if (taskProgress.nextTask) {
+    rows.push(theme.fg("muted", `Next: TODO ${taskProgress.nextTask.taskId}`));
+  } else {
+    rows.push(theme.fg("success", "No active task"));
+  }
+  rows.push("", theme.fg("dim", "Detailed timeline appears here."));
+  return rows;
+}
+
+function sidebarBorder(title: string, width: number, theme: Theme): string {
+  const innerWidth = Math.max(0, width - 2);
+  const titleText = truncateToWidth(` ${title} `, innerWidth, "");
+  const remaining = Math.max(0, innerWidth - visibleWidth(titleText));
+  return theme.fg("borderMuted", `┌${titleText}${"─".repeat(remaining)}┐`);
+}
+
+function sidebarRow(row: string, innerWidth: number, theme: Theme): string {
+  return `${theme.fg("borderMuted", "│")}${truncateToWidth(row, innerWidth, "…", true)}${theme.fg("borderMuted", "│")}`;
+}
+
+function taskProgressModel(value: unknown): TaskProgressModel | undefined {
+  const record = recordOrUndefined(value);
+  if (!record || !Array.isArray(record.tasks)) {
+    return undefined;
+  }
+  return value as TaskProgressModel;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function progressTaskDetails(value: unknown): ProgressTaskRenderDetails | undefined {
@@ -254,6 +374,7 @@ function longTaskDetails(details: Record<string, unknown> | undefined): Coordina
     runId: stringValue(details.runId),
     commits: commitSummaries(details.commits),
     remainingTasks: remainingTaskSummaries(details.remainingTasks),
+    taskProgress: taskProgressModel(details.taskProgress),
     error: stringValue(details.error),
   };
 }

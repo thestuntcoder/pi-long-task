@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 import { renderLongTaskToolCall, renderLongTaskToolResult } from "../src/render.ts";
 
 const theme = {
@@ -116,3 +118,75 @@ const call = renderLongTaskToolCall(
   theme,
 );
 assert.equal(renderText(call), 'pi_long_task commit:on "Create a marker file and verify it with cat."');
+
+const progressWithSidebar = renderLongTaskToolResult(
+  {
+    content: [{ type: "text", text: "Running TODO 2 — Add Sidebar Shell..." }],
+    details: {
+      phase: "task_start",
+      message: "Running TODO 2 — Add Sidebar Shell...",
+      currentTask: { taskId: "2", title: "Add Sidebar Shell", status: "in_progress" },
+      taskProgress: {
+        tasks: [
+          {
+            taskId: "1",
+            title: "Audit",
+            status: "completed",
+            position: "past",
+            done: true,
+            statusItems: [],
+            attempts: 1,
+          },
+          {
+            taskId: "2",
+            title: "Add Sidebar Shell",
+            status: "current",
+            position: "current",
+            done: false,
+            statusItems: [],
+            attempts: 0,
+          },
+          {
+            taskId: "3",
+            title: "Timeline",
+            status: "pending",
+            position: "future",
+            done: false,
+            statusItems: [],
+            attempts: 0,
+          },
+        ],
+        summary: {
+          totalTasks: 3,
+          completedTasks: 1,
+          failedTasks: 0,
+          blockedTasks: 0,
+          pendingTasks: 1,
+          currentTasks: 1,
+          attemptedTasks: 1,
+          completionRatio: 1 / 3,
+          completedPercent: 33,
+        },
+        currentTaskId: "2",
+        currentIndex: 1,
+        currentTask: {
+          taskId: "2",
+          title: "Add Sidebar Shell",
+          status: "current",
+          position: "current",
+          done: false,
+          statusItems: [],
+          attempts: 0,
+        },
+      },
+    },
+  } satisfies AgentToolResult<unknown>,
+  { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+  theme,
+);
+const sidebarLines = progressWithSidebar.render(100);
+assert.match(sidebarLines.join("\n"), /TODO 2 .* Add Sidebar Shell/);
+assert.match(sidebarLines.join("\n"), /Long Task/);
+assert.match(sidebarLines.join("\n"), /Task sidebar/);
+assert.match(sidebarLines.join("\n"), /Current: TODO 2/);
+assert.ok(sidebarLines.every((line) => visibleWidth(line) <= 100));
