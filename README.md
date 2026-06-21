@@ -70,17 +70,53 @@ Or update all installed Pi extension packages:
 pi update --extensions
 ```
 
-## Usage
+## Quick start examples
 
-Use natural language; you do not need to mention `pi_long_task` explicitly:
+Use natural language; you do not need to mention `pi_long_task` explicitly. Copy one of these prompts and replace the quoted work with your own task.
+
+Run with commits enabled, so each completed TODO can be committed separately:
+
+```text
+Run a long task with commits to implement the TODOs in @TODO.md.
+```
+
+```text
+Run a long task with commits to refactor the checkout flow, update the tests, and commit each completed task.
+```
+
+Run without commits when you want to review all changes yourself before committing:
 
 ```text
 Run a long task without commits to add tests for the parser and fix any failures.
 ```
 
 ```text
-Run a long task with commits to implement the TODOs in @TODO.md.
+Run a long task without commits to audit the README examples and leave the final diff uncommitted.
 ```
+
+## What it looks like
+
+Pi keeps the active worker transcript in the main content area and shows the run timeline in the sidebar:
+
+```text
+┌─ Main content: active worker activity ───────────────┬─ Pi Long Task sidebar ───────────────┐
+│ Worker TODO 2 — Add parser tests                    │ Progress: 2/5 tasks complete (40%)   │
+│                                                      │ Worker spend: $0.18                  │
+│ $ npm test -- parser                                │                                      │
+│ ✓ parser handles nested arrays                      │ Timeline                             │
+│ ✗ parser rejects invalid escapes                    │ ● TODO 1 Rewrite intro        done   │
+│                                                      │ ● TODO 2 Add parser tests     active │
+│ Editing src/parser.test.ts...                       │   ◌ add edge-case fixtures           │
+│ Re-running focused tests after fix...               │   ◌ fix failing assertions           │
+│                                                      │ ○ TODO 3 Update docs          next   │
+│                                                      │ ○ TODO 4 Validate install     later  │
+│                                                      │                                      │
+│ The worker reports commands, file edits, and result  │ Sidebar tracks task statuses,        │
+│ details here while the current TODO is running.      │ subtask progress, timeline, spend.   │
+└──────────────────────────────────────────────────────┴──────────────────────────────────────┘
+```
+
+## Usage
 
 You can also call the tool explicitly.
 
