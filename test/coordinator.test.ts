@@ -121,6 +121,58 @@ try {
   assert.match(sequentialResult, /## TODO 2 — Second task \(attempt 1\)/);
   assert.match(sequentialResult, /status: done/);
 
+  const costProgressUpdates: CoordinatorProgressUpdate[] = [];
+  const costByTask = new Map([
+    ["1", 0.125],
+    ["2", 0.25],
+  ]);
+  const costRun = await runCoordinator({
+    inputText: generatedTodoMarkdown(["Costed worker one", "Costed worker two"]),
+    commit: false,
+    cwd: tempRoot,
+    runId: "worker-cost",
+    workerRunner: async (options) => {
+      const cost = costByTask.get(options.task.taskId) ?? 0;
+      options.onEvent?.({
+        type: "message_end",
+        usageCostTotal: cost / 4,
+        usageCostKey: `message:${options.task.taskId}:1`,
+      });
+      options.onEvent?.({
+        type: "message_end",
+        usageCostTotal: cost / 4,
+        usageCostKey: `message:${options.task.taskId}:1`,
+      });
+      options.onEvent?.({
+        type: "message_end",
+        usageCostTotal: (cost * 3) / 4,
+        usageCostKey: `message:${options.task.taskId}:2`,
+      });
+      return { ...outcomeFor(options, "done"), workerCostTotal: cost };
+    },
+    onProgress: (update) => costProgressUpdates.push(update),
+  });
+  assert.equal(costRun.workerCostTotal, 0.375);
+  assert.deepEqual(
+    costRun.outcomes.map((outcome) => outcome.workerCostTotal),
+    [0.125, 0.25],
+  );
+  assert.equal(
+    costProgressUpdates.filter((update) => update.phase === "worker_tool" && update.workerEventType === "message_end")
+      .length,
+    4,
+  );
+  assert.equal(
+    costProgressUpdates.find((update) => update.phase === "task_done" && update.taskId === "1")?.workerCostTotal,
+    0.125,
+  );
+  assert.equal(
+    costProgressUpdates.find((update) => update.phase === "task_done" && update.taskId === "2")?.workerCostTotal,
+    0.375,
+  );
+  assert.equal(costProgressUpdates.at(-1)?.workerCostTotal, 0.375);
+  assert.match(costRun.message, /Worker spend: \$0\.38/);
+
   let plannerCalled = false;
   const planned = await runCoordinator({
     inputText: "Build a feature from an unstructured paragraph.",

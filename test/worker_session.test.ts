@@ -125,11 +125,16 @@ class FakeWorkerSession {
   private readonly responses: string[];
   private readonly responseCosts: Array<number | undefined>;
   private readonly statsCost: number | undefined;
+  private readonly duplicateMessageEnd: boolean;
 
-  constructor(responses: string[], options: { responseCosts?: Array<number | undefined>; statsCost?: number } = {}) {
+  constructor(
+    responses: string[],
+    options: { responseCosts?: Array<number | undefined>; statsCost?: number; duplicateMessageEnd?: boolean } = {},
+  ) {
     this.responses = responses;
     this.responseCosts = [...(options.responseCosts ?? [])];
     this.statsCost = options.statsCost;
+    this.duplicateMessageEnd = Boolean(options.duplicateMessageEnd);
   }
 
   subscribe(listener: (event: unknown) => void): () => void {
@@ -145,12 +150,16 @@ class FakeWorkerSession {
     this.emit({ type: "message_start", message: { role: "assistant" } });
     this.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: response } });
     const cost = this.responseCosts.shift();
+    const id = `assistant-${this.prompts.length}`;
     const message =
       cost === undefined
-        ? { role: "assistant", content: response }
-        : { role: "assistant", content: response, usage: { cost: { total: cost } } };
+        ? { id, role: "assistant", content: response }
+        : { id, role: "assistant", content: response, usage: { cost: { total: cost } } };
     this.messages.push(message);
     this.emit({ type: "message_end", message });
+    if (this.duplicateMessageEnd) {
+      this.emit({ type: "message_end", message });
+    }
     this.emit({ type: "turn_end", message, toolResults: [] });
     this.emit({ type: "agent_end", messages: this.messages });
   }
@@ -253,6 +262,33 @@ const fakeEventCostOutcome = await runWorkerTask({
 });
 assert.equal(fakeEventCostOutcome.workerCostTotal, 0.0023);
 assert.equal(fakeEventCostOutcome.workerCostSource, "message_end");
+
+const fakeDuplicateCostSession = new FakeWorkerSession(
+  [
+    `TASK_RESULT:
+status: done
+summary: ok
+changes:
+- none
+verification:
+- not run
+remaining:
+- none`,
+  ],
+  { responseCosts: [0.0034], duplicateMessageEnd: true },
+);
+const fakeDuplicateCostOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({ session: fakeDuplicateCostSession }),
+});
+assert.equal(fakeDuplicateCostOutcome.workerCostTotal, 0.0034);
+assert.equal(fakeDuplicateCostOutcome.workerCostSource, "message_end");
 
 const fakeMissingResultSession = new FakeWorkerSession([
   "I finished but forgot the block.",

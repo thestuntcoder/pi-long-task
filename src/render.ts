@@ -17,6 +17,7 @@ export interface CoordinatorResultForRendering {
   commits?: CoordinatorCommitSummary[];
   remainingTasks?: CoordinatorRemainingTask[];
   taskProgress?: TaskProgressModel;
+  workerCostTotal?: number;
   error?: string;
 }
 
@@ -45,11 +46,13 @@ const SIDEBAR_GAP = 2;
 class LongTaskSidebarShell implements Component {
   private readonly mainText: string;
   private readonly taskProgress: TaskProgressModel;
+  private readonly workerCostTotal: number | undefined;
   private readonly theme: Theme;
 
-  constructor(mainText: string, taskProgress: TaskProgressModel, theme: Theme) {
+  constructor(mainText: string, taskProgress: TaskProgressModel, theme: Theme, workerCostTotal?: number) {
     this.mainText = mainText;
     this.taskProgress = taskProgress;
+    this.workerCostTotal = workerCostTotal;
     this.theme = theme;
   }
 
@@ -92,7 +95,7 @@ class LongTaskSidebarShell implements Component {
     }
 
     const innerWidth = Math.max(0, width - 2);
-    const rows = sidebarRows(this.taskProgress, this.theme);
+    const rows = sidebarRows(this.taskProgress, this.theme, this.workerCostTotal);
     return [
       sidebarBorder("Long Task", width, this.theme),
       ...rows.map((row) => sidebarRow(row, innerWidth, this.theme)),
@@ -112,6 +115,10 @@ export function formatCoordinatorResultMessage(result: CoordinatorResultForRende
     `Result file: ${resultPath}`,
     `TODO file: ${result.todoPath}`,
   ];
+
+  if (result.workerCostTotal) {
+    lines.push(`Worker spend: ${formatCost(result.workerCostTotal)}`);
+  }
 
   const commitLines = commits
     .filter((commit) => commit.hash || commit.error)
@@ -154,8 +161,9 @@ export function renderLongTaskToolResult(
   const details = recordOrUndefined(result.details);
   if (options.isPartial) {
     const taskProgress = taskProgressModel(details?.taskProgress);
+    const workerCostTotal = numberValue(details?.workerCostTotal);
     const main = renderLongTaskProgress(details, contentText(result), theme);
-    return taskProgress ? new LongTaskSidebarShell(main, taskProgress, theme) : new Text(main, 0, 0);
+    return taskProgress ? new LongTaskSidebarShell(main, taskProgress, theme, workerCostTotal) : new Text(main, 0, 0);
   }
 
   const finalDetails = longTaskDetails(details);
@@ -165,7 +173,7 @@ export function renderLongTaskToolResult(
 
   const main = renderLongTaskSummary(finalDetails, options.expanded, theme);
   return finalDetails.taskProgress
-    ? new LongTaskSidebarShell(main, finalDetails.taskProgress, theme)
+    ? new LongTaskSidebarShell(main, finalDetails.taskProgress, theme, finalDetails.workerCostTotal)
     : new Text(main, 0, 0);
 }
 
@@ -208,6 +216,7 @@ function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: 
     details.blockedTasks ? theme.fg("warning", `${details.blockedTasks} blocked`) : undefined,
     remainingCount ? theme.fg("muted", `${remainingCount} remaining`) : undefined,
     commitCount ? theme.fg("success", `${commitCount} commit${commitCount === 1 ? "" : "s"}`) : undefined,
+    details.workerCostTotal ? theme.fg("muted", `worker ${formatCost(details.workerCostTotal)}`) : undefined,
   ].filter(Boolean);
 
   if (!expanded) {
@@ -252,9 +261,12 @@ function padLine(line: string, width: number): string {
   return truncateToWidth(line, width, "…", true);
 }
 
-function sidebarRows(taskProgress: TaskProgressModel, theme: Theme): string[] {
+function sidebarRows(taskProgress: TaskProgressModel, theme: Theme, workerCostTotal?: number): string[] {
   const summary = normalizedTaskProgressSummary(taskProgress);
   const rows = [theme.fg("toolTitle", theme.bold("Task sidebar")), theme.fg("dim", "Centered timeline")];
+  if (workerCostTotal) {
+    rows.push(theme.fg("muted", `Worker spend: ${formatCost(workerCostTotal)}`));
+  }
   if (summary.totalTasks === 0) {
     rows.push("", theme.fg("muted", "Waiting for TODO plan..."));
     return rows;
@@ -503,6 +515,7 @@ function longTaskDetails(details: Record<string, unknown> | undefined): Coordina
     commits: commitSummaries(details.commits),
     remainingTasks: remainingTaskSummaries(details.remainingTasks),
     taskProgress: taskProgressModel(details.taskProgress),
+    workerCostTotal: nonNegativeNumberValue(details.workerCostTotal),
     error: stringValue(details.error),
   };
 }
@@ -590,6 +603,20 @@ function stringValue(value: unknown): string {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nonNegativeNumberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function formatCost(value: number): string {
+  if (value === 0) {
+    return "$0";
+  }
+  if (value < 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  return `$${value.toFixed(2)}`;
 }
 
 function recordOrUndefined(value: unknown): Record<string, unknown> | undefined {

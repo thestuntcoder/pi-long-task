@@ -247,6 +247,7 @@ export interface CapturedWorkerEvent {
   isError?: boolean;
   note?: string;
   usageCostTotal?: number;
+  usageCostKey?: string;
 }
 
 export interface SessionOutcome {
@@ -372,12 +373,20 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     timers.clear();
   };
 
-  const recordWorkerUsageCost = (cost: number | undefined) => {
+  const messageUsageCostsByKey = new Map<string, number>();
+  const recordWorkerUsageCost = (cost: number | undefined, key: string | undefined) => {
     if (cost === undefined) {
       return;
     }
     hasMessageUsageCost = true;
-    messageUsageCostTotal += cost;
+    if (!key) {
+      messageUsageCostTotal += cost;
+      return;
+    }
+
+    const previousCost = messageUsageCostsByKey.get(key) ?? 0;
+    messageUsageCostsByKey.set(key, cost);
+    messageUsageCostTotal += cost - previousCost;
   };
 
   const schedule = (fn: () => void | Promise<void>, ms: number) => {
@@ -472,7 +481,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
           if (messageText) {
             assistantText = messageText;
           }
-          recordWorkerUsageCost(workerUsageCostFromEvent(event));
+          recordWorkerUsageCost(workerUsageCostFromEvent(event), workerUsageCostKeyFromEvent(event));
           break;
         }
         case "turn_end": {
@@ -747,7 +756,9 @@ function summarizeWorkerEvent(event: unknown): CapturedWorkerEvent | undefined {
 
   if (event.type === "message_end") {
     const usageCostTotal = workerUsageCostFromEvent(event);
-    return usageCostTotal === undefined ? { type: event.type } : { type: event.type, usageCostTotal };
+    return usageCostTotal === undefined
+      ? { type: event.type }
+      : { type: event.type, usageCostTotal, usageCostKey: workerUsageCostKeyFromEvent(event) };
   }
 
   if (
@@ -783,6 +794,34 @@ export function workerUsageCostFromAssistantMessage(message: unknown): number | 
     return undefined;
   }
   return usageCostTotal(message.usage);
+}
+
+export function workerUsageCostKeyFromEvent(event: unknown): string | undefined {
+  if (!isRecord(event)) {
+    return undefined;
+  }
+
+  for (const candidate of [event.assistantMessage, event.message, event]) {
+    const key = workerUsageCostKeyFromAssistantMessage(candidate);
+    if (key) {
+      return key;
+    }
+  }
+  return undefined;
+}
+
+function workerUsageCostKeyFromAssistantMessage(message: unknown): string | undefined {
+  if (!isRecord(message)) {
+    return undefined;
+  }
+
+  for (const keyName of ["id", "messageId", "uuid"] as const) {
+    const value = message[keyName];
+    if (typeof value === "string" && value) {
+      return `${keyName}:${value}`;
+    }
+  }
+  return undefined;
 }
 
 export function workerUsageCostFromStats(stats: unknown): number | undefined {
@@ -822,10 +861,10 @@ function usageCostTotal(usage: unknown): number | undefined {
   return finiteNonNegativeNumber(cost);
 }
 
-function selectWorkerCostTotal(options: {
-  messageCostTotal: number | undefined;
-  statsCostTotal: number | undefined;
-}): { total: number; source?: string } {
+function selectWorkerCostTotal(options: { messageCostTotal: number | undefined; statsCostTotal: number | undefined }): {
+  total: number;
+  source?: string;
+} {
   if (options.statsCostTotal !== undefined) {
     return { total: options.statsCostTotal, source: "session_stats" };
   }

@@ -62,6 +62,7 @@ export interface PiLongTaskResult {
     commitSkipped?: string;
   }>;
   taskProgress: TaskProgressModel;
+  workerCostTotal: number;
   commit: boolean;
   error?: string;
 }

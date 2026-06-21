@@ -80,6 +80,7 @@ export interface CoordinatorProgressUpdate {
   workerEventType?: string;
   isError?: boolean;
   totalTasks?: number;
+  workerCostTotal: number;
   currentTask?: CoordinatorProgressTask;
   subtasks?: CoordinatorProgressSubtask[];
   taskProgress?: TaskProgressModel;
@@ -145,8 +146,16 @@ export interface CoordinatorResult {
   commits: CoordinatorCommitSummary[];
   attempts: TaskAttemptSummary[];
   taskProgress: TaskProgressModel;
+  workerCostTotal: number;
   commit: boolean;
   error?: string;
+}
+
+interface WorkerCostState {
+  total: number;
+  finalizedByWorker: Map<string, number>;
+  liveByWorker: Map<string, number>;
+  liveByMessage: Map<string, number>;
 }
 
 interface RuntimeOptions {
@@ -167,6 +176,7 @@ interface RuntimeOptions {
   todoSessionFactory?: WorkerSessionFactory;
   now: () => Date;
   onProgress?: CoordinatorProgressHandler;
+  workerCostState: WorkerCostState;
 }
 
 export async function runCoordinator(options: RunCoordinatorOptions): Promise<CoordinatorResult> {
@@ -237,6 +247,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         onEvent: (event) => emitWorkerEventProgress(runtime, tasksBeforeAttempt, nextTask, attempts, attempt, event),
       });
       outcomes.push(outcome);
+      finalizeWorkerCost(runtime.workerCostState, outcome);
 
       if (outcome.done) {
         todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
@@ -346,6 +357,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       commits,
       attempts,
       taskProgress,
+      workerCostTotal: runtime.workerCostState.total,
       commit: options.commit,
       error: failure,
     };
@@ -385,6 +397,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       commits,
       attempts,
       taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
+      workerCostTotal: runtime.workerCostState.total,
       commit: options.commit,
       error: message,
     };
@@ -467,21 +480,99 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     todoSessionFactory: options.todoSessionFactory,
     now: options.now ?? (() => new Date()),
     onProgress: options.onProgress,
+    workerCostState: createWorkerCostState(),
   };
 }
 
 function emitProgress(
   runtime: RuntimeOptions,
   message: string,
-  update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath">,
+  update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath" | "workerCostTotal">,
 ): void {
   runtime.onProgress?.({
     message,
     runId: runtime.runId,
     todoPath: runtime.todoPath,
     resultPath: runtime.taskResultPath,
+    workerCostTotal: runtime.workerCostState.total,
     ...update,
   });
+}
+
+function createWorkerCostState(): WorkerCostState {
+  return {
+    total: 0,
+    finalizedByWorker: new Map(),
+    liveByWorker: new Map(),
+    liveByMessage: new Map(),
+  };
+}
+
+function recordLiveWorkerCost(
+  state: WorkerCostState,
+  worker: string,
+  event: { usageCostTotal?: number; usageCostKey?: string },
+): boolean {
+  if (state.finalizedByWorker.has(worker) || event.usageCostTotal === undefined || !event.usageCostKey) {
+    return false;
+  }
+
+  const cost = finiteNonNegativeNumber(event.usageCostTotal);
+  if (cost === undefined) {
+    return false;
+  }
+
+  const messageKey = `${worker}:${event.usageCostKey}`;
+  if (state.liveByMessage.get(messageKey) === cost) {
+    return false;
+  }
+
+  state.liveByMessage.set(messageKey, cost);
+  recomputeLiveWorkerCost(state, worker);
+  recomputeWorkerCostTotal(state);
+  return true;
+}
+
+function finalizeWorkerCost(
+  state: WorkerCostState,
+  outcome: Pick<SessionOutcome, "task" | "attempt" | "workerCostTotal">,
+): void {
+  const worker = workerKey(outcome.task.taskId, outcome.attempt);
+  state.finalizedByWorker.set(worker, finiteNonNegativeNumber(outcome.workerCostTotal) ?? 0);
+  state.liveByWorker.delete(worker);
+  for (const messageKey of state.liveByMessage.keys()) {
+    if (messageKey.startsWith(`${worker}:`)) {
+      state.liveByMessage.delete(messageKey);
+    }
+  }
+  recomputeWorkerCostTotal(state);
+}
+
+function recomputeLiveWorkerCost(state: WorkerCostState, worker: string): void {
+  let total = 0;
+  for (const [messageKey, cost] of state.liveByMessage) {
+    if (messageKey.startsWith(`${worker}:`)) {
+      total += cost;
+    }
+  }
+  state.liveByWorker.set(worker, total);
+}
+
+function recomputeWorkerCostTotal(state: WorkerCostState): void {
+  let total = 0;
+  for (const cost of state.finalizedByWorker.values()) {
+    total += cost;
+  }
+  for (const [worker, cost] of state.liveByWorker) {
+    if (!state.finalizedByWorker.has(worker)) {
+      total += cost;
+    }
+  }
+  state.total = total;
+}
+
+function workerKey(taskId: string, attempt: number): string {
+  return `${taskId}:${attempt}`;
 }
 
 function currentTaskProgress(
@@ -521,13 +612,33 @@ function emitWorkerEventProgress(
   task: Pick<Task, "taskId" | "title" | "statusItems">,
   attempts: readonly TaskAttemptSummary[],
   attempt: number,
-  event: { type: string; toolName?: string; isError?: boolean },
+  event: { type: string; toolName?: string; isError?: boolean; usageCostTotal?: number; usageCostKey?: string },
 ): void {
+  if (event.usageCostTotal !== undefined) {
+    const changed = recordLiveWorkerCost(runtime.workerCostState, workerKey(task.taskId, attempt), event);
+    if (changed) {
+      emitProgress(
+        runtime,
+        `TODO ${task.taskId}: worker cost updated to ${formatCost(runtime.workerCostState.total)}.`,
+        {
+          phase: "worker_tool",
+          taskId: task.taskId,
+          title: task.title,
+          attempt,
+          status: "in_progress",
+          workerEventType: event.type,
+          ...currentTaskProgress(task, "in_progress"),
+          taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
+        },
+      );
+    }
+  }
+
   if (!event.toolName || (event.type !== "tool_execution_start" && event.type !== "tool_execution_end")) {
     return;
   }
   const action = event.type === "tool_execution_start" ? "started" : event.isError ? "failed" : "finished";
-  const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath"> = {
+  const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath" | "workerCostTotal"> = {
     phase: "worker_tool",
     taskId: task.taskId,
     title: task.title,
@@ -568,7 +679,7 @@ function emitTaskOutcomeProgress(
     : outcome.reportedStatus === "blocked"
       ? "task_blocked"
       : "task_failed";
-  const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath"> = {
+  const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath" | "workerCostTotal"> = {
     phase,
     taskId: task.taskId,
     title: task.title,
@@ -757,6 +868,20 @@ function positiveMilliseconds(value: number | undefined, fallback: number): numb
     return value;
   }
   return fallback;
+}
+
+function finiteNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function formatCost(value: number): string {
+  if (value === 0) {
+    return "$0";
+  }
+  if (value < 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  return `$${value.toFixed(2)}`;
 }
 
 function errorMessage(error: unknown): string {
