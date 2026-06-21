@@ -127,6 +127,15 @@ Pi Long Task coordinates a long request from planning through task completion:
 5. **Write run artifacts:** the coordinator writes the generated/normalized `TODO.md`, `TASK_RESULT.md`, attempt summaries, and final run details to `tmp/pi-long-task/<run-id>/`.
 6. **Commit only when enabled:** if `commit` is `true`, Pi Long Task may create a commit after each completed task using only eligible task changes. If commits are disabled, no commits are created; even when enabled, commits can be skipped when there are no eligible changes or the task outcome is not commit-worthy.
 
+## Feature reference
+
+- **Sidebar task timeline:** every TODO appears in the sidebar with past, current, and future statuses so you can distinguish completed, active, upcoming, failed, blocked, and remaining work at a glance.
+- **Main-thread worker activity:** the active worker streams commands, edits, verification, and its per-task `TASK_RESULT` back into the main Pi conversation.
+- **Cost visibility:** worker spend is included in Pi Long Task progress and is added to the main Pi `$ spent` total when cost data is available.
+- **Result and TODO artifacts:** each run keeps the generated or normalized `TODO.md`, aggregate `TASK_RESULT.md`, per-attempt summaries, and final run details under `tmp/pi-long-task/<run-id>/`.
+- **Commit-safe behavior:** when commits are enabled, Pi Long Task commits only eligible completed-task changes and skips generated run files.
+- **Dirty-worktree protection:** files that were dirty before a worker started are not included in Pi Long Task commits, keeping your existing local work separate.
+
 ## Usage
 
 You can also call the tool explicitly.
@@ -195,9 +204,9 @@ This lets you keep existing local work separate from Pi Long Task changes.
 
 Commit messages are generated from the task title and adjusted to resemble recent commit-message style in the repository. Pi Long Task does not prefix commits with generated labels like `Complete TODO 1 — ...`.
 
-## Validate the install
+## Development and validation
 
-Run the local checks:
+Run the local development checks:
 
 ```bash
 cd /path/to/pi-long-task
@@ -218,10 +227,11 @@ npm run smoke:native
 
 That smoke test creates disposable git repos and verifies both `commit: false` and `commit: true` runs.
 
-## Notes
+## Limitations and expectations
 
-- Tasks run one at a time.
-- Real runs require a working Pi model/login or API key.
+- Tasks run sequentially, one TODO at a time; Pi Long Task prioritizes isolation, progress tracking, and safe handoff over parallel execution.
+- Real runs require usable Pi model credentials, such as a working Pi login or API key for the selected model.
+- Worker spend is added to the main Pi `$ spent` total as cost-only usage. Token counts are not merged into the main thread because worker sessions have separate context windows, and merging their token usage would corrupt the main conversation's context statistics.
 - Run artifacts are written under `tmp/pi-long-task/<run-id>/`.
 
 ## License
