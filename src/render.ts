@@ -1,7 +1,7 @@
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import type { TaskProgressModel } from "./task_progress.ts";
+import type { TaskProgressModel, TaskProgressStatus, TaskProgressTask } from "./task_progress.ts";
 import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus } from "./types.ts";
 
 export interface CoordinatorResultForRendering {
@@ -253,23 +253,137 @@ function padLine(line: string, width: number): string {
 }
 
 function sidebarRows(taskProgress: TaskProgressModel, theme: Theme): string[] {
-  const total = taskProgress.summary?.totalTasks || taskProgress.tasks.length;
-  const rows = [theme.fg("toolTitle", theme.bold("Task sidebar")), theme.fg("dim", "Timeline pane")];
-  if (total === 0) {
+  const summary = normalizedTaskProgressSummary(taskProgress);
+  const rows = [theme.fg("toolTitle", theme.bold("Task sidebar")), theme.fg("dim", "Centered timeline")];
+  if (summary.totalTasks === 0) {
     rows.push("", theme.fg("muted", "Waiting for TODO plan..."));
     return rows;
   }
 
-  rows.push("", `${total} TODO${total === 1 ? "" : "s"} loaded`);
-  if (taskProgress.currentTask) {
-    rows.push(theme.fg("warning", `Current: TODO ${taskProgress.currentTask.taskId}`));
-  } else if (taskProgress.nextTask) {
-    rows.push(theme.fg("muted", `Next: TODO ${taskProgress.nextTask.taskId}`));
+  rows.push("", progressBarLine(summary.completedTasks, summary.totalTasks, summary.completedPercent, theme));
+  rows.push(progressCountsLine(summary, theme));
+
+  const currentIndex = focusedTaskIndex(taskProgress);
+  if (currentIndex >= 0) {
+    rows.push(theme.fg("warning", `Focus: TODO ${taskProgress.tasks[currentIndex]?.taskId ?? "?"}`));
   } else {
     rows.push(theme.fg("success", "No active task"));
   }
-  rows.push("", theme.fg("dim", "Detailed timeline appears here."));
+
+  rows.push("", theme.fg("muted", "Timeline"));
+  for (const [index, task] of taskProgress.tasks.entries()) {
+    if (currentIndex >= 0 && index === currentIndex && index > 0) {
+      rows.push(theme.fg("dim", "──── current ────"));
+    }
+    rows.push(renderSidebarTaskRow(task, theme));
+    if (currentIndex >= 0 && index === currentIndex && index < taskProgress.tasks.length - 1) {
+      rows.push(theme.fg("dim", "──── future ─────"));
+    }
+  }
+
   return rows;
+}
+
+interface NormalizedTaskProgressSummary {
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  blockedTasks: number;
+  pendingTasks: number;
+  currentTasks: number;
+  completedPercent: number;
+}
+
+function normalizedTaskProgressSummary(taskProgress: TaskProgressModel): NormalizedTaskProgressSummary {
+  const totalTasks = taskProgress.summary?.totalTasks ?? taskProgress.tasks.length;
+  const completedTasks = taskProgress.summary?.completedTasks ?? countTasksByStatus(taskProgress.tasks, "completed");
+  const failedTasks = taskProgress.summary?.failedTasks ?? countTasksByStatus(taskProgress.tasks, "failed");
+  const blockedTasks = taskProgress.summary?.blockedTasks ?? countTasksByStatus(taskProgress.tasks, "blocked");
+  const pendingTasks = taskProgress.summary?.pendingTasks ?? countTasksByStatus(taskProgress.tasks, "pending");
+  const currentTasks = taskProgress.summary?.currentTasks ?? countTasksByStatus(taskProgress.tasks, "current");
+  const completedPercent =
+    taskProgress.summary?.completedPercent ??
+    (totalTasks === 0 ? 100 : Math.round((completedTasks / totalTasks) * 100));
+
+  return {
+    totalTasks,
+    completedTasks,
+    failedTasks,
+    blockedTasks,
+    pendingTasks,
+    currentTasks,
+    completedPercent,
+  };
+}
+
+function countTasksByStatus(tasks: readonly TaskProgressTask[], status: TaskProgressStatus): number {
+  return tasks.filter((task) => task.status === status).length;
+}
+
+function progressBarLine(completedTasks: number, totalTasks: number, percent: number, theme: Theme): string {
+  const width = 10;
+  const filled = clamp(totalTasks === 0 ? width : Math.round((completedTasks / totalTasks) * width), 0, width);
+  const empty = Math.max(0, width - filled);
+  return `${theme.fg("muted", "Progress")} [${theme.fg("success", "#".repeat(filled))}${theme.fg(
+    "dim",
+    "-".repeat(empty),
+  )}] ${completedTasks}/${totalTasks} ${percent}%`;
+}
+
+function progressCountsLine(summary: NormalizedTaskProgressSummary, theme: Theme): string {
+  const parts = [
+    theme.fg("success", `✓ ${summary.completedTasks}`),
+    summary.currentTasks ? theme.fg("warning", `▶ ${summary.currentTasks}`) : undefined,
+    summary.pendingTasks ? theme.fg("dim", `○ ${summary.pendingTasks}`) : undefined,
+    summary.failedTasks ? theme.fg("error", `✗ ${summary.failedTasks}`) : undefined,
+    summary.blockedTasks ? theme.fg("warning", `! ${summary.blockedTasks}`) : undefined,
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function focusedTaskIndex(taskProgress: TaskProgressModel): number {
+  if (typeof taskProgress.currentIndex === "number" && taskProgress.currentIndex >= 0) {
+    return taskProgress.currentIndex;
+  }
+
+  const currentIndex = taskProgress.tasks.findIndex((task) => task.status === "current" || task.position === "current");
+  if (currentIndex >= 0) {
+    return currentIndex;
+  }
+
+  if (typeof taskProgress.nextIndex === "number" && taskProgress.nextIndex >= 0) {
+    return taskProgress.nextIndex;
+  }
+  return taskProgress.tasks.findIndex((task) => task.status === "pending");
+}
+
+function renderSidebarTaskRow(task: TaskProgressTask, theme: Theme): string {
+  const { icon, color, label } = sidebarTaskStatusDetails(task.status);
+  const attempts =
+    task.attempts > 0 && task.status !== "completed"
+      ? ` · ${task.attempts} attempt${task.attempts === 1 ? "" : "s"}`
+      : "";
+  const text = `${icon} [${label}] TODO ${task.taskId} — ${task.title}${attempts}`;
+  return task.status === "current" ? theme.fg(color, theme.bold(text)) : theme.fg(color, text);
+}
+
+function sidebarTaskStatusDetails(status: TaskProgressStatus): {
+  icon: string;
+  color: "success" | "warning" | "error" | "dim" | "muted";
+  label: string;
+} {
+  switch (status) {
+    case "completed":
+      return { icon: "✓", color: "success", label: "completed" };
+    case "current":
+      return { icon: "▶", color: "warning", label: "current" };
+    case "failed":
+      return { icon: "✗", color: "error", label: "failed" };
+    case "blocked":
+      return { icon: "!", color: "warning", label: "blocked" };
+    case "pending":
+      return { icon: "○", color: "dim", label: "pending" };
+  }
 }
 
 function sidebarBorder(title: string, width: number, theme: Theme): string {

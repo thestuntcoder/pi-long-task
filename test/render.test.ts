@@ -185,8 +185,68 @@ const progressWithSidebar = renderLongTaskToolResult(
   theme,
 );
 const sidebarLines = progressWithSidebar.render(100);
-assert.match(sidebarLines.join("\n"), /TODO 2 .* Add Sidebar Shell/);
-assert.match(sidebarLines.join("\n"), /Long Task/);
-assert.match(sidebarLines.join("\n"), /Task sidebar/);
-assert.match(sidebarLines.join("\n"), /Current: TODO 2/);
+const sidebarText = sidebarLines.join("\n");
+assert.match(sidebarText, /TODO 2 .* Add Sidebar Shell/);
+assert.match(sidebarText, /Long Task/);
+assert.match(sidebarText, /Task sidebar/);
+assert.match(sidebarText, /Progress \[###-------\] 1\/3 33%/);
+assert.match(sidebarText, /Focus: TODO 2/);
+assert.match(sidebarText, /✓ \[completed\] TODO 1 .* Audit/);
+assert.match(sidebarText, /▶ \[current\] TODO 2 .* Add Side/);
+assert.match(sidebarText, /○ \[pending\] TODO 3 .* Timeline/);
 assert.ok(sidebarLines.every((line) => visibleWidth(line) <= 100));
+
+for (const currentIndex of [0, 1, 2]) {
+  const timeline = renderSidebarTimelineForCurrentIndex(currentIndex);
+  assert.match(timeline, new RegExp(`Focus: TODO ${currentIndex + 1}`));
+  assert.match(timeline, /Progress /);
+  assert.match(timeline, /\[current\]/);
+  const timelineSection = timeline.slice(timeline.indexOf("Timeline"));
+  assert.ok(timelineSection.includes("TODO 1"));
+  assert.ok(timelineSection.includes("TODO 2"));
+  assert.ok(timelineSection.includes("TODO 3"));
+  assert.ok(timelineSection.indexOf("TODO 1") < timelineSection.indexOf("TODO 2"));
+  assert.ok(timelineSection.indexOf("TODO 2") < timelineSection.indexOf("TODO 3"));
+}
+
+function renderSidebarTimelineForCurrentIndex(currentIndex: number): string {
+  const tasks = ["Plan", "Build", "Verify"].map((title, index) => ({
+    taskId: String(index + 1),
+    title,
+    status: index < currentIndex ? "completed" : index === currentIndex ? "current" : "pending",
+    position: index < currentIndex ? "past" : index === currentIndex ? "current" : "future",
+    done: index < currentIndex,
+    statusItems: [],
+    attempts: index < currentIndex ? 1 : 0,
+  }));
+  const component = renderLongTaskToolResult(
+    {
+      content: [{ type: "text", text: `Running TODO ${currentIndex + 1}...` }],
+      details: {
+        phase: "task_start",
+        message: `Running TODO ${currentIndex + 1}...`,
+        taskProgress: {
+          tasks,
+          summary: {
+            totalTasks: 3,
+            completedTasks: currentIndex,
+            failedTasks: 0,
+            blockedTasks: 0,
+            pendingTasks: 2 - currentIndex,
+            currentTasks: 1,
+            attemptedTasks: currentIndex,
+            completionRatio: currentIndex / 3,
+            completedPercent: Math.round((currentIndex / 3) * 100),
+          },
+          currentTaskId: String(currentIndex + 1),
+          currentIndex,
+          currentTask: tasks[currentIndex],
+        },
+      },
+    } satisfies AgentToolResult<unknown>,
+    { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+    theme,
+  );
+
+  return component.render(100).join("\n");
+}
