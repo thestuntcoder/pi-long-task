@@ -28,7 +28,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/thestuntcoder/pi-long-task/main/docs/assets/package-preview.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
