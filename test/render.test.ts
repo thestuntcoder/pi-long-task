@@ -209,6 +209,93 @@ for (const currentIndex of [0, 1, 2]) {
   assert.ok(timelineSection.indexOf("TODO 2") < timelineSection.indexOf("TODO 3"));
 }
 
+const emptySidebar = renderLongTaskToolResult(
+  {
+    content: [{ type: "text", text: "Created TODO plan with 0 task(s)." }],
+    details: {
+      phase: "planned",
+      message: "Created TODO plan with 0 task(s).",
+      taskProgress: {
+        tasks: [],
+        summary: {
+          totalTasks: 0,
+          completedTasks: 0,
+          failedTasks: 0,
+          blockedTasks: 0,
+          pendingTasks: 0,
+          currentTasks: 0,
+          attemptedTasks: 0,
+          completionRatio: 1,
+          completedPercent: 100,
+        },
+      },
+    },
+  } satisfies AgentToolResult<unknown>,
+  { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+  theme,
+);
+const emptySidebarLines = emptySidebar.render(80);
+const emptySidebarText = emptySidebarLines.join("\n");
+assert.match(emptySidebarText, /Created TODO plan with 0 task\(s\)\./);
+assert.match(emptySidebarText, /Waiting for TODO plan/);
+assert.ok(emptySidebarLines.every((line) => visibleWidth(line) <= 80));
+
+const singleTaskSidebar = renderLongTaskToolResult(
+  {
+    content: [{ type: "text", text: "Running TODO 1 — Single task..." }],
+    details: {
+      phase: "task_start",
+      message: "Running TODO 1 — Single task...",
+      currentTask: { taskId: "1", title: "Single task", status: "in_progress" },
+      taskProgress: {
+        tasks: [
+          {
+            taskId: "1",
+            title: "Single task",
+            status: "current",
+            position: "current",
+            done: false,
+            statusItems: [],
+            attempts: 0,
+          },
+        ],
+        summary: {
+          totalTasks: 1,
+          completedTasks: 0,
+          failedTasks: 0,
+          blockedTasks: 0,
+          pendingTasks: 0,
+          currentTasks: 1,
+          attemptedTasks: 0,
+          completionRatio: 0,
+          completedPercent: 0,
+        },
+        currentTaskId: "1",
+        currentIndex: 0,
+        currentTask: {
+          taskId: "1",
+          title: "Single task",
+          status: "current",
+          position: "current",
+          done: false,
+          statusItems: [],
+          attempts: 0,
+        },
+      },
+    },
+  } satisfies AgentToolResult<unknown>,
+  { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+  theme,
+);
+const singleTaskSidebarLines = singleTaskSidebar.render(100);
+const singleTaskSidebarText = singleTaskSidebarLines.join("\n");
+assert.match(singleTaskSidebarText, /task_start TODO 1 .* Single task/);
+assert.match(singleTaskSidebarText, /Progress \[----------\] 0\/1 0%/);
+assert.match(singleTaskSidebarText, /Focus: TODO 1/);
+assert.match(singleTaskSidebarText, /▶ \[current\] TODO 1 .* Single/);
+assert.doesNotMatch(singleTaskSidebarText, /──── future ─────/);
+assert.ok(singleTaskSidebarLines.every((line) => visibleWidth(line) <= 100));
+
 function renderSidebarTimelineForCurrentIndex(currentIndex: number): string {
   const tasks = ["Plan", "Build", "Verify"].map((title, index) => ({
     taskId: String(index + 1),
