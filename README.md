@@ -99,22 +99,19 @@ Run a long task without commits to audit the README examples and leave the final
 Pi keeps the active worker transcript in the main content area and shows the run timeline in the sidebar:
 
 ```text
-┌─ Main content: active worker activity ───────────────┬─ Pi Long Task sidebar ───────────────┐
-│ Worker TODO 2 — Add parser tests                    │ Progress: 2/5 tasks complete (40%)   │
-│                                                      │ Worker spend: $0.18                  │
-│ $ npm test -- parser                                │                                      │
-│ ✓ parser handles nested arrays                      │ Timeline                             │
-│ ✗ parser rejects invalid escapes                    │ ● TODO 1 Rewrite intro        done   │
-│                                                      │ ● TODO 2 Add parser tests     active │
-│ Editing src/parser.test.ts...                       │   ◌ add edge-case fixtures           │
-│ Re-running focused tests after fix...               │   ◌ fix failing assertions           │
-│                                                      │ ○ TODO 3 Update docs          next   │
-│                                                      │ ○ TODO 4 Validate install     later  │
-│                                                      │                                      │
-│ The worker reports commands, file edits, and result  │ Sidebar tracks task statuses,        │
-│ details here while the current TODO is running.      │ subtask progress, timeline, spend.   │
-└──────────────────────────────────────────────────────┴──────────────────────────────────────┘
+Main content: active worker activity | Pi Long Task sidebar
+Worker TODO 2 — Add parser tests | Progress: 2/5 tasks complete (40%)
+$ npm test -- parser | Worker spend: $0.18
+✓ parser handles nested arrays | Timeline
+✗ parser rejects invalid escapes | ✓ TODO 1 Rewrite intro        done
+Editing src/parser.test.ts... | ▶ TODO 2 Add parser tests     active
+Re-running focused tests after fix... |   ◌ add edge-case fixtures
+Worker reports commands, file edits, and results here. |   ◌ fix failing assertions
+Current TODO output stays in the main thread. | ○ TODO 3 Update docs          next
+Sidebar tracks task status, timeline, progress, spend. | ○ TODO 4 Validate install     later
 ```
+
+The real TUI uses responsive layout and colors; this README mockup keeps the split to one separator so it renders cleanly in package galleries and narrow views.
 
 ## How it works
 
