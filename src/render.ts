@@ -1,6 +1,7 @@
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
+import type { TaskProgressModel } from "./task_progress.ts";
 import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus } from "./types.ts";
 
 export interface CoordinatorResultForRendering {
@@ -15,6 +16,7 @@ export interface CoordinatorResultForRendering {
   taskResultPath?: string;
   commits?: CoordinatorCommitSummary[];
   remainingTasks?: CoordinatorRemainingTask[];
+  taskProgress?: TaskProgressModel;
   error?: string;
 }
 

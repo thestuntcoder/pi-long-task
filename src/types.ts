@@ -1,6 +1,7 @@
 import type { Static } from "typebox";
 import { Type } from "typebox";
 
+import type { TaskProgressModel } from "./task_progress.ts";
 import type { SessionOutcome } from "./worker_session.ts";
 
 export const PiLongTaskParams = Type.Object(
@@ -60,6 +61,7 @@ export interface PiLongTaskResult {
     commitError?: string;
     commitSkipped?: string;
   }>;
+  taskProgress: TaskProgressModel;
   commit: boolean;
   error?: string;
 }

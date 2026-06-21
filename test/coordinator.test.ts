@@ -177,6 +177,10 @@ try {
     status: "in_progress",
   });
   assert.deepEqual(taskStart?.subtasks, [{ text: "Complete emit worker tool progress", status: "in_progress" }]);
+  assert.deepEqual(
+    taskStart?.taskProgress?.tasks.map((task) => [task.taskId, task.status, task.position]),
+    [["1", "current", "current"]],
+  );
 
   const bashStart = workerToolUpdates.find(
     (update) => update.phase === "worker_tool" && update.workerEventType === "tool_execution_start",
@@ -194,6 +198,8 @@ try {
   const taskDone = workerToolUpdates.find((update) => update.phase === "task_done");
   assert.equal(taskDone?.currentTask?.status, "done");
   assert.deepEqual(taskDone?.subtasks, [{ text: "Complete emit worker tool progress", status: "done" }]);
+  assert.equal(taskDone?.taskProgress?.summary.completedPercent, 100);
+  assert.equal(workerToolRun.taskProgress.summary.completedTasks, 1);
 
   const commitSkipUpdates: CoordinatorProgressUpdate[] = [];
   const commitSkipped = await runCoordinator({

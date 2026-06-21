@@ -11,13 +11,14 @@ import type {
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { extractResultSummary } from "./result_writer.ts";
+import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
   buildTodoCreationPrompt,
   extractTodoMarkdown,
   todoMarkdownFromString,
   validateTodoMarkdown,
 } from "./todo_generator.ts";
-import { incompleteTasks, markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
+import { markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
 import {
   createIsolatedWorkerSession,
   lastAssistantTextFromMessages,
@@ -81,6 +82,7 @@ export interface CoordinatorProgressUpdate {
   totalTasks?: number;
   currentTask?: CoordinatorProgressTask;
   subtasks?: CoordinatorProgressSubtask[];
+  taskProgress?: TaskProgressModel;
 }
 
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
@@ -142,6 +144,7 @@ export interface CoordinatorResult {
   outcomes: SessionOutcome[];
   commits: CoordinatorCommitSummary[];
   attempts: TaskAttemptSummary[];
+  taskProgress: TaskProgressModel;
   commit: boolean;
   error?: string;
 }
@@ -184,13 +187,15 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     emitProgress(runtime, `Created TODO plan with ${initialTasks.length} task(s).`, {
       phase: "planned",
       totalTasks: initialTasks.length,
+      taskProgress: buildTaskProgressModel({ tasks: initialTasks }),
     });
 
     const previousAttempts = new Map<string, string[]>();
     let failure: string | undefined;
 
     while (!runtime.abortSignal?.aborted) {
-      const nextTask = incompleteTasks(todoMarkdown)[0];
+      const tasksBeforeAttempt = parseTasks(todoMarkdown);
+      const nextTask = tasksBeforeAttempt.find((task) => !task.done);
       if (!nextTask) {
         break;
       }
@@ -205,6 +210,11 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           title: nextTask.title,
           attempt,
           ...currentTaskProgress(nextTask, "in_progress"),
+          taskProgress: buildTaskProgressModel({
+            tasks: tasksBeforeAttempt,
+            attempts,
+            currentTaskId: nextTask.taskId,
+          }),
         },
       );
       const preExistingDirtyPaths = options.commit
@@ -224,7 +234,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         abortSignal: runtime.abortSignal,
         sessionFactory: runtime.workerSessionFactory,
         now: runtime.now,
-        onEvent: (event) => emitWorkerEventProgress(runtime, nextTask, attempt, event),
+        onEvent: (event) => emitWorkerEventProgress(runtime, tasksBeforeAttempt, nextTask, attempts, attempt, event),
       });
       outcomes.push(outcome);
 
@@ -270,7 +280,16 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         await appendCommitNote(runtime.taskResultPath, commitResult);
       }
 
-      emitTaskOutcomeProgress(runtime, nextTask, outcome, taskCommitHash, taskCommitError, taskCommitSkipped);
+      emitTaskOutcomeProgress(
+        runtime,
+        parseTasks(todoMarkdown),
+        nextTask,
+        attempts,
+        outcome,
+        taskCommitHash,
+        taskCommitError,
+        taskCommitSkipped,
+      );
 
       const attemptSummary = resultTextForPreviousAttempt(outcome);
       previousAttempts.set(nextTask.taskId, [...(previousAttempts.get(nextTask.taskId) ?? []), attemptSummary]);
@@ -304,6 +323,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       blockedTasks,
       failedTasks,
     });
+    const taskProgress = buildTaskProgressModel({ tasks: finalTasks, attempts });
     const summary = failure
       ? `Pi Long Task ${status}: ${failure}`
       : `Pi Long Task completed ${completedTasks}/${finalTasks.length} task(s).`;
@@ -325,6 +345,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       outcomes,
       commits,
       attempts,
+      taskProgress,
       commit: options.commit,
       error: failure,
     };
@@ -333,6 +354,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       phase: "complete",
       status,
       totalTasks: finalTasks.length,
+      taskProgress,
     });
     return result;
   } catch (error) {
@@ -362,11 +384,16 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       outcomes,
       commits,
       attempts,
+      taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
       commit: options.commit,
       error: message,
     };
     result.message = formatCoordinatorResultMessage(result);
-    emitProgress(runtime, "Pi Long Task failed.", { phase: "complete", status: "failed" });
+    emitProgress(runtime, "Pi Long Task failed.", {
+      phase: "complete",
+      status: "failed",
+      taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
+    });
     return result;
   }
 }
@@ -490,7 +517,9 @@ function subtaskProgress(
 
 function emitWorkerEventProgress(
   runtime: RuntimeOptions,
+  tasks: readonly Task[],
   task: Pick<Task, "taskId" | "title" | "statusItems">,
+  attempts: readonly TaskAttemptSummary[],
   attempt: number,
   event: { type: string; toolName?: string; isError?: boolean },
 ): void {
@@ -508,6 +537,7 @@ function emitWorkerEventProgress(
     workerEventType: event.type,
     isError: event.isError,
     ...currentTaskProgress(task, "in_progress"),
+    taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
   };
   if (event.isError) {
     update.status = "failed";
@@ -517,7 +547,9 @@ function emitWorkerEventProgress(
 
 function emitTaskOutcomeProgress(
   runtime: RuntimeOptions,
+  tasks: readonly Task[],
   task: Pick<Task, "taskId" | "title" | "statusItems">,
+  attempts: readonly TaskAttemptSummary[],
   outcome: SessionOutcome,
   commitHash: string | undefined,
   commitError: string | undefined,
@@ -543,6 +575,12 @@ function emitTaskOutcomeProgress(
     attempt: outcome.attempt,
     status: outcome.reportedStatus,
     ...currentTaskProgress(task, outcome.done ? "done" : "in_progress"),
+    taskProgress: buildTaskProgressModel({
+      tasks,
+      attempts,
+      currentTaskId: task.taskId,
+      currentTaskStatus: outcomeTaskProgressStatus(outcome),
+    }),
   };
   if (commitHash) {
     update.commitHash = commitHash;
@@ -554,6 +592,16 @@ function emitTaskOutcomeProgress(
     update.commitSkipped = commitSkipped;
   }
   emitProgress(runtime, `TODO ${task.taskId} ${statusText}${commitText}.`, update);
+}
+
+function outcomeTaskProgressStatus(outcome: Pick<SessionOutcome, "done" | "reportedStatus">): TaskProgressStatus {
+  if (outcome.done) {
+    return "completed";
+  }
+  if (outcome.reportedStatus === "blocked") {
+    return "blocked";
+  }
+  return "failed";
 }
 
 function initialTaskResultMarkdown(runId: string): string {

@@ -18,6 +18,7 @@ function toolDetails(result: CoordinatorResult) {
     failedTasks: result.failedTasks,
     blockedTasks: result.blockedTasks,
     remainingTasks: result.remainingTasks,
+    taskProgress: result.taskProgress,
     summary: result.summary,
   };
 }
