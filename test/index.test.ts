@@ -198,14 +198,17 @@ const sidebarUpdate = {
 sidebar.update(sidebarUpdate);
 const runningWidget = widgetCalls.at(-1)?.content?.join("\n") ?? "";
 assert.match(runningWidget, /Pi Long Task/);
-assert.match(runningWidget, /Running task .* Running TODO 2/);
+assert.match(runningWidget, /▢ Running task .* Running TODO 2/);
 assert.match(runningWidget, /active: ▢ TODO 2 .* Wire Sidebar Rendering/);
 assert.match(runningWidget, /Spent: \$0\.01/);
 assert.equal(renderRequests, 1);
 const overlayText = overlayComponent?.render(80).join("\n") ?? "";
 assert.match(overlayText, /Task timeline/);
 assert.match(overlayText, /Current/);
+assert.match(overlayText, /Tasks 1\/3 .* 33% complete .* ■▢·/);
+assert.match(overlayText, /■ done .* ▢ active .* · queued/);
 assert.match(overlayText, /▢ TODO 2 .* active/);
+assert.match(overlayText, /› ▢ TODO 2/);
 assert.match(overlayText, /Wire Sidebar Rendering/);
 assert.match(overlayText, /\+ active .* Route onUpdate data/);
 

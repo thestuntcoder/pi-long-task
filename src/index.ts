@@ -193,8 +193,8 @@ function supportsTuiOverlay(ctx: UiContext): boolean {
 function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
   const progress = update.taskProgress;
   const summary = progress?.summary;
-  const status = update.status ? String(update.status) : phaseLabel(update.phase);
-  const lines = ["Pi Long Task", `${status} · ${update.message}`];
+  const statusDetails = sidebarUpdateStateDetails(update);
+  const lines = ["Pi Long Task", `${statusDetails.icon} ${statusDetails.label} · ${update.message}`];
   if (summary) {
     lines.push(
       `Tasks: ${summary.completedTasks}/${summary.totalTasks} · ${summary.completedPercent}%` +
@@ -239,7 +239,7 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
   for (const line of wrapPlainText(sidebarHeadline(update, progress), width, 2)) {
     rows.push(sidebarHeading(line, theme));
   }
-  rows.push(theme.fg("muted", `Pi Long Task · ${phaseLabel(update.phase)}`));
+  rows.push(renderSidebarStateLine(update, theme));
 
   const message = normalizeMessageForSidebar(update.message, update);
   if (message) {
@@ -268,7 +268,13 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
     rows.push(theme.fg("muted", `${formatCost(update.workerCostTotal)} spent`));
   }
 
-  rows.push("", sidebarHeading("Progress", theme), progressBarLine(summary, theme), progressCountsLine(summary, theme));
+  rows.push(
+    "",
+    sidebarHeading("Progress", theme),
+    progressBarLine(progress, theme),
+    progressCountsLine(summary, theme),
+    progressStateLegend(progress, theme),
+  );
 
   const currentIndex = focusedTaskIndex(progress);
   const currentTask = currentIndex >= 0 ? progress.tasks[currentIndex] : undefined;
@@ -276,7 +282,10 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
   if (currentTask) {
     const details = taskStatusDetails(currentTask.status);
     rows.push(
-      theme.fg(details.color, `${details.icon} TODO ${currentTask.taskId} ${theme.fg("dim", "·")} ${details.label}`),
+      theme.fg(
+        details.color,
+        `${details.icon} TODO ${currentTask.taskId} ${theme.fg("dim", "·")} ${details.label}${currentTaskMeta(currentTask, theme)}`,
+      ),
     );
     rows.push(...wrapPlainText(currentTask.title, width, 2).map((line) => theme.fg("muted", line)));
   } else {
@@ -343,16 +352,128 @@ function renderTaskRow(
   const details = taskStatusDetails(task.status);
   const attempts = task.attempts > 0 && task.status !== "completed" ? ` ${theme.fg("dim", "·")} ${task.attempts}x` : "";
   const title = truncateToWidth(task.title, 72);
+  const focusMarker = focused ? theme.fg("accent", "›") : theme.fg("dim", " ");
   const icon = theme.fg(details.color, details.icon);
   const label = `TODO ${task.taskId}`;
   const row = `${label} ${theme.fg("dim", "·")} ${details.label} ${theme.fg("dim", "·")} ${title}${attempts}`;
   const styledRow = focused ? theme.fg(details.color, theme.bold(row)) : theme.fg(details.textColor, row);
-  return `${icon} ${styledRow}`;
+  return `${focusMarker} ${icon} ${styledRow}`;
 }
 
 function renderSubtaskRow(subtask: NonNullable<CoordinatorProgressUpdate["subtasks"]>[number], theme: Theme): string {
   const details = progressItemStatusDetails(subtask.status);
   return `${theme.fg(details.color, details.icon)} ${theme.fg(details.textColor, `${details.label} · ${subtask.text}`)}`;
+}
+
+function renderSidebarStateLine(update: CoordinatorProgressUpdate, theme: Theme): string {
+  const details = sidebarUpdateStateDetails(update);
+  const suffix = [
+    update.attempt && update.attempt > 1 ? `attempt ${update.attempt}` : undefined,
+    update.workerCostTotal > 0 ? `${formatCost(update.workerCostTotal)} spent` : undefined,
+  ]
+    .filter(Boolean)
+    .join(` ${theme.fg("dim", "·")} `);
+  const meta = suffix ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", suffix)}` : "";
+  return `${theme.fg(details.color, details.icon)} ${theme.fg(details.color, details.label)}${meta}`;
+}
+
+function currentTaskMeta(
+  task: NonNullable<CoordinatorProgressUpdate["taskProgress"]>["tasks"][number],
+  theme: Theme,
+): string {
+  const attempts = task.attempts > 0 && task.status !== "completed" ? [`attempt ${task.attempts}`] : [];
+  if (task.lastReportedStatus && task.status !== "current") {
+    attempts.push(task.lastReportedStatus);
+  }
+  return attempts.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", attempts.join(" · "))}` : "";
+}
+
+function progressMeterLine(progress: NonNullable<CoordinatorProgressUpdate["taskProgress"]>, theme: Theme): string {
+  const total = progress.tasks.length;
+  if (total === 0) {
+    return theme.fg("dim", "────────");
+  }
+
+  const maxSegments = 12;
+  const step = Math.max(1, Math.ceil(total / maxSegments));
+  const segments: string[] = [];
+  for (let index = 0; index < total; index += step) {
+    const slice = progress.tasks.slice(index, Math.min(total, index + step));
+    segments.push(progressMeterSegment(slice, theme));
+  }
+  return segments.join("");
+}
+
+function progressMeterSegment(
+  tasks: Array<NonNullable<CoordinatorProgressUpdate["taskProgress"]>["tasks"][number]>,
+  theme: Theme,
+): string {
+  if (tasks.some((task) => task.status === "failed")) {
+    return theme.fg("error", "×");
+  }
+  if (tasks.some((task) => task.status === "blocked")) {
+    return theme.fg("warning", "!");
+  }
+  if (tasks.some((task) => task.status === "current")) {
+    return theme.fg("accent", "▢");
+  }
+  if (tasks.every((task) => task.status === "completed")) {
+    return theme.fg("success", "■");
+  }
+  if (tasks.some((task) => task.status === "completed")) {
+    return theme.fg("success", "▪");
+  }
+  return theme.fg("dim", "·");
+}
+
+function progressStateLegend(progress: NonNullable<CoordinatorProgressUpdate["taskProgress"]>, theme: Theme): string {
+  const statuses = new Set(progress.tasks.map((task) => task.status));
+  const items = [
+    statuses.has("completed") ? theme.fg("success", "■ done") : undefined,
+    statuses.has("current") ? theme.fg("accent", "▢ active") : undefined,
+    statuses.has("pending") ? theme.fg("dim", "· queued") : undefined,
+    statuses.has("failed") ? theme.fg("error", "× failed") : undefined,
+    statuses.has("blocked") ? theme.fg("warning", "! blocked") : undefined,
+  ].filter(Boolean);
+  return theme.fg("muted", items.join(" · "));
+}
+
+function sidebarUpdateStateDetails(update: CoordinatorProgressUpdate): {
+  icon: string;
+  label: string;
+  color: "accent" | "success" | "warning" | "error" | "muted";
+} {
+  if (update.status) {
+    switch (update.status) {
+      case "done":
+        return { icon: "✓", label: "done", color: "success" };
+      case "failed":
+        return { icon: "×", label: "failed", color: "error" };
+      case "blocked":
+        return { icon: "!", label: "blocked", color: "warning" };
+      case "partial":
+        return { icon: "!", label: "partial", color: "warning" };
+    }
+  }
+
+  switch (update.phase) {
+    case "planning":
+      return { icon: "+", label: "Planning", color: "warning" };
+    case "planned":
+      return { icon: "✓", label: "Plan ready", color: "success" };
+    case "task_start":
+      return { icon: "▢", label: "Running task", color: "accent" };
+    case "worker_tool":
+      return { icon: "+", label: "Worker tool", color: "warning" };
+    case "task_done":
+      return { icon: "✓", label: "Task complete", color: "success" };
+    case "task_blocked":
+      return { icon: "!", label: "Task blocked", color: "warning" };
+    case "task_failed":
+      return { icon: "×", label: "Task failed", color: "error" };
+    case "complete":
+      return { icon: "✓", label: "Complete", color: "success" };
+  }
 }
 
 function taskStatusDetails(status: NonNullable<CoordinatorProgressUpdate["taskProgress"]>["tasks"][number]["status"]): {
@@ -395,14 +516,15 @@ function progressItemStatusDetails(status: NonNullable<CoordinatorProgressUpdate
   }
 }
 
-function progressBarLine(
-  summary: NonNullable<NonNullable<CoordinatorProgressUpdate["taskProgress"]>["summary"]>,
-  theme: Theme,
-): string {
+function progressBarLine(progress: NonNullable<CoordinatorProgressUpdate["taskProgress"]>, theme: Theme): string {
+  const summary = progress.summary;
   return `${theme.fg("muted", "Tasks")} ${theme.fg(
     "success",
     `${summary.completedTasks}/${summary.totalTasks}`,
-  )} ${theme.fg("dim", "·")} ${theme.fg("muted", `${summary.completedPercent}% complete`)}`;
+  )} ${theme.fg("dim", "·")} ${theme.fg("muted", `${summary.completedPercent}% complete`)} ${theme.fg(
+    "dim",
+    "·",
+  )} ${progressMeterLine(progress, theme)}`;
 }
 
 function progressCountsLine(
@@ -445,27 +567,6 @@ function normalizeMessageForSidebar(updateMessage: string, update: CoordinatorPr
   }
   const title = update.taskId && update.title ? `TODO ${update.taskId} — ${update.title}` : undefined;
   return title && message.includes(title) && message.length <= title.length + 16 ? undefined : message;
-}
-
-function phaseLabel(phase: CoordinatorProgressUpdate["phase"]): string {
-  switch (phase) {
-    case "planning":
-      return "Planning";
-    case "planned":
-      return "Plan ready";
-    case "task_start":
-      return "Running task";
-    case "worker_tool":
-      return "Worker tool";
-    case "task_done":
-      return "Task complete";
-    case "task_blocked":
-      return "Task blocked";
-    case "task_failed":
-      return "Task failed";
-    case "complete":
-      return "Complete";
-  }
 }
 
 function wrapPlainText(text: string, width: number, limit?: number): string[] {
