@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
 import { runCoordinator, type CoordinatorProgressUpdate, type CoordinatorResult } from "./coordinator.ts";
 import { longTaskInputTransform } from "./input_router.ts";
@@ -118,25 +118,69 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
   }
 
   let latestUpdate: CoordinatorProgressUpdate | undefined;
-  let sidebarComponent: PiLongTaskSidebarComponent | undefined;
-  let sidebarTui: TUI | undefined;
+  let widgetComponent: PiLongTaskSidebarComponent | undefined;
+  let widgetTui: TUI | undefined;
+  let overlayComponent: PiLongTaskSidebarComponent | undefined;
+  let overlayTui: TUI | undefined;
+  let overlayDone: ((result: undefined) => void) | undefined;
+  let overlayHandle: OverlayHandle | undefined;
   let closed = false;
 
   if (supportsTuiWidget(ctx)) {
     ctx.ui.setWidget(
       LONG_TASK_WIDGET_KEY,
       (tui, theme) => {
-        sidebarTui = tui;
-        sidebarComponent = new PiLongTaskSidebarComponent(theme, () => sidebarWidgetLineLimit(tui));
+        widgetTui = tui;
+        widgetComponent = new PiLongTaskSidebarComponent(theme, () => sidebarWidgetLineLimit(tui));
         if (latestUpdate) {
-          sidebarComponent.setUpdate(latestUpdate);
+          widgetComponent.setUpdate(latestUpdate);
         }
-        return sidebarComponent;
+        return widgetComponent;
       },
       { placement: "aboveEditor" },
     );
   } else {
     ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, ["Pi Long Task: preparing sidebar..."], { placement: "aboveEditor" });
+  }
+
+  if (supportsTuiOverlay(ctx)) {
+    try {
+      const overlayPromise = ctx.ui.custom<undefined>(
+        (tui, theme, _keybindings, done) => {
+          overlayTui = tui;
+          overlayDone = done;
+          overlayComponent = new PiLongTaskSidebarComponent(theme);
+          if (latestUpdate) {
+            overlayComponent.setUpdate(latestUpdate);
+          }
+          if (closed) {
+            done(undefined);
+          }
+          return overlayComponent;
+        },
+        {
+          overlay: true,
+          overlayOptions: {
+            anchor: "right-center",
+            width: "34%",
+            minWidth: 32,
+            maxHeight: "85%",
+            margin: 1,
+            nonCapturing: true,
+            visible: (termWidth, termHeight) => termWidth >= 96 && termHeight >= 16,
+          },
+          onHandle: (handle) => {
+            overlayHandle = handle;
+            handle.unfocus();
+          },
+        },
+      );
+      void overlayPromise.catch(() => {
+        // The widget fallback remains active if overlay registration is unavailable.
+      });
+    } catch {
+      // The widget fallback remains active if overlay registration is unavailable.
+    }
   }
 
   return {
@@ -145,9 +189,13 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
         return;
       }
       latestUpdate = update;
-      sidebarComponent?.setUpdate(update);
-      sidebarTui?.requestRender();
-      if (!sidebarComponent) {
+      widgetComponent?.setUpdate(update);
+      overlayComponent?.setUpdate(update);
+      widgetTui?.requestRender();
+      if (overlayTui && overlayTui !== widgetTui) {
+        overlayTui.requestRender();
+      }
+      if (!widgetComponent) {
         ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, renderSidebarWidgetLines(update), { placement: "aboveEditor" });
       }
     },
@@ -157,13 +205,27 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
       }
       closed = true;
       ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, undefined);
-      sidebarComponent = undefined;
-      sidebarTui = undefined;
+      if (overlayHandle) {
+        overlayHandle.hide();
+      } else {
+        overlayDone?.(undefined);
+      }
+      widgetComponent = undefined;
+      widgetTui = undefined;
+      overlayComponent = undefined;
+      overlayTui = undefined;
+      overlayDone = undefined;
+      overlayHandle = undefined;
     },
   };
 }
 
 function supportsTuiWidget(ctx: UiContext): boolean {
+  const mode = (ctx as UiContext & { mode?: string }).mode;
+  return mode === "tui" || mode === undefined;
+}
+
+function supportsTuiOverlay(ctx: UiContext): boolean {
   const mode = (ctx as UiContext & { mode?: string }).mode;
   return mode === "tui" || mode === undefined;
 }
