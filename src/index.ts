@@ -139,9 +139,9 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
         overlayOptions: {
           anchor: "right-center",
           width: "34%",
-          minWidth: 32,
-          maxHeight: "85%",
-          margin: 1,
+          minWidth: 36,
+          maxHeight: "100%",
+          margin: 0,
           nonCapturing: true,
           visible: (termWidth, termHeight) => termWidth >= 96 && termHeight >= 16,
         },
@@ -193,24 +193,24 @@ function supportsTuiOverlay(ctx: UiContext): boolean {
 function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
   const progress = update.taskProgress;
   const summary = progress?.summary;
-  const status = update.status ? String(update.status) : update.phase;
-  const lines = [`Pi Long Task: ${status}`, update.message];
+  const status = update.status ? String(update.status) : phaseLabel(update.phase);
+  const lines = ["Pi Long Task", `${status} · ${update.message}`];
   if (summary) {
     lines.push(
-      `Tasks: ${summary.completedTasks}/${summary.totalTasks} done` +
-        (summary.failedTasks ? `, ${summary.failedTasks} failed` : "") +
-        (summary.blockedTasks ? `, ${summary.blockedTasks} blocked` : ""),
+      `Progress: ${summary.completedTasks}/${summary.totalTasks} tasks (${summary.completedPercent}%)` +
+        (summary.failedTasks ? ` · ${summary.failedTasks} failed` : "") +
+        (summary.blockedTasks ? ` · ${summary.blockedTasks} blocked` : ""),
     );
   }
   if (progress && progress.tasks.length > 0) {
     const currentIndex = focusedTaskIndex(progress);
     const currentTask = currentIndex >= 0 ? progress.tasks[currentIndex] : undefined;
     if (currentTask) {
-      lines.push(`Focus: TODO ${currentTask.taskId} — ${currentTask.title}`);
+      lines.push(`Current: TODO ${currentTask.taskId} — ${currentTask.title}`);
     }
   }
   if (update.workerCostTotal > 0) {
-    lines.push(`Worker spend: ${formatCost(update.workerCostTotal)}`);
+    lines.push(`Spent: ${formatCost(update.workerCostTotal)}`);
   }
   return lines.map((line) => truncateToWidth(line, 96));
 }
@@ -220,45 +220,64 @@ function renderSidebarOverlayLines(
   theme: Theme,
   width: number,
 ): string[] {
-  const safeWidth = Math.max(12, width);
-  const innerWidth = Math.max(0, safeWidth - 2);
-  const rows = renderSidebarRows(update, theme);
-  return [
-    sidebarBorder("Pi Long Task", safeWidth, theme),
-    ...rows.map((row) => sidebarRow(row, innerWidth, theme)),
-    theme.fg("borderMuted", `└${"─".repeat(innerWidth)}┘`),
-  ];
+  const safeWidth = Math.max(28, width);
+  const contentWidth = Math.max(8, safeWidth - 4);
+  const rows = renderSidebarRows(update, theme, contentWidth);
+  return rows.map((row) => sidebarPanelRow(row, contentWidth, theme));
 }
 
-function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme: Theme): string[] {
+function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme: Theme, width: number): string[] {
   if (!update) {
-    return [theme.fg("muted", "Preparing long-task sidebar...")];
+    return ["", sidebarHeading("Pi Long Task", theme), "", theme.fg("muted", "Preparing long-task sidebar...")];
   }
 
   const progress = update.taskProgress;
-  const rows = [theme.fg("toolTitle", theme.bold("Task timeline")), theme.fg("dim", update.phase)];
-  if (update.workerCostTotal > 0) {
-    rows.push(theme.fg("muted", `Worker spend: ${formatCost(update.workerCostTotal)}`));
+  const rows = [""];
+  for (const line of wrapPlainText(sidebarHeadline(update, progress), width, 2)) {
+    rows.push(sidebarHeading(line, theme));
   }
-  rows.push("", theme.fg("muted", truncateToWidth(update.message, 72)));
+  rows.push(theme.fg("muted", `Pi Long Task · ${phaseLabel(update.phase)}`));
+
+  const message = normalizeMessageForSidebar(update.message, update);
+  if (message) {
+    rows.push(...wrapPlainText(message, width, 2).map((line) => theme.fg("dim", line)));
+  }
 
   if (!progress || progress.tasks.length === 0) {
-    rows.push("", theme.fg("muted", "Waiting for TODO plan..."));
+    rows.push("", sidebarHeading("Context", theme), theme.fg("muted", "Waiting for TODO plan"));
+    if (update.workerCostTotal > 0) {
+      rows.push(theme.fg("muted", `${formatCost(update.workerCostTotal)} spent`));
+    }
     return rows;
   }
 
   const summary = progress.summary;
-  rows.push("", progressBarLine(summary.completedTasks, summary.totalTasks, summary.completedPercent, theme));
-  rows.push(progressCountsLine(summary, theme));
+  rows.push(
+    "",
+    sidebarHeading("Context", theme),
+    theme.fg(
+      "muted",
+      `${summary.completedTasks.toLocaleString()}/${summary.totalTasks.toLocaleString()} tasks complete`,
+    ),
+    theme.fg("muted", `${summary.completedPercent}% complete`),
+  );
+  if (update.workerCostTotal > 0) {
+    rows.push(theme.fg("muted", `${formatCost(update.workerCostTotal)} spent`));
+  }
+
+  rows.push("", sidebarHeading("Progress", theme), progressBarLine(summary, theme), progressCountsLine(summary, theme));
 
   const currentIndex = focusedTaskIndex(progress);
-  if (currentIndex >= 0) {
-    rows.push(theme.fg("warning", `Focus: TODO ${progress.tasks[currentIndex]?.taskId ?? "?"}`));
+  const currentTask = currentIndex >= 0 ? progress.tasks[currentIndex] : undefined;
+  rows.push("", sidebarHeading("Current", theme));
+  if (currentTask) {
+    rows.push(theme.fg("warning", `• TODO ${currentTask.taskId}`));
+    rows.push(...wrapPlainText(currentTask.title, width, 2).map((line) => theme.fg("muted", line)));
   } else {
     rows.push(theme.fg("success", "No active task"));
   }
 
-  rows.push("", theme.fg("muted", "Tasks"));
+  rows.push("", sidebarHeading("Task timeline", theme));
   const taskIndexes = centeredTaskIndexes(progress.tasks.length, currentIndex, 9);
   const first = taskIndexes[0] ?? 0;
   const last = taskIndexes[taskIndexes.length - 1] ?? -1;
@@ -278,7 +297,7 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
 
   const subtasks = update.subtasks ?? [];
   if (subtasks.length > 0) {
-    rows.push("", theme.fg("muted", "Current status"));
+    rows.push("", sidebarHeading("Current status", theme));
     for (const subtask of subtasks.slice(0, 6)) {
       rows.push(renderSubtaskRow(subtask, theme));
     }
@@ -317,9 +336,12 @@ function renderTaskRow(
 ): string {
   const details = taskStatusDetails(task.status);
   const attempts = task.attempts > 0 && task.status !== "completed" ? ` · ${task.attempts}x` : "";
-  const row = `${details.icon} TODO ${task.taskId} — ${task.title}${attempts}`;
-  const styled = focused ? theme.bold(row) : row;
-  return theme.fg(details.color, styled);
+  const title = truncateToWidth(task.title, 72);
+  const icon = theme.fg(details.color, details.icon);
+  const label = `TODO ${task.taskId}`;
+  const row = `${label} · ${title}${attempts}`;
+  const styledRow = focused ? theme.fg("warning", theme.bold(row)) : theme.fg(details.textColor, row);
+  return `${icon} ${styledRow}`;
 }
 
 function renderSubtaskRow(subtask: NonNullable<CoordinatorProgressUpdate["subtasks"]>[number], theme: Theme): string {
@@ -330,18 +352,19 @@ function renderSubtaskRow(subtask: NonNullable<CoordinatorProgressUpdate["subtas
 function taskStatusDetails(status: NonNullable<CoordinatorProgressUpdate["taskProgress"]>["tasks"][number]["status"]): {
   icon: string;
   color: "success" | "warning" | "error" | "dim" | "muted";
+  textColor: "text" | "success" | "warning" | "error" | "dim" | "muted";
 } {
   switch (status) {
     case "completed":
-      return { icon: "✓", color: "success" };
+      return { icon: "✓", color: "success", textColor: "muted" };
     case "current":
-      return { icon: "▶", color: "warning" };
+      return { icon: "•", color: "warning", textColor: "text" };
     case "failed":
-      return { icon: "✗", color: "error" };
+      return { icon: "×", color: "error", textColor: "error" };
     case "blocked":
-      return { icon: "!", color: "warning" };
+      return { icon: "!", color: "warning", textColor: "warning" };
     case "pending":
-      return { icon: "○", color: "dim" };
+      return { icon: "○", color: "dim", textColor: "dim" };
   }
 }
 
@@ -353,9 +376,9 @@ function progressItemStatusDetails(status: NonNullable<CoordinatorProgressUpdate
     case "done":
       return { icon: "✓", color: "success" };
     case "in_progress":
-      return { icon: "▶", color: "warning" };
+      return { icon: "+", color: "warning" };
     case "failed":
-      return { icon: "✗", color: "error" };
+      return { icon: "×", color: "error" };
     case "blocked":
       return { icon: "!", color: "warning" };
     case "empty":
@@ -363,14 +386,17 @@ function progressItemStatusDetails(status: NonNullable<CoordinatorProgressUpdate
   }
 }
 
-function progressBarLine(completedTasks: number, totalTasks: number, percent: number, theme: Theme): string {
-  const width = 12;
-  const filled = clamp(totalTasks === 0 ? width : Math.round((completedTasks / totalTasks) * width), 0, width);
+function progressBarLine(
+  summary: NonNullable<NonNullable<CoordinatorProgressUpdate["taskProgress"]>["summary"]>,
+  theme: Theme,
+): string {
+  const width = 14;
+  const filled = clamp(Math.round(summary.completionRatio * width), 0, width);
   const empty = Math.max(0, width - filled);
-  return `${theme.fg("muted", "Progress")} [${theme.fg("success", "#".repeat(filled))}${theme.fg(
-    "dim",
-    "-".repeat(empty),
-  )}] ${completedTasks}/${totalTasks} ${percent}%`;
+  return `${theme.fg("success", "━".repeat(filled))}${theme.fg("dim", "━".repeat(empty))} ${theme.fg(
+    "muted",
+    `${summary.completedPercent}%`,
+  )}`;
 }
 
 function progressCountsLine(
@@ -379,25 +405,100 @@ function progressCountsLine(
 ): string {
   return [
     theme.fg("success", `✓ ${summary.completedTasks}`),
-    summary.currentTasks ? theme.fg("warning", `▶ ${summary.currentTasks}`) : undefined,
+    summary.currentTasks ? theme.fg("warning", `• ${summary.currentTasks}`) : undefined,
     summary.pendingTasks ? theme.fg("dim", `○ ${summary.pendingTasks}`) : undefined,
-    summary.failedTasks ? theme.fg("error", `✗ ${summary.failedTasks}`) : undefined,
+    summary.failedTasks ? theme.fg("error", `× ${summary.failedTasks}`) : undefined,
     summary.blockedTasks ? theme.fg("warning", `! ${summary.blockedTasks}`) : undefined,
   ]
     .filter(Boolean)
     .join(" · ");
 }
 
-function sidebarBorder(title: string, width: number, theme: Theme): string {
-  const innerWidth = Math.max(0, width - 2);
-  const label = ` ${title} `;
-  const safeLabel = truncateToWidth(label, innerWidth, "");
-  const remainder = Math.max(0, innerWidth - safeLabel.length);
-  return theme.fg("borderMuted", `┌${safeLabel}${"─".repeat(remainder)}┐`);
+function sidebarHeading(text: string, theme: Theme): string {
+  return theme.fg("toolTitle", theme.bold(text));
 }
 
-function sidebarRow(text: string, width: number, theme: Theme): string {
-  return `${theme.fg("borderMuted", "│")}${truncateToWidth(text, width, "…", true)}${theme.fg("borderMuted", "│")}`;
+function sidebarHeadline(
+  update: CoordinatorProgressUpdate,
+  progress: CoordinatorProgressUpdate["taskProgress"],
+): string {
+  if (update.taskId && update.title) {
+    return `TODO ${update.taskId} — ${update.title}`;
+  }
+  const currentTask = progress?.currentTask ?? progress?.nextTask;
+  if (currentTask) {
+    return `TODO ${currentTask.taskId} — ${currentTask.title}`;
+  }
+  return "Pi Long Task";
+}
+
+function normalizeMessageForSidebar(updateMessage: string, update: CoordinatorProgressUpdate): string | undefined {
+  const message = updateMessage.trim();
+  if (!message) {
+    return undefined;
+  }
+  const title = update.taskId && update.title ? `TODO ${update.taskId} — ${update.title}` : undefined;
+  return title && message.includes(title) && message.length <= title.length + 16 ? undefined : message;
+}
+
+function phaseLabel(phase: CoordinatorProgressUpdate["phase"]): string {
+  switch (phase) {
+    case "planning":
+      return "Planning";
+    case "planned":
+      return "Plan ready";
+    case "task_start":
+      return "Running task";
+    case "worker_tool":
+      return "Worker tool";
+    case "task_done":
+      return "Task complete";
+    case "task_blocked":
+      return "Task blocked";
+    case "task_failed":
+      return "Task failed";
+    case "complete":
+      return "Complete";
+  }
+}
+
+function wrapPlainText(text: string, width: number, limit?: number): string[] {
+  const safeWidth = Math.max(8, width);
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return [];
+  }
+
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= safeWidth) {
+      line = next;
+      continue;
+    }
+    if (line) {
+      lines.push(line);
+    }
+    line = word.length > safeWidth ? truncateToWidth(word, safeWidth) : word;
+    if (limit && lines.length >= limit) {
+      break;
+    }
+  }
+  if (line && (!limit || lines.length < limit)) {
+    lines.push(line);
+  }
+  if (limit && lines.length > limit) {
+    lines.length = limit;
+  }
+  if (limit && words.join(" ").length > lines.join(" ").length && lines.length > 0) {
+    lines[lines.length - 1] = truncateToWidth(`${lines[lines.length - 1]} …`, safeWidth);
+  }
+  return lines;
+}
+
+function sidebarPanelRow(text: string, width: number, theme: Theme): string {
+  return `${theme.fg("borderMuted", "│")}  ${truncateToWidth(text, width, "…", true)}`;
 }
 
 function clamp(value: number, min: number, max: number): number {

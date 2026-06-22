@@ -197,15 +197,16 @@ const sidebarUpdate = {
 
 sidebar.update(sidebarUpdate);
 const runningWidget = widgetCalls.at(-1)?.content?.join("\n") ?? "";
-assert.match(runningWidget, /Pi Long Task: task_start/);
-assert.match(runningWidget, /Focus: TODO 2 .* Wire Sidebar Rendering/);
-assert.match(runningWidget, /Worker spend: \$0\.01/);
+assert.match(runningWidget, /Pi Long Task/);
+assert.match(runningWidget, /Running task .* Running TODO 2/);
+assert.match(runningWidget, /Current: TODO 2 .* Wire Sidebar Rendering/);
+assert.match(runningWidget, /Spent: \$0\.01/);
 assert.equal(renderRequests, 1);
 const overlayText = overlayComponent?.render(80).join("\n") ?? "";
 assert.match(overlayText, /Task timeline/);
-assert.match(overlayText, /Focus: TODO 2/);
-assert.match(overlayText, /▶ TODO 2 .* Wire Sidebar Rendering/);
-assert.match(overlayText, /Route onUpdate data/);
+assert.match(overlayText, /Current/);
+assert.match(overlayText, /• TODO 2 .* Wire Sidebar Rendering/);
+assert.match(overlayText, /\+ Route onUpdate data/);
 
 sidebar.update({
   ...sidebarUpdate,
@@ -225,8 +226,8 @@ sidebar.update({
   },
 });
 const doneWidget = widgetCalls.at(-1)?.content?.join("\n") ?? "";
-assert.match(doneWidget, /Pi Long Task: done/);
-assert.match(doneWidget, /Tasks: 2\/3 done/);
+assert.match(doneWidget, /done .* TODO 2 done/);
+assert.match(doneWidget, /Progress: 2\/3 tasks \(67%\)/);
 assert.equal(renderRequests, 2);
 
 sidebar.close();
@@ -259,6 +260,6 @@ assert.deepEqual(fallbackWidgetCalls[0], {
   placement: "aboveEditor",
 });
 fallbackSidebar.update(sidebarUpdate);
-assert.match(fallbackWidgetCalls.at(-1)?.content?.join("\n") ?? "", /Focus: TODO 2/);
+assert.match(fallbackWidgetCalls.at(-1)?.content?.join("\n") ?? "", /Current: TODO 2/);
 fallbackSidebar.close();
 assert.equal(fallbackWidgetCalls.at(-1)?.content, undefined);
