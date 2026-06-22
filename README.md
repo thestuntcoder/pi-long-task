@@ -18,11 +18,11 @@ Use it when a coding request is bigger than one focused interaction. Pi Long Tas
 When you ask Pi to run a long task, Pi Long Task:
 
 1. Recognizes natural-language requests like "run a long task with commits" and routes them to `pi_long_task`.
-2. Creates or cleans up a TODO plan from your request.
+2. Creates or cleans up a TODO plan from your request. Natural-language planning uses a bounded planner session; if generated TODO markdown is invalid, Pi Long Task asks the planner to repair it once before failing the run.
 3. Works through each unfinished TODO task in order using isolated worker sessions.
 4. Registers a Pi TUI sidebar/widget when UI support is available and updates it with the current task, inferred subtask progress, and full task timeline while the run is active.
 5. Retries unfinished tasks up to the configured attempt limit.
-6. Records progress, task artifacts, and final results under `tmp/pi-long-task/<run-id>/`.
+6. Records progress, planner diagnostics, task artifacts, and final results under `tmp/pi-long-task/<run-id>/`.
 7. Returns a summary with completed, failed, blocked, and remaining task counts, plus worker spend when available.
 8. Optionally commits completed work after each task.
 
@@ -230,6 +230,8 @@ That smoke test creates disposable git repos and verifies both `commit: false` a
 ## Limitations and expectations
 
 - Tasks run sequentially, one TODO at a time; Pi Long Task prioritizes isolation, progress tracking, and safe handoff over parallel execution.
+- Natural-language TODO planning has a bounded time budget (five minutes by default, with a short graceful-shutdown request). If planning times out or is aborted before a valid plan exists, the run fails before worker tasks start and records planner diagnostics in `TASK_RESULT.md`.
+- If the planner returns invalid TODO markdown, Pi Long Task makes one repair attempt. A second invalid response fails planning with diagnostics instead of guessing at a plan.
 - Real runs require usable Pi model credentials, such as a working Pi login or API key for the selected model.
 - Worker spend is added to the main Pi `$ spent` total as cost-only usage. Token counts are not merged into the main thread because worker sessions have separate context windows, and merging their token usage would corrupt the main conversation's context statistics.
 - Run artifacts are written under `tmp/pi-long-task/<run-id>/`.
