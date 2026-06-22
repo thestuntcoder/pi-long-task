@@ -11,6 +11,7 @@ import type {
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { extractResultSummary } from "./result_writer.ts";
+import { parseWorkerRuntimeConfig } from "./worker_config.ts";
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
   buildTodoCreationPrompt,
@@ -97,6 +98,7 @@ export interface RunCoordinatorOptions extends PiLongTaskInput {
   todoPlanner?: TodoPlanner;
   workerSessionFactory?: WorkerSessionFactory;
   todoSessionFactory?: WorkerSessionFactory;
+  workerModelName?: string;
   maxAttemptsPerTask?: number;
   taskTimeoutMs?: number;
   maxBashTimeoutMs?: number;
@@ -167,6 +169,7 @@ interface RuntimeOptions {
   maxAttemptsPerTask: number;
   taskTimeoutSeconds: number;
   maxBashTimeoutSeconds: number;
+  workerModelName?: string;
   taskThinking: string;
   todoThinking: string;
   workerRunner: WorkerRunner;
@@ -240,6 +243,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         globalInstructions: todoGlobalInstructions(todoMarkdown),
         maxBashTimeoutSeconds: runtime.maxBashTimeoutSeconds,
         taskTimeoutSeconds: runtime.taskTimeoutSeconds,
+        modelName: runtime.workerModelName,
         thinkingLevel: runtime.taskThinking,
         abortSignal: runtime.abortSignal,
         sessionFactory: runtime.workerSessionFactory,
@@ -460,6 +464,10 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const runId = sanitizeRunId(options.runId ?? defaultRunId(options.now?.() ?? new Date()));
   const runDir = path.join(cwd, "tmp", "pi-long-task", runId);
+  const parsedWorkerConfig = parseWorkerRuntimeConfig(options.inputText);
+  const configuredAttempts = options.maxAttemptsPerTask ?? parsedWorkerConfig.maxAttemptsPerTask;
+  const configuredTaskTimeoutMs = options.taskTimeoutMs ?? parsedWorkerConfig.taskTimeoutMs;
+  const configuredMaxBashTimeoutMs = options.maxBashTimeoutMs ?? parsedWorkerConfig.maxBashTimeoutMs;
 
   return {
     cwd,
@@ -467,10 +475,11 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     runDir,
     todoPath: path.join(runDir, "TODO.md"),
     taskResultPath: path.join(runDir, "TASK_RESULT.md"),
-    maxAttemptsPerTask: positiveInteger(options.maxAttemptsPerTask, DEFAULT_COORDINATOR_OPTIONS.maxAttemptsPerTask),
-    taskTimeoutSeconds: positiveMilliseconds(options.taskTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.taskTimeoutMs) / 1000,
+    maxAttemptsPerTask: positiveInteger(configuredAttempts, DEFAULT_COORDINATOR_OPTIONS.maxAttemptsPerTask),
+    taskTimeoutSeconds: positiveMilliseconds(configuredTaskTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.taskTimeoutMs) / 1000,
     maxBashTimeoutSeconds:
-      positiveMilliseconds(options.maxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
+      positiveMilliseconds(configuredMaxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
+    workerModelName: options.workerModelName ?? parsedWorkerConfig.modelName,
     taskThinking: options.taskThinking ?? DEFAULT_COORDINATOR_OPTIONS.taskThinking,
     todoThinking: options.todoThinking ?? DEFAULT_COORDINATOR_OPTIONS.todoThinking,
     workerRunner: options.workerRunner ?? runWorkerTask,

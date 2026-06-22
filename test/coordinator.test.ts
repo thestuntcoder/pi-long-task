@@ -243,6 +243,75 @@ try {
   assert.equal((failedResult.match(/## TODO 1 — Flaky task/g) ?? []).length, 3);
   assert.equal((failedResult.match(/## TODO 2 — Never reached/g) ?? []).length, 0);
 
+  const configuredCalls: Array<{
+    attempt: number;
+    modelName?: string;
+    taskTimeoutSeconds?: number;
+    maxBashTimeoutSeconds: number;
+    thinkingLevel?: string;
+  }> = [];
+  const configured = await runCoordinator({
+    inputText: `# Pi Long Task TODO
+
+Worker provider: test-provider
+Worker model: test-model
+Worker attempts: 2
+Worker timeout: 7m
+Max bash timeout: 42s
+
+## Progress
+
+- [ ] TODO 1 — Configured worker task
+
+---
+
+## TODO 1 — Configured worker task
+
+**Goal:** Verify worker runtime config is passed through.
+
+**Status:**
+- [ ] Run configured worker
+
+**Verify:** Focused assertion.
+
+**Done when:** Config was observed.
+`,
+    commit: false,
+    cwd: tempRoot,
+    runId: "configured-worker-runtime",
+    workerRunner: async (options) => {
+      configuredCalls.push({
+        attempt: options.attempt,
+        modelName: options.modelName,
+        taskTimeoutSeconds: options.taskTimeoutSeconds,
+        maxBashTimeoutSeconds: options.maxBashTimeoutSeconds,
+        thinkingLevel: options.thinkingLevel,
+      });
+      return outcomeFor(options, "partial");
+    },
+  });
+  assert.equal(configured.status, "failed");
+  assert.deepEqual(
+    configuredCalls.map((call) => call.attempt),
+    [1, 2],
+  );
+  assert.deepEqual(
+    configuredCalls.map((call) => call.modelName),
+    ["test-provider/test-model", "test-provider/test-model"],
+  );
+  assert.deepEqual(
+    configuredCalls.map((call) => call.taskTimeoutSeconds),
+    [420, 420],
+  );
+  assert.deepEqual(
+    configuredCalls.map((call) => call.maxBashTimeoutSeconds),
+    [42, 42],
+  );
+  assert.deepEqual(
+    configuredCalls.map((call) => call.thinkingLevel),
+    ["high", "high"],
+  );
+
   const blockedProgressUpdates: CoordinatorProgressUpdate[] = [];
   const blocked = await runCoordinator({
     inputText: generatedTodoMarkdown(["Blocked task"]),
