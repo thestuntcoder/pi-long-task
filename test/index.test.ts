@@ -7,7 +7,7 @@ import {
 } from "../src/index.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import type { CoordinatorProgressUpdate } from "../src/coordinator.ts";
 
 function assistantMessage(): AssistantMessage {
@@ -88,6 +88,7 @@ const widgetCalls: Array<{ key: string; content: WidgetContent; placement?: stri
 let widgetComponent: Component | undefined;
 let widgetFactoryCalls = 0;
 let renderRequests = 0;
+const customCalls: Array<{ overlay?: boolean; anchor?: string; nonCapturing?: boolean }> = [];
 const sidebarTheme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
@@ -111,10 +112,40 @@ const sidebar = createLongTaskSidebarController({
         widgetComponent = undefined;
       }
     },
+    custom<T>(
+      factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component,
+      options?: {
+        overlay?: boolean;
+        overlayOptions?: { anchor?: string; nonCapturing?: boolean };
+        onHandle?: (handle: OverlayHandle) => void;
+      },
+    ): Promise<T> {
+      customCalls.push({
+        overlay: options?.overlay,
+        anchor: options?.overlayOptions?.anchor,
+        nonCapturing: options?.overlayOptions?.nonCapturing,
+      });
+      return new Promise<T>((resolve) => {
+        factory(sidebarTui, sidebarTheme, {}, resolve);
+        options?.onHandle?.({
+          hide() {},
+          setHidden() {},
+          isHidden: () => false,
+          focus() {},
+          unfocus() {},
+          isFocused: () => false,
+        });
+      });
+    },
   },
 } as never);
 
 assert.ok(sidebar);
+assert.deepEqual(
+  customCalls[0],
+  { overlay: true, anchor: "right-center", nonCapturing: true },
+  "TUI mode should register a non-capturing right-side overlay sidebar",
+);
 assert.equal(widgetCalls[0]?.key, "pi-long-task-sidebar");
 assert.equal(typeof widgetCalls[0]?.content, "function");
 assert.equal(widgetCalls[0]?.placement, "aboveEditor");
