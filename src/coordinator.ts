@@ -437,6 +437,8 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
   return extractTodoMarkdown(plannerText);
 }
 
+// Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
+// keep this function's public contract stable while moving shared prompt guarding into a helper.
 export async function runTodoPlanner(options: TodoPlannerOptions): Promise<string> {
   let session: WorkerSessionLike | undefined;
   try {
