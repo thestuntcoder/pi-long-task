@@ -7,7 +7,7 @@ import {
 } from "../src/index.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { CoordinatorProgressUpdate } from "../src/coordinator.ts";
 
 function assistantMessage(): AssistantMessage {
@@ -81,61 +81,45 @@ assert.ok(first);
 assert.equal(first.usage.cost.total, 0.087);
 assert.equal(accumulator.applyToAssistantMessage(assistantMessage()), undefined);
 
-const widgetCalls: Array<{ key: string; content: string[] | undefined; placement?: string }> = [];
-let overlayComponent: Component | undefined;
-let overlayClosed = false;
-let overlayUnfocused = false;
+type WidgetFactory = (tui: TUI, theme: Theme) => Component;
+type WidgetContent = string[] | WidgetFactory | undefined;
+
+const widgetCalls: Array<{ key: string; content: WidgetContent; placement?: string }> = [];
+let widgetComponent: Component | undefined;
+let widgetFactoryCalls = 0;
 let renderRequests = 0;
 const sidebarTheme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
 } as Theme;
+const sidebarTui = {
+  terminal: { rows: 40 },
+  requestRender: () => {
+    renderRequests += 1;
+  },
+} as unknown as TUI;
 const sidebar = createLongTaskSidebarController({
   hasUI: true,
   mode: "tui",
   ui: {
-    setWidget(key: string, content: string[] | undefined, options?: { placement?: string }) {
+    setWidget(key: string, content: WidgetContent, options?: { placement?: string }) {
       widgetCalls.push({ key, content, placement: options?.placement });
-    },
-    custom<T>(
-      factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component,
-      options?: { onHandle?: (handle: OverlayHandle) => void; overlay?: boolean },
-    ): Promise<T> {
-      assert.equal(options?.overlay, true);
-      return new Promise<T>((resolve) => {
-        overlayComponent = factory(
-          {
-            requestRender: () => {
-              renderRequests += 1;
-            },
-          } as unknown as TUI,
-          sidebarTheme,
-          {},
-          (result) => {
-            overlayClosed = true;
-            resolve(result);
-          },
-        );
-        options?.onHandle?.({
-          hide() {},
-          setHidden() {},
-          isHidden: () => false,
-          focus() {},
-          unfocus() {
-            overlayUnfocused = true;
-          },
-          isFocused: () => false,
-        });
-      });
+      if (typeof content === "function") {
+        widgetFactoryCalls += 1;
+        widgetComponent = content(sidebarTui, sidebarTheme);
+      } else if (!content) {
+        widgetComponent = undefined;
+      }
     },
   },
 } as never);
 
 assert.ok(sidebar);
 assert.equal(widgetCalls[0]?.key, "pi-long-task-sidebar");
-assert.deepEqual(widgetCalls[0]?.content, ["Pi Long Task: preparing sidebar..."]);
+assert.equal(typeof widgetCalls[0]?.content, "function");
 assert.equal(widgetCalls[0]?.placement, "aboveEditor");
-assert.ok(overlayUnfocused);
+assert.equal(widgetFactoryCalls, 1);
+assert.match(widgetComponent?.render(80).join("\n") ?? "", /Preparing long-task sidebar/);
 
 const sidebarUpdate = {
   message: "Running TODO 2 — Wire Sidebar Rendering...",
@@ -196,21 +180,26 @@ const sidebarUpdate = {
 } satisfies CoordinatorProgressUpdate;
 
 sidebar.update(sidebarUpdate);
-const runningWidget = widgetCalls.at(-1)?.content?.join("\n") ?? "";
-assert.match(runningWidget, /Pi Long Task/);
-assert.match(runningWidget, /▢ Running task .* Running TODO 2/);
-assert.match(runningWidget, /active: ▢ TODO 2 .* Wire Sidebar Rendering/);
-assert.match(runningWidget, /Spent: \$0\.01/);
+const runningWidgetLines = widgetComponent?.render(80) ?? [];
+const runningWidget = runningWidgetLines.join("\n");
+assert.match(runningWidget, /TODO 2 — Wire Sidebar Rendering/);
+assert.match(runningWidget, /▢ Running task .* \$0\.01 spent/);
+assert.match(runningWidget, /Task timeline/);
+assert.match(runningWidget, /Current/);
+assert.match(runningWidget, /Tasks 1\/3 .* 33% complete .* ■▢·/);
+assert.match(runningWidget, /■ done .* ▢ active .* · queued/);
+assert.match(runningWidget, /▢ TODO 2 .* active/);
+assert.match(runningWidget, /› ▢ TODO 2/);
+assert.match(runningWidget, /Wire Sidebar Rendering/);
+assert.match(runningWidget, /… 2 more/);
 assert.equal(renderRequests, 1);
-const overlayText = overlayComponent?.render(80).join("\n") ?? "";
-assert.match(overlayText, /Task timeline/);
-assert.match(overlayText, /Current/);
-assert.match(overlayText, /Tasks 1\/3 .* 33% complete .* ■▢·/);
-assert.match(overlayText, /■ done .* ▢ active .* · queued/);
-assert.match(overlayText, /▢ TODO 2 .* active/);
-assert.match(overlayText, /› ▢ TODO 2/);
-assert.match(overlayText, /Wire Sidebar Rendering/);
-assert.match(overlayText, /\+ active .* Route onUpdate data/);
+assert.ok(runningWidgetLines.length > 6);
+assert.ok(runningWidgetLines.length <= 24, "sidebar should cap its height even on tall terminals");
+(sidebarTui as unknown as { terminal: { rows: number } }).terminal.rows = 14;
+const constrainedWidgetLines = widgetComponent?.render(80) ?? [];
+assert.equal(constrainedWidgetLines.length, 6, "sidebar should reserve 8 terminal rows for editor/input");
+assert.match(constrainedWidgetLines.at(-1) ?? "", /… \d+ more/);
+(sidebarTui as unknown as { terminal: { rows: number } }).terminal.rows = 40;
 
 sidebar.update({
   ...sidebarUpdate,
@@ -229,14 +218,15 @@ sidebar.update({
     },
   },
 });
-const doneWidget = widgetCalls.at(-1)?.content?.join("\n") ?? "";
-assert.match(doneWidget, /done .* TODO 2 done/);
-assert.match(doneWidget, /Tasks: 2\/3 .* 67% .* 1 queued/);
+const doneWidget = widgetComponent?.render(80).join("\n") ?? "";
+assert.match(doneWidget, /✓ done/);
+assert.match(doneWidget, /2\/3 tasks complete/);
+assert.match(doneWidget, /67% complete/);
 assert.equal(renderRequests, 2);
 
 sidebar.close();
 assert.equal(widgetCalls.at(-1)?.content, undefined);
-assert.ok(overlayClosed);
+assert.equal(widgetComponent, undefined);
 
 assert.equal(createLongTaskSidebarController(undefined), undefined);
 assert.equal(createLongTaskSidebarController({ hasUI: false } as never), undefined);
