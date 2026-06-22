@@ -111,22 +111,36 @@ function renderLongTaskProgress(details: Record<string, unknown> | undefined, fa
   const toolName = stringValue(details?.toolName);
   const prefix = phase === "worker_tool" && toolName ? `worker ${toolName}` : phase || "progress";
   const currentTask = progressTaskDetails(details?.currentTask);
+  const progress = taskProgressModel(details?.taskProgress);
+
   if (!currentTask) {
-    return `${theme.fg("accent", "●")} ${theme.fg("muted", prefix)} ${message}`;
+    return `${theme.fg("warning", "+")} ${theme.fg("warning", `${progressPhaseLabel(phase)}:`)} ${message}`;
   }
 
   const taskLabel = `TODO ${currentTask.taskId} — ${currentTask.title}`;
+  const status = progressItemStatusDetails(currentTask.status);
+  const activitySuffix =
+    phase === "worker_tool" && toolName ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", `worker ${toolName}`)}` : "";
+  const attempt = numberValue(details?.attempt);
+  const attemptSuffix =
+    attempt && attempt > 1 ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", `attempt ${attempt}`)}` : "";
   const lines = [
-    `${progressBubble(currentTask.status, theme)} ${theme.fg("muted", prefix)} ${theme.fg(progressTextColor(currentTask.status), taskLabel)}`,
+    `${theme.fg("warning", "+")} ${theme.fg("warning", `${progressPhaseLabel(phase)}:`)} ${theme.fg(
+      status.textColor,
+      taskLabel,
+    )}${activitySuffix}${attemptSuffix}`,
   ];
+
+  if (progress) {
+    lines.push(renderTaskProgressStrip(progress, theme));
+  }
+
   if (message && !message.includes(taskLabel)) {
-    lines.push(`  ${theme.fg("dim", message)}`);
+    lines.push(`  ${theme.fg("dim", "⚙")} ${theme.fg("dim", `${prefix} · ${message}`)}`);
   }
 
   for (const subtask of progressSubtaskDetails(details?.subtasks)) {
-    lines.push(
-      `  ${progressBubble(subtask.status, theme)} ${theme.fg(progressTextColor(subtask.status), subtask.text)}`,
-    );
+    lines.push(renderProgressSubtaskLine(subtask, theme));
   }
 
   return lines.join("\n");
@@ -215,36 +229,120 @@ function progressSubtaskDetails(value: unknown): ProgressSubtaskRenderDetails[] 
   });
 }
 
+function progressPhaseLabel(phase: string): string {
+  switch (phase) {
+    case "planning":
+    case "planned":
+      return "Thought";
+    case "task_start":
+    case "worker_tool":
+      return "Build";
+    case "task_done":
+      return "Done";
+    case "task_failed":
+      return "Failed";
+    case "task_blocked":
+      return "Blocked";
+    case "complete":
+      return "Complete";
+    default:
+      return "Progress";
+  }
+}
+
+function renderTaskProgressStrip(progress: TaskProgressModel, theme: Theme): string {
+  const summary = progress.summary;
+  const track = taskProgressTrack(progress, theme);
+  const counts = [
+    theme.fg("muted", `${summary.completedTasks}/${summary.totalTasks}`),
+    theme.fg("muted", `${summary.completedPercent}%`),
+    summary.failedTasks ? theme.fg("error", `${summary.failedTasks} failed`) : undefined,
+    summary.blockedTasks ? theme.fg("warning", `${summary.blockedTasks} blocked`) : undefined,
+    summary.currentTasks ? theme.fg("warning", `${summary.currentTasks} active`) : undefined,
+    summary.pendingTasks ? theme.fg("dim", `${summary.pendingTasks} queued`) : undefined,
+  ]
+    .filter(Boolean)
+    .join(` ${theme.fg("dim", "·")} `);
+  return `  ${track} ${counts}`;
+}
+
+function taskProgressTrack(progress: TaskProgressModel, theme: Theme): string {
+  const taskIndexes = focusedTaskIndexes(progress);
+  const first = taskIndexes[0] ?? 0;
+  const last = taskIndexes[taskIndexes.length - 1] ?? -1;
+  const prefix = first > 0 ? theme.fg("dim", "… ") : "";
+  const suffix = last >= 0 && last < progress.tasks.length - 1 ? theme.fg("dim", " …") : "";
+  return `${prefix}${taskIndexes.map((index) => taskProgressTaskGlyph(progress.tasks[index], theme)).join(" ")}${suffix}`;
+}
+
+function focusedTaskIndexes(progress: TaskProgressModel): number[] {
+  const total = progress.tasks.length;
+  if (total <= 0) {
+    return [];
+  }
+  const limit = Math.min(total, 8);
+  const focus = Math.max(0, Math.min(total - 1, progress.currentIndex ?? progress.nextIndex ?? 0));
+  const start = Math.max(0, Math.min(total - limit, focus - Math.floor(limit / 2)));
+  return Array.from({ length: limit }, (_value, index) => start + index);
+}
+
+function taskProgressTaskGlyph(task: TaskProgressModel["tasks"][number] | undefined, theme: Theme): string {
+  if (!task) {
+    return "";
+  }
+  const details = taskStatusDetails(task.status);
+  return theme.fg(details.color, details.icon);
+}
+
+function renderProgressSubtaskLine(subtask: ProgressSubtaskRenderDetails, theme: Theme): string {
+  const details = progressItemStatusDetails(subtask.status);
+  return `  ${theme.fg(details.color, details.icon)} ${theme.fg(details.textColor, `${details.label} · ${subtask.text}`)}`;
+}
+
 function progressItemStatus(value: unknown): ProgressItemStatus | undefined {
   return value === "empty" || value === "in_progress" || value === "done" || value === "failed" || value === "blocked"
     ? value
     : undefined;
 }
 
-function progressBubble(status: ProgressItemStatus, theme: Theme): string {
+function taskStatusDetails(status: TaskProgressModel["tasks"][number]["status"]): {
+  icon: string;
+  label: string;
+  color: "accent" | "success" | "warning" | "dim" | "error";
+  textColor: "accent" | "text" | "success" | "warning" | "dim" | "error";
+} {
   switch (status) {
-    case "empty":
-      return theme.fg("dim", "○");
+    case "completed":
+      return { icon: "✓", label: "done", color: "success", textColor: "dim" };
+    case "current":
+      return { icon: "▢", label: "active", color: "accent", textColor: "text" };
     case "failed":
-      return theme.fg("error", "✗");
+      return { icon: "×", label: "failed", color: "error", textColor: "error" };
     case "blocked":
-      return theme.fg("warning", "!");
-    default:
-      return theme.fg(progressTextColor(status), "●");
+      return { icon: "!", label: "blocked", color: "warning", textColor: "warning" };
+    case "pending":
+      return { icon: "○", label: "queued", color: "dim", textColor: "dim" };
   }
 }
 
-function progressTextColor(status: ProgressItemStatus): "success" | "warning" | "dim" | "error" {
-  if (status === "done") {
-    return "success";
+function progressItemStatusDetails(status: ProgressItemStatus): {
+  icon: string;
+  label: string;
+  color: "accent" | "success" | "warning" | "dim" | "error";
+  textColor: "accent" | "success" | "warning" | "dim" | "error";
+} {
+  switch (status) {
+    case "done":
+      return { icon: "✓", label: "done", color: "success", textColor: "dim" };
+    case "in_progress":
+      return { icon: "+", label: "active", color: "warning", textColor: "warning" };
+    case "failed":
+      return { icon: "×", label: "failed", color: "error", textColor: "error" };
+    case "blocked":
+      return { icon: "!", label: "blocked", color: "warning", textColor: "warning" };
+    case "empty":
+      return { icon: "○", label: "queued", color: "dim", textColor: "dim" };
   }
-  if (status === "failed") {
-    return "error";
-  }
-  if (status === "in_progress" || status === "blocked") {
-    return "warning";
-  }
-  return "dim";
 }
 
 function longTaskDetails(details: Record<string, unknown> | undefined): CoordinatorToolRenderDetails | undefined {

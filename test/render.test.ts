@@ -77,7 +77,7 @@ const progress = renderLongTaskToolResult(
   { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
   theme,
 );
-assert.equal(renderText(progress), "● worker bash TODO 1: worker tool bash started.");
+assert.equal(renderText(progress), "+ Build: TODO 1: worker tool bash started.");
 
 const progressWithSubtasks = renderLongTaskToolResult(
   {
@@ -100,11 +100,11 @@ const progressWithSubtasks = renderLongTaskToolResult(
 assert.equal(
   renderText(progressWithSubtasks),
   [
-    "● worker bash TODO 2 — Wire progress UI",
-    "  TODO 2: worker tool bash started.",
-    "  ● Parse status checkboxes",
-    "  ● Render active subtask",
-    "  ○ Add coverage",
+    "+ Build: TODO 2 — Wire progress UI · worker bash",
+    "  ⚙ worker bash · TODO 2: worker tool bash started.",
+    "  ✓ done · Parse status checkboxes",
+    "  + active · Render active subtask",
+    "  ○ queued · Add coverage",
   ].join("\n"),
 );
 
@@ -163,7 +163,8 @@ const progressWithTaskProgress = renderLongTaskToolResult(
   theme,
 );
 const taskProgressText = renderText(progressWithTaskProgress);
-assert.match(taskProgressText, /task_start TODO 2 .* Wire Sidebar Rendering/);
+assert.match(taskProgressText, /\+ Build: TODO 2 .* Wire Sidebar Rendering/);
+assert.match(taskProgressText, /✓ ▢ 1\/2 .* 50% .* 1 active/);
 assert.doesNotMatch(taskProgressText, /Task sidebar/);
 assert.doesNotMatch(taskProgressText, /Long Task/);
 assert.doesNotMatch(taskProgressText, /Progress \[/);
