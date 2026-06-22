@@ -201,6 +201,50 @@ try {
   assert.equal(planned.status, "done");
   assert.equal(planned.completedTasks, 1);
 
+  const repairPlannerInputs: string[] = [];
+  const repairPlannerRun = await runCoordinator({
+    inputText: "Plan a task after repairing invalid planner output.",
+    commit: false,
+    cwd: tempRoot,
+    runId: "planner-repair",
+    todoPlanner: async (options) => {
+      repairPlannerInputs.push(options.inputText);
+      return repairPlannerInputs.length === 1
+        ? "I forgot to output the required TODO markdown."
+        : generatedTodoMarkdown(["Repaired planner task"]);
+    },
+    workerRunner: sequentialWorker,
+  });
+  assert.equal(repairPlannerRun.status, "done");
+  assert.equal(repairPlannerRun.completedTasks, 1);
+  assert.equal(repairPlannerInputs.length, 2);
+  assert.match(repairPlannerInputs[1], /Validation\/extraction error:/);
+  assert.match(repairPlannerInputs[1], /Could not extract valid Pi Long Task TODO markdown/);
+  assert.match(repairPlannerInputs[1], /I forgot to output/);
+
+  let invalidTwiceWorkerStarted = false;
+  let invalidTwicePlannerCalls = 0;
+  const invalidTwiceRun = await runCoordinator({
+    inputText: "Plan a task but keep returning invalid planner output.",
+    commit: false,
+    cwd: tempRoot,
+    runId: "planner-invalid-twice",
+    todoPlanner: async () => {
+      invalidTwicePlannerCalls += 1;
+      return "still not TODO markdown";
+    },
+    workerRunner: async (options) => {
+      invalidTwiceWorkerStarted = true;
+      return outcomeFor(options, "done");
+    },
+  });
+  assert.equal(invalidTwiceRun.status, "failed");
+  assert.equal(invalidTwiceRun.attemptedTasks, 0);
+  assert.equal(invalidTwiceRun.outcomes.length, 0);
+  assert.equal(invalidTwicePlannerCalls, 2);
+  assert.equal(invalidTwiceWorkerStarted, false);
+  assert.match(invalidTwiceRun.error ?? "", /after one repair attempt/);
+
   const retryCalls: Array<{ taskId: string; attempt: number; previousAttempts?: string }> = [];
   const retryWorker: WorkerRunner = async (options) => {
     retryCalls.push({
@@ -316,6 +360,35 @@ try {
     tools: [],
   });
   assert.equal(plannerDisposed, true);
+
+  const plannerRepairPrompts: string[] = [];
+  let plannerRepairDisposed = false;
+  const plannerRepairText = await runTodoPlanner({
+    inputText: "Plan with a first invalid model response.",
+    cwd: tempRoot,
+    runDir: path.join(tempRoot, "planner-repair-session"),
+    thinkingLevel: "xhigh",
+    sessionFactory: async () => ({
+      session: {
+        async prompt(text) {
+          plannerRepairPrompts.push(text);
+        },
+        getLastAssistantText: () =>
+          plannerRepairPrompts.length === 1
+            ? "This is commentary, not TODO markdown."
+            : generatedTodoMarkdown(["Session repaired planner task"]),
+        subscribe: () => () => {},
+        dispose: () => {
+          plannerRepairDisposed = true;
+        },
+      },
+    }),
+  });
+  assert.match(plannerRepairText, /TODO 1 — Session repaired planner task/);
+  assert.equal(plannerRepairPrompts.length, 2);
+  assert.match(plannerRepairPrompts[1], /Validation\/extraction error:/);
+  assert.match(plannerRepairPrompts[1], /This is commentary/);
+  assert.equal(plannerRepairDisposed, true);
 
   let timeoutPlannerDisposed = false;
   let timeoutPlannerAbortCalls = 0;

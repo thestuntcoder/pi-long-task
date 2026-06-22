@@ -15,6 +15,7 @@ export interface GuardedSessionPromptOptions {
   gracefulShutdownPrompt?: string;
   diagnostics?: string[];
   onEvent?: (event: unknown) => void;
+  dispose?: boolean;
 }
 
 export interface GuardedSessionPromptResult {
@@ -200,15 +201,17 @@ export async function runGuardedSessionPrompt(
     options.abortSignal?.removeEventListener("abort", abortListener);
     unsubscribe?.();
     assistantText = latestAssistantText(session, events, assistantText);
-    try {
-      const disposeResult = (session.dispose as (() => unknown) | undefined)?.();
-      if (isPromiseLike(disposeResult)) {
-        await disposeResult;
+    if (options.dispose !== false) {
+      try {
+        const disposeResult = (session.dispose as (() => unknown) | undefined)?.();
+        if (isPromiseLike(disposeResult)) {
+          await disposeResult;
+        }
+      } catch (exc) {
+        const message = `session dispose failed: ${errorMessage(exc)}`;
+        diagnostics.push(message);
+        error = error ?? message;
       }
-    } catch (exc) {
-      const message = `session dispose failed: ${errorMessage(exc)}`;
-      diagnostics.push(message);
-      error = error ?? message;
     }
   }
 

@@ -16,7 +16,8 @@ import { parseWorkerRuntimeConfig } from "./worker_config.ts";
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
   buildTodoCreationPrompt,
-  extractTodoMarkdown,
+  buildTodoRepairPrompt,
+  extractAndValidateTodoMarkdown,
   TodoGenerationError,
   todoMarkdownFromString,
   validateTodoMarkdown,
@@ -28,6 +29,7 @@ import {
   type RunWorkerTaskOptions,
   type SessionOutcome,
   type WorkerSessionFactory,
+  type WorkerSessionLike,
 } from "./worker_session.ts";
 
 export type { CoordinatorStatus } from "./types.ts";
@@ -433,7 +435,33 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
     return local;
   }
 
-  const plannerText = await runtime.todoPlanner({
+  const plannerText = await requestTodoPlan(inputText, runtime);
+  return extractTodoMarkdownWithOneRepair(inputText, plannerText, (repairPrompt) =>
+    requestTodoPlan(repairPrompt, runtime),
+  );
+}
+
+async function extractTodoMarkdownWithOneRepair(
+  inputText: string,
+  plannerText: string,
+  requestRepair: (repairPrompt: string) => Promise<string>,
+): Promise<string> {
+  try {
+    return extractAndValidateTodoMarkdown(plannerText);
+  } catch (error) {
+    const repairText = await requestRepair(buildTodoRepairPrompt(inputText, plannerText, errorMessage(error)));
+    try {
+      return extractAndValidateTodoMarkdown(repairText);
+    } catch (repairError) {
+      throw new TodoGenerationError(
+        `TODO planner returned invalid TODO markdown after one repair attempt: ${errorMessage(repairError)}`,
+      );
+    }
+  }
+}
+
+async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Promise<string> {
+  return runtime.todoPlanner({
     inputText,
     cwd: runtime.cwd,
     runDir: runtime.runDir,
@@ -444,7 +472,6 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
     gracefulShutdownMs: runtime.todoGracefulShutdownMs,
     sessionFactory: runtime.todoSessionFactory,
   });
-  return extractTodoMarkdown(plannerText);
 }
 
 // Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
@@ -457,15 +484,69 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
     model: options.model,
     thinkingLevel: options.thinkingLevel,
   });
+  const session = result.session;
+  const timeoutMs = positiveMilliseconds(options.timeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs);
+  const gracefulShutdownMs = options.gracefulShutdownMs ?? DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs;
 
+  let plannerMarkdown: string | undefined;
+  let plannerError: unknown;
+
+  try {
+    const plannerText = await runTodoPlannerPrompt({
+      session,
+      prompt: buildTodoCreationPrompt(options.inputText),
+      abortSignal: options.abortSignal,
+      timeoutMs,
+      gracefulShutdownMs,
+      diagnostics: result.diagnostics,
+    });
+
+    plannerMarkdown = await extractTodoMarkdownWithOneRepair(options.inputText, plannerText, (repairPrompt) =>
+      runTodoPlannerPrompt({
+        session,
+        prompt: repairPrompt,
+        abortSignal: options.abortSignal,
+        timeoutMs,
+        gracefulShutdownMs,
+        diagnostics: result.diagnostics,
+      }),
+    );
+  } catch (error) {
+    plannerError = error;
+  }
+
+  try {
+    await Promise.resolve(session.dispose?.());
+  } catch (error) {
+    plannerError = plannerError ?? new TodoGenerationError(`TODO planner dispose failed: ${errorMessage(error)}`);
+  }
+
+  if (plannerError) {
+    throw plannerError;
+  }
+  if (!plannerMarkdown) {
+    throw new TodoGenerationError("TODO planner did not return valid TODO markdown.");
+  }
+  return plannerMarkdown;
+}
+
+async function runTodoPlannerPrompt(options: {
+  session: WorkerSessionLike;
+  prompt: string;
+  abortSignal?: AbortSignal;
+  timeoutMs: number;
+  gracefulShutdownMs: number;
+  diagnostics?: string[];
+}): Promise<string> {
   const promptResult = await runGuardedSessionPrompt({
-    session: result.session,
-    prompt: buildTodoCreationPrompt(options.inputText),
+    session: options.session,
+    prompt: options.prompt,
     abortSignal: options.abortSignal,
-    timeoutMs: positiveMilliseconds(options.timeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs),
-    gracefulShutdownMs: options.gracefulShutdownMs ?? DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
+    timeoutMs: options.timeoutMs,
+    gracefulShutdownMs: options.gracefulShutdownMs,
     gracefulShutdownPrompt: buildTodoPlanningShutdownMessage(),
-    diagnostics: result.diagnostics,
+    diagnostics: options.diagnostics,
+    dispose: false,
   });
 
   if (promptResult.timedOut) {

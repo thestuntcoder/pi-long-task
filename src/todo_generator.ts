@@ -120,6 +120,16 @@ export function buildTodoCreationPrompt(rawInput: string): string {
   return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.\n\nRequirements:\n- Output only markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n\nRaw input:\n\n${rawInput.trim()}\n`;
 }
 
+export function buildTodoRepairPrompt(rawInput: string, invalidOutput: string, validationError: string): string {
+  return `Your previous response was not valid Pi Long Task TODO markdown. Correct it now.\n\nValidation/extraction error:\n${validationError.trim() || "Unknown validation error."}\n\nRequirements:\n- Output only corrected markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n\nOriginal raw input:\n\n${rawInput.trim()}\n\nPrevious invalid output:\n\n${invalidOutput.trim()}\n`;
+}
+
+export function extractAndValidateTodoMarkdown(assistantText: string): string {
+  const markdown = extractTodoMarkdown(assistantText);
+  validateTodoMarkdown(markdown);
+  return markdown;
+}
+
 export function extractTodoMarkdown(assistantText: string): string {
   for (const block of fencedMarkdownBlocks(assistantText)) {
     const candidate = normalizeCandidate(block);
