@@ -186,7 +186,6 @@ export const extractAssistantTextFromEvent = assistantTextFromEvent;
 export const extractLastAssistantTextFromEvents = lastAssistantTextFromEvents;
 
 export const DEFAULT_WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
-export const DEFAULT_WORKER_MODEL = "openai-codex/gpt-5.5";
 export const DEFAULT_WORKER_THINKING_LEVEL = "high";
 export const DEFAULT_TASK_TIMEOUT_SECONDS = 60 * 60;
 export const DEFAULT_GRACEFUL_SHUTDOWN_SECONDS = 60;
@@ -309,7 +308,8 @@ export async function createIsolatedWorkerSession(
   const resourceLoader = disableExtensionsForWorker(discoveredResourceLoader, () => pi.createExtensionRuntime());
   await resourceLoader.reload();
 
-  const model = options.model ?? (await resolveWorkerModel(modelRegistry, options.modelName ?? DEFAULT_WORKER_MODEL));
+  const model =
+    options.model ?? (options.modelName ? await resolveWorkerModel(modelRegistry, options.modelName) : undefined);
   const createOptions: Record<string, unknown> = {
     cwd,
     agentDir,

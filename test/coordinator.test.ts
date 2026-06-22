@@ -3,7 +3,12 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { runCoordinator, type CoordinatorProgressUpdate, type WorkerRunner } from "../src/coordinator.ts";
+import {
+  runCoordinator,
+  runTodoPlanner,
+  type CoordinatorProgressUpdate,
+  type WorkerRunner,
+} from "../src/coordinator.ts";
 import { generatedTodoMarkdown } from "../src/todo_generator.ts";
 import { parseTasks } from "../src/todo_parser.ts";
 import type { RunWorkerTaskOptions, SessionOutcome } from "../src/worker_session.ts";
@@ -243,8 +248,71 @@ try {
   assert.equal((failedResult.match(/## TODO 1 — Flaky task/g) ?? []).length, 3);
   assert.equal((failedResult.match(/## TODO 2 — Never reached/g) ?? []).length, 0);
 
+  const parentWorkerModel = { provider: "parent-provider", id: "parent-model" };
+  const defaultModelCalls: Array<{
+    model?: unknown;
+    modelName?: string;
+    thinkingLevel?: string;
+  }> = [];
+  const defaultModelRun = await runCoordinator({
+    inputText: generatedTodoMarkdown(["Default parent model task"]),
+    commit: false,
+    cwd: tempRoot,
+    runId: "default-parent-worker-model",
+    workerModel: parentWorkerModel,
+    workerRunner: async (options) => {
+      defaultModelCalls.push({
+        model: options.model,
+        modelName: options.modelName,
+        thinkingLevel: options.thinkingLevel,
+      });
+      return outcomeFor(options, "done");
+    },
+  });
+  assert.equal(defaultModelRun.status, "done");
+  assert.deepEqual(defaultModelCalls, [{ model: parentWorkerModel, modelName: undefined, thinkingLevel: "high" }]);
+
+  let plannerFactoryOptions:
+    | { model?: unknown; modelName?: string; thinkingLevel?: string; tools?: readonly string[] }
+    | undefined;
+  let plannerDisposed = false;
+  const plannedText = await runTodoPlanner({
+    inputText: "Plan a parent-default model task.",
+    cwd: tempRoot,
+    runDir: path.join(tempRoot, "planner-parent-default"),
+    thinkingLevel: "xhigh",
+    model: parentWorkerModel,
+    sessionFactory: async (options) => {
+      plannerFactoryOptions = {
+        model: options.model,
+        modelName: options.modelName,
+        thinkingLevel: options.thinkingLevel,
+        tools: options.tools,
+      };
+      return {
+        session: {
+          async prompt() {},
+          getLastAssistantText: () => generatedTodoMarkdown(["Planned parent default"]),
+          subscribe: () => () => {},
+          dispose: () => {
+            plannerDisposed = true;
+          },
+        },
+      };
+    },
+  });
+  assert.match(plannedText, /TODO 1 — Planned parent default/);
+  assert.deepEqual(plannerFactoryOptions, {
+    model: parentWorkerModel,
+    modelName: undefined,
+    thinkingLevel: "xhigh",
+    tools: [],
+  });
+  assert.equal(plannerDisposed, true);
+
   const configuredCalls: Array<{
     attempt: number;
+    model?: unknown;
     modelName?: string;
     taskTimeoutSeconds?: number;
     maxBashTimeoutSeconds: number;
@@ -279,9 +347,11 @@ Max bash timeout: 42s
     commit: false,
     cwd: tempRoot,
     runId: "configured-worker-runtime",
+    workerModel: parentWorkerModel,
     workerRunner: async (options) => {
       configuredCalls.push({
         attempt: options.attempt,
+        model: options.model,
         modelName: options.modelName,
         taskTimeoutSeconds: options.taskTimeoutSeconds,
         maxBashTimeoutSeconds: options.maxBashTimeoutSeconds,
@@ -294,6 +364,10 @@ Max bash timeout: 42s
   assert.deepEqual(
     configuredCalls.map((call) => call.attempt),
     [1, 2],
+  );
+  assert.deepEqual(
+    configuredCalls.map((call) => call.model),
+    [undefined, undefined],
   );
   assert.deepEqual(
     configuredCalls.map((call) => call.modelName),

@@ -679,6 +679,7 @@ export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
         const result = await runCoordinator({
           ...params,
           cwd: ctx?.cwd,
+          workerModel: ctx?.model,
           abortSignal: signal,
           onProgress: publishProgress,
         });
