@@ -55,6 +55,18 @@ export type CoordinatorProgressPhase =
   | "task_failed"
   | "complete";
 
+export type PlannerDiagnosticKind = "timeout" | "abort" | "invalid_output" | "repair_attempt" | "failure";
+
+export interface PlannerDiagnostic {
+  kind: PlannerDiagnosticKind;
+  message: string;
+  diagnostics?: string[];
+  sessionFile?: string;
+  sessionId?: string;
+}
+
+export type PlannerDiagnosticHandler = (diagnostic: PlannerDiagnostic) => void;
+
 export type CoordinatorProgressItemStatus = "empty" | "in_progress" | "done" | "failed" | "blocked";
 
 export interface CoordinatorProgressTask {
@@ -89,6 +101,10 @@ export interface CoordinatorProgressUpdate {
   currentTask?: CoordinatorProgressTask;
   subtasks?: CoordinatorProgressSubtask[];
   taskProgress?: TaskProgressModel;
+  plannerDiagnostic?: PlannerDiagnosticKind;
+  plannerDiagnostics?: string[];
+  plannerSessionFile?: string;
+  plannerSessionId?: string;
 }
 
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
@@ -125,6 +141,7 @@ export interface TodoPlannerOptions {
   timeoutMs?: number;
   gracefulShutdownMs?: number;
   sessionFactory?: WorkerSessionFactory;
+  onDiagnostic?: PlannerDiagnosticHandler;
 }
 
 export interface TaskAttemptSummary {
@@ -193,6 +210,7 @@ interface RuntimeOptions {
   now: () => Date;
   onProgress?: CoordinatorProgressHandler;
   workerCostState: WorkerCostState;
+  plannerDiagnostics: PlannerDiagnostic[];
 }
 
 export async function runCoordinator(options: RunCoordinatorOptions): Promise<CoordinatorResult> {
@@ -203,11 +221,13 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
 
   await mkdir(runtime.runDir, { recursive: true });
   await writeFile(runtime.taskResultPath, initialTaskResultMarkdown(runtime.runId), "utf8");
+  let planningComplete = false;
 
   try {
     emitProgress(runtime, "Creating TODO plan...", { phase: "planning" });
     let todoMarkdown = await generateOrNormalizeTodoMarkdown(options.inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
+    planningComplete = true;
     await writeFile(runtime.todoPath, todoMarkdown, "utf8");
     const initialTasks = parseTasks(todoMarkdown);
     emitProgress(runtime, `Created TODO plan with ${initialTasks.length} task(s).`, {
@@ -389,9 +409,18 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     return result;
   } catch (error) {
     const message = errorMessage(error);
-    const summary = `Pi Long Task failed: ${message}`;
+    if (!planningComplete) {
+      recordPlannerDiagnostic(runtime, {
+        kind: "failure",
+        message: `TODO planning failed: ${message}`,
+      });
+    }
+    const resultError = !planningComplete
+      ? `${message} See ${runtime.taskResultPath} for planner diagnostics.`
+      : message;
+    const summary = `Pi Long Task failed: ${resultError}`;
     try {
-      await appendFile(runtime.taskResultPath, `\n## Pi Long Task failure\n\n${message}\n`, "utf8");
+      await appendFailureNote(runtime.taskResultPath, message, !planningComplete ? runtime.plannerDiagnostics : []);
     } catch {
       // Best effort only; the original error is returned below.
     }
@@ -417,7 +446,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
       workerCostTotal: runtime.workerCostState.total,
       commit: options.commit,
-      error: message,
+      error: resultError,
     };
     result.message = formatCoordinatorResultMessage(result);
     emitProgress(runtime, "Pi Long Task failed.", {
@@ -436,25 +465,56 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
   }
 
   const plannerText = await requestTodoPlan(inputText, runtime);
-  return extractTodoMarkdownWithOneRepair(inputText, plannerText, (repairPrompt) =>
-    requestTodoPlan(repairPrompt, runtime),
+  return extractTodoMarkdownWithOneRepair(
+    inputText,
+    plannerText,
+    (repairPrompt) => requestTodoPlan(repairPrompt, runtime),
+    {
+      onInvalidOutput: (validationError) =>
+        recordPlannerDiagnostic(runtime, {
+          kind: "invalid_output",
+          message: `TODO planner returned invalid output: ${validationError}`,
+        }),
+      onRepairAttempt: (validationError) =>
+        recordPlannerDiagnostic(runtime, {
+          kind: "repair_attempt",
+          message: `Asking TODO planner to repair invalid output: ${validationError}`,
+        }),
+      onFailure: (validationError) =>
+        recordPlannerDiagnostic(runtime, {
+          kind: "failure",
+          message: `TODO planner repair failed: ${validationError}`,
+        }),
+    },
   );
+}
+
+interface TodoExtractionRepairHooks {
+  onInvalidOutput?: (validationError: string) => void;
+  onRepairAttempt?: (validationError: string) => void;
+  onFailure?: (validationError: string) => void;
 }
 
 async function extractTodoMarkdownWithOneRepair(
   inputText: string,
   plannerText: string,
   requestRepair: (repairPrompt: string) => Promise<string>,
+  hooks: TodoExtractionRepairHooks = {},
 ): Promise<string> {
   try {
     return extractAndValidateTodoMarkdown(plannerText);
   } catch (error) {
-    const repairText = await requestRepair(buildTodoRepairPrompt(inputText, plannerText, errorMessage(error)));
+    const validationError = errorMessage(error);
+    hooks.onInvalidOutput?.(validationError);
+    hooks.onRepairAttempt?.(validationError);
+    const repairText = await requestRepair(buildTodoRepairPrompt(inputText, plannerText, validationError));
     try {
       return extractAndValidateTodoMarkdown(repairText);
     } catch (repairError) {
+      const repairMessage = errorMessage(repairError);
+      hooks.onFailure?.(repairMessage);
       throw new TodoGenerationError(
-        `TODO planner returned invalid TODO markdown after one repair attempt: ${errorMessage(repairError)}`,
+        `TODO planner returned invalid TODO markdown after one repair attempt: ${repairMessage}`,
       );
     }
   }
@@ -471,6 +531,7 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
     timeoutMs: runtime.todoTimeoutMs,
     gracefulShutdownMs: runtime.todoGracefulShutdownMs,
     sessionFactory: runtime.todoSessionFactory,
+    onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
   });
 }
 
@@ -499,17 +560,48 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
       timeoutMs,
       gracefulShutdownMs,
       diagnostics: result.diagnostics,
+      onDiagnostic: options.onDiagnostic,
     });
 
-    plannerMarkdown = await extractTodoMarkdownWithOneRepair(options.inputText, plannerText, (repairPrompt) =>
-      runTodoPlannerPrompt({
-        session,
-        prompt: repairPrompt,
-        abortSignal: options.abortSignal,
-        timeoutMs,
-        gracefulShutdownMs,
-        diagnostics: result.diagnostics,
-      }),
+    plannerMarkdown = await extractTodoMarkdownWithOneRepair(
+      options.inputText,
+      plannerText,
+      (repairPrompt) =>
+        runTodoPlannerPrompt({
+          session,
+          prompt: repairPrompt,
+          abortSignal: options.abortSignal,
+          timeoutMs,
+          gracefulShutdownMs,
+          diagnostics: result.diagnostics,
+          onDiagnostic: options.onDiagnostic,
+        }),
+      {
+        onInvalidOutput: (validationError) =>
+          options.onDiagnostic?.({
+            kind: "invalid_output",
+            message: `TODO planner returned invalid output: ${validationError}`,
+            diagnostics: result.diagnostics,
+            sessionFile: session.sessionFile,
+            sessionId: session.sessionId,
+          }),
+        onRepairAttempt: (validationError) =>
+          options.onDiagnostic?.({
+            kind: "repair_attempt",
+            message: `Asking TODO planner to repair invalid output: ${validationError}`,
+            diagnostics: result.diagnostics,
+            sessionFile: session.sessionFile,
+            sessionId: session.sessionId,
+          }),
+        onFailure: (validationError) =>
+          options.onDiagnostic?.({
+            kind: "failure",
+            message: `TODO planner repair failed: ${validationError}`,
+            diagnostics: result.diagnostics,
+            sessionFile: session.sessionFile,
+            sessionId: session.sessionId,
+          }),
+      },
     );
   } catch (error) {
     plannerError = error;
@@ -537,6 +629,7 @@ async function runTodoPlannerPrompt(options: {
   timeoutMs: number;
   gracefulShutdownMs: number;
   diagnostics?: string[];
+  onDiagnostic?: PlannerDiagnosticHandler;
 }): Promise<string> {
   const promptResult = await runGuardedSessionPrompt({
     session: options.session,
@@ -550,18 +643,44 @@ async function runTodoPlannerPrompt(options: {
   });
 
   if (promptResult.timedOut) {
-    throw new TodoGenerationError(`TODO planner timed out: ${promptResult.error ?? "time budget exceeded"}`);
+    const message = `TODO planner timed out: ${promptResult.error ?? "time budget exceeded"}`;
+    options.onDiagnostic?.(plannerPromptDiagnostic("timeout", message, promptResult));
+    throw new TodoGenerationError(message);
   }
   if (promptResult.aborted) {
-    throw new TodoGenerationError(`TODO planner aborted: ${promptResult.error ?? "outer abort signal"}`);
+    const message = `TODO planner aborted: ${promptResult.error ?? "outer abort signal"}`;
+    options.onDiagnostic?.(plannerPromptDiagnostic("abort", message, promptResult));
+    throw new TodoGenerationError(message);
   }
   if (promptResult.error) {
-    throw new TodoGenerationError(`TODO planner failed: ${promptResult.error}`);
+    const message = `TODO planner failed: ${promptResult.error}`;
+    options.onDiagnostic?.(plannerPromptDiagnostic("failure", message, promptResult));
+    throw new TodoGenerationError(message);
   }
   if (!promptResult.assistantText) {
-    throw new TodoGenerationError("TODO planner did not return assistant text.");
+    const message = "TODO planner did not return assistant text.";
+    options.onDiagnostic?.(plannerPromptDiagnostic("failure", message, promptResult));
+    throw new TodoGenerationError(message);
   }
   return promptResult.assistantText;
+}
+
+function plannerPromptDiagnostic(
+  kind: Extract<PlannerDiagnosticKind, "timeout" | "abort" | "failure">,
+  message: string,
+  promptResult: {
+    diagnostics: string[];
+    sessionFile?: string;
+    sessionId?: string;
+  },
+): PlannerDiagnostic {
+  return {
+    kind,
+    message,
+    diagnostics: promptResult.diagnostics,
+    sessionFile: promptResult.sessionFile,
+    sessionId: promptResult.sessionId,
+  };
 }
 
 function buildTodoPlanningShutdownMessage(): string {
@@ -609,6 +728,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     now: options.now ?? (() => new Date()),
     onProgress: options.onProgress,
     workerCostState: createWorkerCostState(),
+    plannerDiagnostics: [],
   };
 }
 
@@ -624,6 +744,31 @@ function emitProgress(
     resultPath: runtime.taskResultPath,
     workerCostTotal: runtime.workerCostState.total,
     ...update,
+  });
+}
+
+function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDiagnostic): void {
+  const normalized: PlannerDiagnostic = {
+    kind: diagnostic.kind,
+    message: diagnostic.message,
+    diagnostics: diagnostic.diagnostics?.filter(Boolean),
+    sessionFile: diagnostic.sessionFile,
+    sessionId: diagnostic.sessionId,
+  };
+  const last = runtime.plannerDiagnostics.at(-1);
+  if (last?.kind === normalized.kind && last.message === normalized.message) {
+    return;
+  }
+  runtime.plannerDiagnostics.push(normalized);
+  emitProgress(runtime, normalized.message, {
+    phase: "planning",
+    status: normalized.kind,
+    isError: normalized.kind !== "repair_attempt",
+    plannerDiagnostic: normalized.kind,
+    plannerDiagnostics: normalized.diagnostics,
+    plannerSessionFile: normalized.sessionFile,
+    plannerSessionId: normalized.sessionId,
+    taskProgress: buildTaskProgressModel({ tasks: [] }),
   });
 }
 
@@ -879,6 +1024,30 @@ function outcomeProgressItemStatus(
 
 function initialTaskResultMarkdown(runId: string): string {
   return `# Pi Long Task TASK_RESULT\n\nRun: ${runId}\n`;
+}
+
+async function appendFailureNote(
+  pathname: string,
+  message: string,
+  plannerDiagnostics: readonly PlannerDiagnostic[],
+): Promise<void> {
+  const lines = ["", "## Pi Long Task failure", "", message];
+  if (plannerDiagnostics.length > 0) {
+    lines.push("", "### Planner diagnostics");
+    for (const diagnostic of plannerDiagnostics) {
+      lines.push("", `- ${diagnostic.kind}: ${diagnostic.message}`);
+      if (diagnostic.sessionId) {
+        lines.push(`  - Session ID: ${diagnostic.sessionId}`);
+      }
+      if (diagnostic.sessionFile) {
+        lines.push(`  - Session file: ${diagnostic.sessionFile}`);
+      }
+      for (const item of diagnostic.diagnostics ?? []) {
+        lines.push(`  - Diagnostic: ${item}`);
+      }
+    }
+  }
+  await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
 }
 
 async function appendCommitNote(pathname: string, result: CommitAfterSessionResult): Promise<void> {

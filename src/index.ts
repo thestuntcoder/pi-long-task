@@ -72,6 +72,7 @@ function toolDetails(result: CoordinatorResult) {
     taskProgress: result.taskProgress,
     workerCostTotal: result.workerCostTotal,
     summary: result.summary,
+    error: result.error,
   };
 }
 

@@ -224,6 +224,7 @@ try {
 
   let invalidTwiceWorkerStarted = false;
   let invalidTwicePlannerCalls = 0;
+  const invalidTwiceProgressUpdates: CoordinatorProgressUpdate[] = [];
   const invalidTwiceRun = await runCoordinator({
     inputText: "Plan a task but keep returning invalid planner output.",
     commit: false,
@@ -237,6 +238,7 @@ try {
       invalidTwiceWorkerStarted = true;
       return outcomeFor(options, "done");
     },
+    onProgress: (update) => invalidTwiceProgressUpdates.push(update),
   });
   assert.equal(invalidTwiceRun.status, "failed");
   assert.equal(invalidTwiceRun.attemptedTasks, 0);
@@ -244,6 +246,84 @@ try {
   assert.equal(invalidTwicePlannerCalls, 2);
   assert.equal(invalidTwiceWorkerStarted, false);
   assert.match(invalidTwiceRun.error ?? "", /after one repair attempt/);
+  assert.ok(invalidTwiceRun.error?.includes(invalidTwiceRun.taskResultPath));
+  assert.deepEqual(
+    invalidTwiceProgressUpdates.filter((update) => update.plannerDiagnostic).map((update) => update.plannerDiagnostic),
+    ["invalid_output", "repair_attempt", "failure", "failure"],
+  );
+  assert.equal(
+    invalidTwiceProgressUpdates.some((update) => update.phase === "task_start"),
+    false,
+  );
+  const invalidTwiceResult = await readFile(invalidTwiceRun.taskResultPath, "utf8");
+  assert.match(invalidTwiceResult, /### Planner diagnostics/);
+  assert.match(invalidTwiceResult, /invalid_output: TODO planner returned invalid output/);
+  assert.match(invalidTwiceResult, /repair_attempt: Asking TODO planner to repair invalid output/);
+  assert.match(invalidTwiceResult, /failure: TODO planner repair failed/);
+
+  let timeoutCoordinatorWorkerStarted = false;
+  let timeoutCoordinatorAbortCalls = 0;
+  let timeoutCoordinatorDisposed = false;
+  let resolveCoordinatorTimeoutPromptStarted: (() => void) | undefined;
+  const coordinatorTimeoutPromptStarted = new Promise<void>((resolve) => {
+    resolveCoordinatorTimeoutPromptStarted = resolve;
+  });
+  const timeoutCoordinatorProgressUpdates: CoordinatorProgressUpdate[] = [];
+  const timeoutCoordinatorPromise = runCoordinator({
+    inputText: "Plan a task that times out before workers start.",
+    commit: false,
+    cwd: tempRoot,
+    runId: "planner-timeout-coordinator",
+    todoTimeoutMs: 10,
+    todoGracefulShutdownMs: 0,
+    todoSessionFactory: async () => ({
+      session: {
+        sessionId: "planner-timeout-session",
+        sessionFile: "planner-timeout.session.json",
+        async prompt() {
+          resolveCoordinatorTimeoutPromptStarted?.();
+          await new Promise<void>(() => {});
+        },
+        subscribe: () => () => {},
+        abort: () => {
+          timeoutCoordinatorAbortCalls += 1;
+        },
+        dispose: () => {
+          timeoutCoordinatorDisposed = true;
+        },
+      },
+    }),
+    workerRunner: async (options) => {
+      timeoutCoordinatorWorkerStarted = true;
+      return outcomeFor(options, "done");
+    },
+    onProgress: (update) => timeoutCoordinatorProgressUpdates.push(update),
+  });
+  await coordinatorTimeoutPromptStarted;
+  const timeoutCoordinatorRun = await timeoutCoordinatorPromise;
+  assert.equal(timeoutCoordinatorRun.status, "failed");
+  assert.equal(timeoutCoordinatorRun.attemptedTasks, 0);
+  assert.equal(timeoutCoordinatorRun.outcomes.length, 0);
+  assert.equal(timeoutCoordinatorWorkerStarted, false);
+  assert.equal(timeoutCoordinatorAbortCalls, 1);
+  assert.equal(timeoutCoordinatorDisposed, true);
+  assert.match(timeoutCoordinatorRun.error ?? "", /TODO planner timed out/);
+  assert.ok(timeoutCoordinatorRun.error?.includes(timeoutCoordinatorRun.taskResultPath));
+  assert.deepEqual(
+    timeoutCoordinatorProgressUpdates
+      .filter((update) => update.plannerDiagnostic)
+      .map((update) => update.plannerDiagnostic),
+    ["timeout", "failure"],
+  );
+  assert.equal(
+    timeoutCoordinatorProgressUpdates.some((update) => update.phase === "task_start"),
+    false,
+  );
+  const timeoutCoordinatorResult = await readFile(timeoutCoordinatorRun.taskResultPath, "utf8");
+  assert.match(timeoutCoordinatorResult, /### Planner diagnostics/);
+  assert.match(timeoutCoordinatorResult, /timeout: TODO planner timed out/);
+  assert.match(timeoutCoordinatorResult, /Session ID: planner-timeout-session/);
+  assert.match(timeoutCoordinatorResult, /Session file: planner-timeout\.session\.json/);
 
   const retryCalls: Array<{ taskId: string; attempt: number; previousAttempts?: string }> = [];
   const retryWorker: WorkerRunner = async (options) => {
