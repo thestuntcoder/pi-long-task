@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import { runCoordinator, type CoordinatorProgressUpdate, type CoordinatorResult } from "./coordinator.ts";
 import { longTaskInputTransform } from "./input_router.ts";
@@ -76,6 +76,9 @@ function toolDetails(result: CoordinatorResult) {
 }
 
 const LONG_TASK_WIDGET_KEY = "pi-long-task-sidebar";
+const SIDEBAR_WIDGET_RESERVED_INPUT_ROWS = 8;
+const SIDEBAR_WIDGET_MIN_ROWS = 4;
+const SIDEBAR_WIDGET_MAX_ROWS = 24;
 
 type UiContext = ExtensionContext;
 
@@ -86,10 +89,12 @@ export interface LongTaskSidebarController {
 
 class PiLongTaskSidebarComponent implements Component {
   private readonly theme: Theme;
+  private readonly maxRows: (() => number | undefined) | undefined;
   private update: CoordinatorProgressUpdate | undefined;
 
-  constructor(theme: Theme) {
+  constructor(theme: Theme, maxRows?: () => number | undefined) {
     this.theme = theme;
+    this.maxRows = maxRows;
   }
 
   setUpdate(update: CoordinatorProgressUpdate): void {
@@ -98,7 +103,8 @@ class PiLongTaskSidebarComponent implements Component {
   }
 
   render(width: number): string[] {
-    return renderSidebarOverlayLines(this.update, this.theme, width);
+    const lines = renderSidebarOverlayLines(this.update, this.theme, width);
+    return limitSidebarPanelLines(lines, this.theme, width, this.maxRows?.());
   }
 
   invalidate(): void {
@@ -112,48 +118,25 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
   }
 
   let latestUpdate: CoordinatorProgressUpdate | undefined;
-  let overlayComponent: PiLongTaskSidebarComponent | undefined;
-  let overlayTui: TUI | undefined;
-  let overlayDone: ((result: undefined) => void) | undefined;
-  let overlayHandle: OverlayHandle | undefined;
+  let sidebarComponent: PiLongTaskSidebarComponent | undefined;
+  let sidebarTui: TUI | undefined;
   let closed = false;
 
-  ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, ["Pi Long Task: preparing sidebar..."], { placement: "aboveEditor" });
-
-  if (supportsTuiOverlay(ctx)) {
-    const overlayPromise = ctx.ui.custom<undefined>(
-      (tui, theme, _keybindings, done) => {
-        overlayTui = tui;
-        overlayDone = done;
-        overlayComponent = new PiLongTaskSidebarComponent(theme);
+  if (supportsTuiWidget(ctx)) {
+    ctx.ui.setWidget(
+      LONG_TASK_WIDGET_KEY,
+      (tui, theme) => {
+        sidebarTui = tui;
+        sidebarComponent = new PiLongTaskSidebarComponent(theme, () => sidebarWidgetLineLimit(tui));
         if (latestUpdate) {
-          overlayComponent.setUpdate(latestUpdate);
+          sidebarComponent.setUpdate(latestUpdate);
         }
-        if (closed) {
-          done(undefined);
-        }
-        return overlayComponent;
+        return sidebarComponent;
       },
-      {
-        overlay: true,
-        overlayOptions: {
-          anchor: "right-center",
-          width: "34%",
-          minWidth: 36,
-          maxHeight: "100%",
-          margin: 0,
-          nonCapturing: true,
-          visible: (termWidth, termHeight) => termWidth >= 96 && termHeight >= 16,
-        },
-        onHandle: (handle) => {
-          overlayHandle = handle;
-          handle.unfocus();
-        },
-      },
+      { placement: "aboveEditor" },
     );
-    void overlayPromise.catch(() => {
-      // The widget fallback remains active if overlay registration is unavailable.
-    });
+  } else {
+    ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, ["Pi Long Task: preparing sidebar..."], { placement: "aboveEditor" });
   }
 
   return {
@@ -162,9 +145,11 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
         return;
       }
       latestUpdate = update;
-      overlayComponent?.setUpdate(update);
-      overlayTui?.requestRender();
-      ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, renderSidebarWidgetLines(update), { placement: "aboveEditor" });
+      sidebarComponent?.setUpdate(update);
+      sidebarTui?.requestRender();
+      if (!sidebarComponent) {
+        ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, renderSidebarWidgetLines(update), { placement: "aboveEditor" });
+      }
     },
     close(): void {
       if (closed) {
@@ -172,22 +157,22 @@ export function createLongTaskSidebarController(ctx: UiContext | undefined): Lon
       }
       closed = true;
       ctx.ui.setWidget(LONG_TASK_WIDGET_KEY, undefined);
-      if (overlayDone) {
-        overlayDone(undefined);
-      } else {
-        overlayHandle?.hide();
-      }
-      overlayComponent = undefined;
-      overlayTui = undefined;
-      overlayDone = undefined;
-      overlayHandle = undefined;
+      sidebarComponent = undefined;
+      sidebarTui = undefined;
     },
   };
 }
 
-function supportsTuiOverlay(ctx: UiContext): boolean {
+function supportsTuiWidget(ctx: UiContext): boolean {
   const mode = (ctx as UiContext & { mode?: string }).mode;
   return mode === "tui" || mode === undefined;
+}
+
+function sidebarWidgetLineLimit(tui: TUI): number {
+  const terminalRows = tui.terminal.rows;
+  const rows = Number.isFinite(terminalRows) ? Math.max(0, Math.floor(terminalRows)) : 24;
+  const availableRows = rows - SIDEBAR_WIDGET_RESERVED_INPUT_ROWS;
+  return Math.max(SIDEBAR_WIDGET_MIN_ROWS, Math.min(SIDEBAR_WIDGET_MAX_ROWS, availableRows));
 }
 
 function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
@@ -227,6 +212,30 @@ function renderSidebarOverlayLines(
   const contentWidth = Math.max(8, safeWidth - 4);
   const rows = renderSidebarRows(update, theme, contentWidth);
   return rows.map((row) => sidebarPanelRow(row, contentWidth, theme));
+}
+
+function limitSidebarPanelLines(lines: string[], theme: Theme, width: number, maxRows: number | undefined): string[] {
+  if (maxRows === undefined || !Number.isFinite(maxRows)) {
+    return lines;
+  }
+
+  const limit = Math.max(0, Math.floor(maxRows));
+  if (lines.length <= limit) {
+    return lines;
+  }
+  if (limit === 0) {
+    return [];
+  }
+
+  const contentWidth = Math.max(8, Math.max(28, width) - 4);
+  if (limit === 1) {
+    return [sidebarPanelRow(theme.fg("dim", "…"), contentWidth, theme)];
+  }
+
+  const visibleLines = lines.slice(0, limit - 1);
+  const omitted = lines.length - visibleLines.length;
+  visibleLines.push(sidebarPanelRow(theme.fg("dim", `… ${omitted} more`), contentWidth, theme));
+  return visibleLines;
 }
 
 function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme: Theme, width: number): string[] {
