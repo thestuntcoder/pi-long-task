@@ -88,7 +88,22 @@ const widgetCalls: Array<{ key: string; content: WidgetContent; placement?: stri
 let widgetComponent: Component | undefined;
 let widgetFactoryCalls = 0;
 let renderRequests = 0;
-const customCalls: Array<{ overlay?: boolean; anchor?: string; nonCapturing?: boolean }> = [];
+let overlayRenderRequests = 0;
+let overlayHideCalls = 0;
+let overlayUnfocusCalls = 0;
+let overlayComponent: Component | undefined;
+const customCalls: Array<{
+  overlay?: boolean;
+  anchor?: string;
+  width?: string;
+  minWidth?: number;
+  maxHeight?: string;
+  margin?: number;
+  nonCapturing?: boolean;
+  visibleAtWide?: boolean;
+  visibleAtNarrowWidth?: boolean;
+  visibleAtShortHeight?: boolean;
+}> = [];
 const sidebarTheme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
@@ -97,6 +112,12 @@ const sidebarTui = {
   terminal: { rows: 40 },
   requestRender: () => {
     renderRequests += 1;
+  },
+} as unknown as TUI;
+const overlayTui = {
+  terminal: { rows: 40 },
+  requestRender: () => {
+    overlayRenderRequests += 1;
   },
 } as unknown as TUI;
 const sidebar = createLongTaskSidebarController({
@@ -116,23 +137,43 @@ const sidebar = createLongTaskSidebarController({
       factory: (tui: TUI, theme: Theme, keybindings: unknown, done: (result: T) => void) => Component,
       options?: {
         overlay?: boolean;
-        overlayOptions?: { anchor?: string; nonCapturing?: boolean };
+        overlayOptions?: {
+          anchor?: string;
+          width?: string;
+          minWidth?: number;
+          maxHeight?: string;
+          margin?: number;
+          nonCapturing?: boolean;
+          visible?: (termWidth: number, termHeight: number) => boolean;
+        };
         onHandle?: (handle: OverlayHandle) => void;
       },
     ): Promise<T> {
+      const visible = options?.overlayOptions?.visible;
       customCalls.push({
         overlay: options?.overlay,
         anchor: options?.overlayOptions?.anchor,
+        width: options?.overlayOptions?.width,
+        minWidth: options?.overlayOptions?.minWidth,
+        maxHeight: options?.overlayOptions?.maxHeight,
+        margin: options?.overlayOptions?.margin,
         nonCapturing: options?.overlayOptions?.nonCapturing,
+        visibleAtWide: visible?.(120, 32),
+        visibleAtNarrowWidth: visible?.(95, 32),
+        visibleAtShortHeight: visible?.(120, 15),
       });
       return new Promise<T>((resolve) => {
-        factory(sidebarTui, sidebarTheme, {}, resolve);
+        overlayComponent = factory(overlayTui, sidebarTheme, {}, resolve);
         options?.onHandle?.({
-          hide() {},
+          hide() {
+            overlayHideCalls += 1;
+          },
           setHidden() {},
           isHidden: () => false,
           focus() {},
-          unfocus() {},
+          unfocus() {
+            overlayUnfocusCalls += 1;
+          },
           isFocused: () => false,
         });
       });
@@ -143,9 +184,21 @@ const sidebar = createLongTaskSidebarController({
 assert.ok(sidebar);
 assert.deepEqual(
   customCalls[0],
-  { overlay: true, anchor: "right-center", nonCapturing: true },
-  "TUI mode should register a non-capturing right-side overlay sidebar",
+  {
+    overlay: true,
+    anchor: "right-center",
+    width: "34%",
+    minWidth: 32,
+    maxHeight: "85%",
+    margin: 1,
+    nonCapturing: true,
+    visibleAtWide: true,
+    visibleAtNarrowWidth: false,
+    visibleAtShortHeight: false,
+  },
+  "TUI mode should register a responsive non-capturing right-side overlay sidebar",
 );
+assert.equal(overlayUnfocusCalls, 1, "sidebar overlay should not steal focus from the active session");
 assert.equal(widgetCalls[0]?.key, "pi-long-task-sidebar");
 assert.equal(typeof widgetCalls[0]?.content, "function");
 assert.equal(widgetCalls[0]?.placement, "aboveEditor");
@@ -223,7 +276,12 @@ assert.match(runningWidget, /▢ TODO 2 .* active/);
 assert.match(runningWidget, /› ▢ TODO 2/);
 assert.match(runningWidget, /Wire Sidebar Rendering/);
 assert.match(runningWidget, /… 2 more/);
+const runningOverlay = overlayComponent?.render(96).join("\n") ?? "";
+assert.match(runningOverlay, /TODO 2 — Wire Sidebar Rendering/);
+assert.match(runningOverlay, /Task timeline/);
+assert.match(runningOverlay, /› ▢ TODO 2/);
 assert.equal(renderRequests, 1);
+assert.equal(overlayRenderRequests, 1);
 assert.ok(runningWidgetLines.length > 6);
 assert.ok(runningWidgetLines.length <= 24, "sidebar should cap its height even on tall terminals");
 (sidebarTui as unknown as { terminal: { rows: number } }).terminal.rows = 14;
@@ -254,10 +312,12 @@ assert.match(doneWidget, /✓ done/);
 assert.match(doneWidget, /2\/3 tasks complete/);
 assert.match(doneWidget, /67% complete/);
 assert.equal(renderRequests, 2);
+assert.equal(overlayRenderRequests, 2);
 
 sidebar.close();
 assert.equal(widgetCalls.at(-1)?.content, undefined);
 assert.equal(widgetComponent, undefined);
+assert.equal(overlayHideCalls, 1);
 
 assert.equal(createLongTaskSidebarController(undefined), undefined);
 assert.equal(createLongTaskSidebarController({ hasUI: false } as never), undefined);
