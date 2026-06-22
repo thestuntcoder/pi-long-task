@@ -179,18 +179,25 @@ try {
   assert.match(costRun.message, /Worker spend: \$0\.38/);
 
   let plannerCalled = false;
+  let plannerTimeoutMs: number | undefined;
+  let plannerAbortSignal: AbortSignal | undefined;
   const planned = await runCoordinator({
     inputText: "Build a feature from an unstructured paragraph.",
     commit: false,
     cwd: tempRoot,
     runId: "planner",
-    todoPlanner: async () => {
+    todoTimeoutMs: 12_345,
+    todoPlanner: async (options) => {
       plannerCalled = true;
+      plannerTimeoutMs = options.timeoutMs;
+      plannerAbortSignal = options.abortSignal;
       return generatedTodoMarkdown(["Planned task"]);
     },
     workerRunner: sequentialWorker,
   });
   assert.equal(plannerCalled, true);
+  assert.equal(plannerTimeoutMs, 12_345);
+  assert.equal(plannerAbortSignal, undefined);
   assert.equal(planned.status, "done");
   assert.equal(planned.completedTasks, 1);
 
@@ -309,6 +316,98 @@ try {
     tools: [],
   });
   assert.equal(plannerDisposed, true);
+
+  let timeoutPlannerDisposed = false;
+  let timeoutPlannerAbortCalls = 0;
+  let resolveTimeoutPromptStarted: (() => void) | undefined;
+  const timeoutPromptStarted = new Promise<void>((resolve) => {
+    resolveTimeoutPromptStarted = resolve;
+  });
+  const timeoutPlannerPromise = runTodoPlanner({
+    inputText: "Plan a task that hangs.",
+    cwd: tempRoot,
+    runDir: path.join(tempRoot, "planner-timeout"),
+    thinkingLevel: "xhigh",
+    timeoutMs: 10,
+    gracefulShutdownMs: 0,
+    sessionFactory: async () => ({
+      session: {
+        async prompt() {
+          resolveTimeoutPromptStarted?.();
+          await new Promise<void>(() => {});
+        },
+        subscribe: () => () => {},
+        abort: () => {
+          timeoutPlannerAbortCalls += 1;
+        },
+        dispose: () => {
+          timeoutPlannerDisposed = true;
+        },
+      },
+    }),
+  });
+  await timeoutPromptStarted;
+  await assert.rejects(timeoutPlannerPromise, /TODO planner timed out: session prompt exceeded 0\.010s timeout/);
+  assert.equal(timeoutPlannerAbortCalls, 1);
+  assert.equal(timeoutPlannerDisposed, true);
+
+  const plannerAbortController = new AbortController();
+  let abortedPlannerDisposed = false;
+  let abortedPlannerAbortCalls = 0;
+  let resolveAbortPromptStarted: (() => void) | undefined;
+  const abortPromptStarted = new Promise<void>((resolve) => {
+    resolveAbortPromptStarted = resolve;
+  });
+  const abortedPlannerPromise = runTodoPlanner({
+    inputText: "Plan a task that will be aborted.",
+    cwd: tempRoot,
+    runDir: path.join(tempRoot, "planner-abort"),
+    thinkingLevel: "xhigh",
+    abortSignal: plannerAbortController.signal,
+    timeoutMs: 1_000,
+    sessionFactory: async () => ({
+      session: {
+        async prompt() {
+          resolveAbortPromptStarted?.();
+          await new Promise<void>(() => {});
+        },
+        subscribe: () => () => {},
+        abort: () => {
+          abortedPlannerAbortCalls += 1;
+        },
+        dispose: () => {
+          abortedPlannerDisposed = true;
+        },
+      },
+    }),
+  });
+  await abortPromptStarted;
+  plannerAbortController.abort(new Error("stop planning"));
+  await assert.rejects(abortedPlannerPromise, /TODO planner aborted: stop planning/);
+  assert.equal(abortedPlannerAbortCalls, 1);
+  assert.equal(abortedPlannerDisposed, true);
+
+  let noTextPlannerDisposed = false;
+  await assert.rejects(
+    runTodoPlanner({
+      inputText: "Plan a task with no answer.",
+      cwd: tempRoot,
+      runDir: path.join(tempRoot, "planner-no-text"),
+      thinkingLevel: "xhigh",
+      timeoutMs: 100,
+      sessionFactory: async () => ({
+        session: {
+          async prompt() {},
+          subscribe: () => () => {},
+          dispose: () => {
+            noTextPlannerDisposed = true;
+          },
+        },
+      }),
+    }),
+    /TODO planner did not return assistant text\./,
+  );
+  assert.equal(noTextPlannerDisposed, true);
 
   const configuredCalls: Array<{
     attempt: number;

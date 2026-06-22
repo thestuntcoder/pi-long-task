@@ -11,23 +11,23 @@ import type {
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { extractResultSummary } from "./result_writer.ts";
+import { runGuardedSessionPrompt } from "./session_guard.ts";
 import { parseWorkerRuntimeConfig } from "./worker_config.ts";
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
   buildTodoCreationPrompt,
   extractTodoMarkdown,
+  TodoGenerationError,
   todoMarkdownFromString,
   validateTodoMarkdown,
 } from "./todo_generator.ts";
 import { markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
 import {
   createIsolatedWorkerSession,
-  lastAssistantTextFromMessages,
   runWorkerTask,
   type RunWorkerTaskOptions,
   type SessionOutcome,
   type WorkerSessionFactory,
-  type WorkerSessionLike,
 } from "./worker_session.ts";
 
 export type { CoordinatorStatus } from "./types.ts";
@@ -35,6 +35,8 @@ export type { CoordinatorStatus } from "./types.ts";
 export const DEFAULT_COORDINATOR_OPTIONS = {
   maxAttemptsPerTask: 3,
   taskTimeoutMs: 900_000,
+  todoTimeoutMs: 300_000,
+  todoGracefulShutdownMs: 15_000,
   maxBashTimeoutMs: 300_000,
   taskThinking: "high",
   todoThinking: "xhigh",
@@ -102,6 +104,8 @@ export interface RunCoordinatorOptions extends PiLongTaskInput {
   workerModelName?: string;
   maxAttemptsPerTask?: number;
   taskTimeoutMs?: number;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   maxBashTimeoutMs?: number;
   taskThinking?: string;
   todoThinking?: string;
@@ -116,6 +120,8 @@ export interface TodoPlannerOptions {
   thinkingLevel: string;
   model?: unknown;
   abortSignal?: AbortSignal;
+  timeoutMs?: number;
+  gracefulShutdownMs?: number;
   sessionFactory?: WorkerSessionFactory;
 }
 
@@ -175,6 +181,8 @@ interface RuntimeOptions {
   workerModelName?: string;
   taskThinking: string;
   todoThinking: string;
+  todoTimeoutMs: number;
+  todoGracefulShutdownMs: number;
   workerRunner: WorkerRunner;
   todoPlanner: TodoPlanner;
   abortSignal?: AbortSignal;
@@ -432,6 +440,8 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
     thinkingLevel: runtime.todoThinking,
     model: runtime.workerModel,
     abortSignal: runtime.abortSignal,
+    timeoutMs: runtime.todoTimeoutMs,
+    gracefulShutdownMs: runtime.todoGracefulShutdownMs,
     sessionFactory: runtime.todoSessionFactory,
   });
   return extractTodoMarkdown(plannerText);
@@ -440,32 +450,42 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
 // Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
 // keep this function's public contract stable while moving shared prompt guarding into a helper.
 export async function runTodoPlanner(options: TodoPlannerOptions): Promise<string> {
-  let session: WorkerSessionLike | undefined;
-  try {
-    const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
-    const result = await sessionFactory({
-      cwd: options.cwd,
-      tools: [],
-      model: options.model,
-      thinkingLevel: options.thinkingLevel,
-    });
-    session = result.session;
+  const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
+  const result = await sessionFactory({
+    cwd: options.cwd,
+    tools: [],
+    model: options.model,
+    thinkingLevel: options.thinkingLevel,
+  });
 
-    if (options.abortSignal?.aborted) {
-      throw new Error("TODO planner aborted before start");
-    }
+  const promptResult = await runGuardedSessionPrompt({
+    session: result.session,
+    prompt: buildTodoCreationPrompt(options.inputText),
+    abortSignal: options.abortSignal,
+    timeoutMs: positiveMilliseconds(options.timeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs),
+    gracefulShutdownMs: options.gracefulShutdownMs ?? DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
+    gracefulShutdownPrompt: buildTodoPlanningShutdownMessage(),
+    diagnostics: result.diagnostics,
+  });
 
-    await session.prompt(buildTodoCreationPrompt(options.inputText));
-    const direct = session.getLastAssistantText?.();
-    const fromMessages = lastAssistantTextFromMessages(session.messages);
-    const text = direct || fromMessages;
-    if (!text) {
-      throw new Error("TODO planner did not return assistant text.");
-    }
-    return text;
-  } finally {
-    session?.dispose?.();
+  if (promptResult.timedOut) {
+    throw new TodoGenerationError(`TODO planner timed out: ${promptResult.error ?? "time budget exceeded"}`);
   }
+  if (promptResult.aborted) {
+    throw new TodoGenerationError(`TODO planner aborted: ${promptResult.error ?? "outer abort signal"}`);
+  }
+  if (promptResult.error) {
+    throw new TodoGenerationError(`TODO planner failed: ${promptResult.error}`);
+  }
+  if (!promptResult.assistantText) {
+    throw new TodoGenerationError("TODO planner did not return assistant text.");
+  }
+  return promptResult.assistantText;
+}
+
+function buildTodoPlanningShutdownMessage(): string {
+  return `Pi Long Task notice: TODO planning has reached its time budget.
+Return the best valid Pi Long Task TODO markdown you can produce now, or stop if that is not possible.`;
 }
 
 function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
@@ -475,6 +495,8 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const parsedWorkerConfig = parseWorkerRuntimeConfig(options.inputText);
   const configuredAttempts = options.maxAttemptsPerTask ?? parsedWorkerConfig.maxAttemptsPerTask;
   const configuredTaskTimeoutMs = options.taskTimeoutMs ?? parsedWorkerConfig.taskTimeoutMs;
+  const configuredTodoTimeoutMs = options.todoTimeoutMs;
+  const configuredTodoGracefulShutdownMs = options.todoGracefulShutdownMs;
   const configuredMaxBashTimeoutMs = options.maxBashTimeoutMs ?? parsedWorkerConfig.maxBashTimeoutMs;
   const workerModelName = options.workerModelName ?? parsedWorkerConfig.modelName;
   const workerModel = workerModelName ? undefined : options.workerModel;
@@ -487,6 +509,11 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     taskResultPath: path.join(runDir, "TASK_RESULT.md"),
     maxAttemptsPerTask: positiveInteger(configuredAttempts, DEFAULT_COORDINATOR_OPTIONS.maxAttemptsPerTask),
     taskTimeoutSeconds: positiveMilliseconds(configuredTaskTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.taskTimeoutMs) / 1000,
+    todoTimeoutMs: positiveMilliseconds(configuredTodoTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs),
+    todoGracefulShutdownMs: positiveMilliseconds(
+      configuredTodoGracefulShutdownMs,
+      DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
+    ),
     maxBashTimeoutSeconds:
       positiveMilliseconds(configuredMaxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
     workerModel,
