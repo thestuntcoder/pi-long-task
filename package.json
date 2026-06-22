@@ -1,6 +1,6 @@
 {
   "name": "pi-long-task",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "type": "module",
   "description": "Pi extension for breaking down and running long coding tasks safely.",
   "keywords": [
