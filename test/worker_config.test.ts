@@ -18,7 +18,9 @@ Max bash timeout: 120s`),
 );
 
 assert.deepEqual(
-  parseWorkerRuntimeConfig("Use worker provider openai-codex and worker model gpt-5.5 with 2 attempts and a 1.5 hour timeout."),
+  parseWorkerRuntimeConfig(
+    "Use worker provider openai-codex and worker model gpt-5.5 with 2 attempts and a 1.5 hour timeout.",
+  ),
   {
     modelName: "openai-codex/gpt-5.5",
     maxAttemptsPerTask: 2,

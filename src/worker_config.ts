@@ -42,7 +42,10 @@ export function parseWorkerRuntimeConfig(text: string): ParsedWorkerRuntimeConfi
   };
 }
 
-function parseLineDirectives(text: string, state: ParsedWorkerRuntimeConfig & { provider?: string; model?: string }): void {
+function parseLineDirectives(
+  text: string,
+  state: ParsedWorkerRuntimeConfig & { provider?: string; model?: string },
+): void {
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/^\s{0,3}>+\s?/, "").trim();
     const match = line.match(
@@ -248,7 +251,9 @@ function positiveIntegerFromText(value: string): number | undefined {
 }
 
 function durationMsFromText(value: string, options: { allowBareSeconds: boolean }): number | undefined {
-  const match = /(\d+(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?\b/i.exec(value);
+  const match = /(\d+(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?\b/i.exec(
+    value,
+  );
   if (!match) {
     return undefined;
   }
