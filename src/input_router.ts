@@ -12,14 +12,28 @@ const COMMIT_FALSE_RE =
   /\b(?:without|no|disable|disabled|off)\s+commits?\b|\bcommits?\s*(?:false|off|disabled)\b|\bcommit\s*:\s*(?:false|off|no)\b|\b(?:do\s+not|don't|dont)\s+commit\b/i;
 const COMMIT_TRUE_RE =
   /\bwith\s+commits?\b|\bcommits?\s*(?:true|on|enabled)\b|\bcommit\s*:\s*(?:true|on|yes)\b|\bcommit(?:ting)?\s+as\s+(?:you|we)\s+go\b|\b(?:make|create|include|allow|enable)\s+commits?\b/i;
+const GOAL_RE = /\b(?:with\s+(?:the\s+)?goal|goal)\s*(?::|=|\b(?:to|of|for|that)\b)\s*([\s\S]+)$/i;
+const TRAILING_COMMIT_MODIFIER_RE =
+  /(?:\s+(?:with|without|no|enable|enabled|disable|disabled)\s+commits?|\s+commits?\s*(?:true|false|on|off|enabled|disabled)|\s+commit\s*:\s*(?:true|false|on|off|yes|no))\s*$/i;
+
+export interface ParsedLongTaskRequestOptions {
+  commit: boolean;
+  goal?: string;
+}
 
 export function longTaskInputTransform(text: string): string | undefined {
   if (!isNaturalLanguageLongTaskRequest(text)) {
     return undefined;
   }
 
-  const commit = inferCommitSetting(text) ?? false;
-  return buildLongTaskToolPrompt(text, commit);
+  return buildLongTaskToolPrompt(text, parseLongTaskRequestOptions(text));
+}
+
+export function parseLongTaskRequestOptions(text: string): ParsedLongTaskRequestOptions {
+  return {
+    commit: inferCommitSetting(text) ?? false,
+    goal: inferGoalSetting(text),
+  };
 }
 
 export function isNaturalLanguageLongTaskRequest(text: string): boolean {
@@ -43,11 +57,31 @@ export function inferCommitSetting(text: string): boolean | undefined {
   return undefined;
 }
 
-function buildLongTaskToolPrompt(originalText: string, commit: boolean): string {
+export function inferGoalSetting(text: string): string | undefined {
+  const match = GOAL_RE.exec(text);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  return normalizeGoalText(match[1]);
+}
+
+function normalizeGoalText(text: string): string | undefined {
+  let goal = text.trim();
+  while (TRAILING_COMMIT_MODIFIER_RE.test(goal)) {
+    goal = goal.replace(TRAILING_COMMIT_MODIFIER_RE, "").trim();
+  }
+  goal = goal.replace(/^["'“”‘’]+|["'“”‘’.,;:!?]+$/g, "").trim();
+  return goal || undefined;
+}
+
+function buildLongTaskToolPrompt(originalText: string, options: ParsedLongTaskRequestOptions): string {
+  const goalLine = options.goal ? [`Set goal to ${JSON.stringify(options.goal)}.`] : [];
   return [
     "Use the pi_long_task tool for this request.",
-    `Set commit to ${commit ? "true" : "false"}.`,
-    "Set inputText to the user's original request below. Do not perform the work directly outside pi_long_task.",
+    `Set commit to ${options.commit ? "true" : "false"}.`,
+    ...goalLine,
+    "Do not rely on inputText for parsed options; commit and goal are parsed separately. If the tool schema still requires inputText, set it to the user's original request below.",
+    "Do not perform the work directly outside pi_long_task.",
     "",
     "Original request:",
     "```text",
