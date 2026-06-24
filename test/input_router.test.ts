@@ -36,6 +36,15 @@ assert.match(coverageTransform, /Set commit to true\./);
 assert.match(coverageTransform, /Set goal to "have testing line coverage above 80%"\./);
 assert.match(coverageTransform, /Do not rely on inputText for parsed options/);
 
+assert.deepEqual(parseLongTaskRequestOptions("run a long task to get line coverage at least 91.5%"), {
+  commit: false,
+  goal: "get line coverage at least 91.5%",
+});
+assert.deepEqual(parseLongTaskRequestOptions("run long task commit:on goal: line coverage over 77%"), {
+  commit: true,
+  goal: "line coverage over 77%",
+});
+
 assert.equal(isNaturalLanguageLongTaskRequest("How do I run a long task with commits?"), false);
 assert.equal(isNaturalLanguageLongTaskRequest("Do not run a long task with commits yet."), false);
 assert.equal(isNaturalLanguageLongTaskRequest("Use pi_long_task with inputText x and commit true."), false);

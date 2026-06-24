@@ -41,8 +41,9 @@ Tool input:
 
 ```ts
 {
-  inputText: string;
   commit: boolean;
+  inputText?: string;
+  goal?: string;
 }
 ```
 

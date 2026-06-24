@@ -82,7 +82,7 @@ function buildLongTaskToolPrompt(originalText: string, options: ParsedLongTaskRe
     "Use the pi_long_task tool for this request.",
     `Set commit to ${options.commit ? "true" : "false"}.`,
     ...goalLine,
-    "Do not rely on inputText for parsed options; commit and goal are parsed separately. If the tool schema still requires inputText, set it to the user's original request below.",
+    "Do not rely on inputText for parsed options; commit and goal are parsed separately. Use the original request as inputText only when the tool call includes inputText.",
     "Do not perform the work directly outside pi_long_task.",
     "",
     "Original request:",
