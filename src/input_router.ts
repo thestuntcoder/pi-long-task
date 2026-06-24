@@ -1,3 +1,5 @@
+import { inferCoverageGoalText } from "./coverage_goal.ts";
+
 const LONG_TASK_RE = /\b(?:long[-\s]?task|longtask|large[-\s]?task|big[-\s]?task|multi[-\s]?step(?:\s+task)?)\b/i;
 const DIRECT_LONG_TASK_REQUEST_RE =
   /\b(?:run|start|do|handle|execute|launch|kick\s+off|use)\s+(?:a\s+|the\s+)?(?:long[-\s]?task|longtask|large[-\s]?task|big[-\s]?task|multi[-\s]?step(?:\s+task)?)\b/i;
@@ -60,7 +62,7 @@ export function inferCommitSetting(text: string): boolean | undefined {
 export function inferGoalSetting(text: string): string | undefined {
   const match = GOAL_RE.exec(text);
   if (!match?.[1]) {
-    return undefined;
+    return inferCoverageGoalText(text);
   }
   return normalizeGoalText(match[1]);
 }
