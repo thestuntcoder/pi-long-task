@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { CoordinatorProgressUpdate } from "./coordinator.ts";
+import type { GoalLoopLimits, GoalLoopStatus } from "./goal_loop.ts";
 import {
   createGoalLoopState,
   goalLoopStopReason,
@@ -22,6 +23,42 @@ import {
   type GoalTodoGenerationResult,
 } from "./goal_todo_generation.ts";
 
+export type GoalLoopProgressPhase =
+  | "goal_start"
+  | "todo_generation_start"
+  | "todo_generated"
+  | "todo_execution_start"
+  | "todo_executed"
+  | "review_start"
+  | "reviewed"
+  | "complete";
+
+export interface GoalLoopProgressUpdate {
+  message: string;
+  phase: GoalLoopProgressPhase;
+  goalRunId: string;
+  goalRunDir: string;
+  goal: string;
+  status: GoalLoopStatus;
+  currentIteration: number;
+  totalIterations: number;
+  maxIterations: number;
+  limits: GoalLoopLimits;
+  resultPath: string;
+  statePath: string;
+  tracePath: string;
+  iteration?: number;
+  reviewerDecision?: string;
+  remainingWork?: string[];
+  workerStatus?: string;
+  workerCostTotal: number;
+  reviewerCostTotal: number;
+  totalCost: number;
+  childProgress?: CoordinatorProgressUpdate;
+}
+
+export type GoalLoopProgressHandler = (update: GoalLoopProgressUpdate) => void;
+
 export interface RunGoalLoopOptions extends GoalLoopLimitInput {
   goal?: string;
   initialState?: GoalLoopState;
@@ -41,6 +78,7 @@ export interface RunGoalLoopOptions extends GoalLoopLimitInput {
   commit?: boolean;
   now?: () => Date;
   onWorkerProgress?: (update: CoordinatorProgressUpdate) => void;
+  onProgress?: GoalLoopProgressHandler;
 }
 
 export interface GoalLoopRunResult {
@@ -86,6 +124,29 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
   await store.saveState(state);
   await store.initializeResult(state);
   await store.appendNewTraceEvents(0, state);
+  const publish = (phase: GoalLoopProgressPhase, message: string, extra: Partial<GoalLoopProgressUpdate> = {}) => {
+    options.onProgress?.({
+      message,
+      phase,
+      goalRunId: state.goalRunId,
+      goalRunDir: state.goalRunDir,
+      goal: state.goal,
+      status: state.status,
+      currentIteration: state.currentIteration,
+      totalIterations: state.iterations.length,
+      maxIterations: state.limits.maxIterations,
+      limits: state.limits,
+      resultPath: store.paths.resultPath,
+      statePath: store.paths.statePath,
+      tracePath: store.paths.tracePath,
+      workerCostTotal: accumulatedWorkerCost(executionResults, generationResults),
+      reviewerCostTotal: accumulatedReviewerCost(reviewResults),
+      totalCost: accumulatedWorkerCost(executionResults, generationResults) + accumulatedReviewerCost(reviewResults),
+      ...extra,
+    });
+  };
+
+  publish("goal_start", `Starting goal loop: ${state.goal}`);
 
   while (state.status === "running") {
     const stopReason = goalLoopStopReason(state, { now: now(), abortSignal: options.abortSignal });
@@ -96,6 +157,10 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       break;
     }
 
+    const nextIteration = state.currentIteration > 0 ? state.currentIteration : state.iterations.length + 1;
+    publish("todo_generation_start", `Goal iteration ${nextIteration}: generating TODO markdown.`, {
+      iteration: nextIteration,
+    });
     const generation = await runGoalTodoGenerationLongTask({
       state,
       cwd: options.cwd,
@@ -110,8 +175,18 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
     });
     generationResults.push(generation);
     state = generation.state;
+    publish("todo_generated", `Goal iteration ${state.currentIteration}: generated TODO markdown.`, {
+      iteration: state.currentIteration,
+    });
 
     try {
+      publish(
+        "todo_execution_start",
+        `Goal iteration ${state.currentIteration}: running generated TODO as a long task.`,
+        {
+          iteration: state.currentIteration,
+        },
+      );
       const execution = await runGoalTodoExecutionLongTask({
         state,
         cwd: options.cwd,
@@ -125,10 +200,25 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
         maxAttemptsPerTask: options.maxAttemptsPerTask,
         commit: options.commit,
         now,
-        onProgress: options.onWorkerProgress,
+        onProgress: (update) => {
+          publish("todo_execution_start", `Goal iteration ${state.currentIteration}: ${update.message}`, {
+            iteration: state.currentIteration,
+            workerStatus: update.status,
+            childProgress: update,
+          });
+          options.onWorkerProgress?.(update);
+        },
       });
       executionResults.push(execution);
       state = execution.state;
+      publish(
+        "todo_executed",
+        `Goal iteration ${state.currentIteration}: worker finished with ${execution.childResult.status}.`,
+        {
+          iteration: state.currentIteration,
+          workerStatus: execution.childResult.status,
+        },
+      );
     } catch (error) {
       if (error instanceof GoalTodoExecutionError && error.state) {
         state = error.state;
@@ -140,6 +230,9 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       }
     }
 
+    publish("review_start", `Goal iteration ${state.currentIteration}: reviewing goal completion.`, {
+      iteration: state.currentIteration,
+    });
     const review = await runGoalReviewSession({
       state,
       cwd: options.cwd,
@@ -153,7 +246,18 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
     });
     reviewResults.push(review);
     state = review.state;
+    publish(
+      "reviewed",
+      `Goal iteration ${review.iteration.iteration}: reviewer decided ${review.reviewerResult.decision}.`,
+      {
+        iteration: review.iteration.iteration,
+        reviewerDecision: review.reviewerResult.decision,
+        remainingWork: review.reviewerResult.remainingWork,
+      },
+    );
   }
+
+  publish("complete", `Goal loop ${state.status}: ${state.completion?.reason ?? "finished"}`);
 
   return {
     state,
@@ -171,6 +275,27 @@ async function persistStateChange(
 ): Promise<void> {
   await store.saveState(state);
   await store.appendNewTraceEvents(previousTraceLength, state);
+}
+
+function accumulatedWorkerCost(
+  executionResults: GoalTodoExecutionResult[],
+  generationResults: GoalTodoGenerationResult[],
+): number {
+  return sumFinite([
+    ...executionResults.map((result) => result.childResult.workerCostTotal),
+    ...generationResults.map((result) => result.childResult.workerCostTotal),
+  ]);
+}
+
+function accumulatedReviewerCost(reviewResults: GoalReviewResult[]): number {
+  return sumFinite(reviewResults.map((result) => result.sessionResult.reviewerCostTotal));
+}
+
+function sumFinite(values: Array<number | undefined>): number {
+  return values.reduce<number>(
+    (total, value) => total + (typeof value === "number" && Number.isFinite(value) ? value : 0),
+    0,
+  );
 }
 
 function requiredGoal(goal: string | undefined): string {

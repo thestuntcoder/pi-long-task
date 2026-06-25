@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 
 import {
+  goalTaskInputTransform,
   inferCommitSetting,
   inferGoalSetting,
+  isNaturalLanguageGoalTaskRequest,
   isNaturalLanguageLongTaskRequest,
   longTaskInputTransform,
+  parseGoalTaskRequestOptions,
   parseLongTaskRequestOptions,
 } from "../src/input_router.ts";
 
@@ -45,9 +48,23 @@ assert.deepEqual(parseLongTaskRequestOptions("run long task commit:on goal: line
   goal: "line coverage over 77%",
 });
 
+const goalLoopRequest = "Start a goal loop with max iterations 2 with goal to ship the checkout flow";
+assert.equal(isNaturalLanguageGoalTaskRequest(goalLoopRequest), true);
+assert.deepEqual(parseGoalTaskRequestOptions(goalLoopRequest), {
+  commit: true,
+  goal: "ship the checkout flow",
+  maxIterations: 2,
+});
+const goalLoopTransform = goalTaskInputTransform(goalLoopRequest);
+assert.ok(goalLoopTransform);
+assert.match(goalLoopTransform, /Use the pi_goal_task tool/);
+assert.match(goalLoopTransform, /Set maxIterations to 2\./);
+assert.match(longTaskInputTransform(goalLoopRequest) ?? "", /Use the pi_goal_task tool/);
+
 assert.equal(isNaturalLanguageLongTaskRequest("How do I run a long task with commits?"), false);
 assert.equal(isNaturalLanguageLongTaskRequest("Do not run a long task with commits yet."), false);
 assert.equal(isNaturalLanguageLongTaskRequest("Use pi_long_task with inputText x and commit true."), false);
+assert.equal(isNaturalLanguageGoalTaskRequest("Use pi_goal_task with goal x."), false);
 assert.equal(isNaturalLanguageLongTaskRequest("Run tests with commits."), false);
 
 assert.equal(inferCommitSetting("commit as you go"), true);
