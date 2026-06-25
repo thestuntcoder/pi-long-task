@@ -96,6 +96,9 @@ export interface GoalReviewerResultState {
   remainingWork: string[];
   reviewerSessionId?: string;
   reviewerSessionFile?: string;
+  payloadPath?: string;
+  rawReviewPath?: string;
+  reviewerCostTotal?: number;
   error?: string;
   reviewedAt: string;
 }
