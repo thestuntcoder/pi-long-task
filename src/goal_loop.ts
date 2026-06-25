@@ -75,6 +75,7 @@ export interface GoalWorkerResultState {
   todoPath?: string;
   resultPath?: string;
   taskResultPath?: string;
+  workerProgressPath?: string;
   totalTasks?: number;
   completedTasks?: number;
   failedTasks?: number;

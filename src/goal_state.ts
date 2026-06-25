@@ -127,6 +127,12 @@ export class GoalStateStore {
       if (iteration.workerResult.todoPath) {
         lines.push(`TODO path: ${iteration.workerResult.todoPath}`);
       }
+      if (iteration.workerResult.taskResultPath) {
+        lines.push(`Task result path: ${iteration.workerResult.taskResultPath}`);
+      }
+      if (iteration.workerResult.workerProgressPath) {
+        lines.push(`Worker progress log: ${iteration.workerResult.workerProgressPath}`);
+      }
       if (iteration.workerResult.error) {
         lines.push(`Error: ${iteration.workerResult.error}`);
       }
