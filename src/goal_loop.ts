@@ -59,6 +59,12 @@ export interface GeneratedTodoState {
   summary?: string;
   contentHash?: string;
   generatedAt: string;
+  payloadPath?: string;
+  rawTodoPath?: string;
+  generatorRunId?: string;
+  generatorRunDir?: string;
+  generatorResultPath?: string;
+  generatorTaskResultPath?: string;
 }
 
 export interface GoalWorkerResultState {
@@ -289,9 +295,7 @@ export function recordGeneratedTodo(
       status: "todo_generated",
       updatedAt: timestamp,
       generatedTodo: {
-        todoPath: todo.todoPath,
-        summary: todo.summary,
-        contentHash: todo.contentHash,
+        ...todo,
         generatedAt: todo.generatedAt ?? timestamp,
       },
     },
