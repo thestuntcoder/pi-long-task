@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import type { CoordinatorProgressUpdate } from "./coordinator.ts";
+import {
+  decideGoalDiscovery,
+  runDefaultGoalDiscovery,
+  type GoalDiscoveryDecision,
+  type GoalDiscoveryEntrypoint,
+  type GoalDiscoveryRunner,
+} from "./goal_discovery.ts";
 import type { GoalLoopLimits, GoalLoopStatus } from "./goal_loop.ts";
 import {
   createGoalLoopState,
@@ -10,6 +17,7 @@ import {
   type GoalLoopState,
 } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
+import type { GoalSpecification } from "./goal_spec.ts";
 import { runGoalReviewSession, type GoalReviewResult, type GoalReviewerRunner } from "./goal_review.ts";
 import {
   runGoalTodoExecutionLongTask,
@@ -25,6 +33,8 @@ import {
 
 export type GoalLoopProgressPhase =
   | "goal_start"
+  | "discovery_start"
+  | "discovery_complete"
   | "todo_generation_start"
   | "todo_generated"
   | "todo_execution_start"
@@ -47,6 +57,8 @@ export interface GoalLoopProgressUpdate {
   resultPath: string;
   statePath: string;
   tracePath: string;
+  goalSpecPath: string;
+  discoveryDecision: GoalDiscoveryDecision;
   iteration?: number;
   reviewerDecision?: string;
   remainingWork?: string[];
@@ -70,6 +82,8 @@ export interface RunGoalLoopOptions extends GoalLoopLimitInput {
   todoGenerationRunner?: GoalTodoGenerationLongTaskRunner;
   todoExecutionRunner?: GoalTodoExecutionLongTaskRunner;
   reviewerRunner?: GoalReviewerRunner;
+  discoveryRunner?: GoalDiscoveryRunner;
+  discoveryEntrypoint?: GoalDiscoveryEntrypoint;
   model?: unknown;
   modelName?: string;
   thinkingLevel?: string;
@@ -87,6 +101,8 @@ export interface GoalLoopRunResult {
   executionResults: GoalTodoExecutionResult[];
   reviewResults: GoalReviewResult[];
   resultPath: string;
+  discoveryDecision: GoalDiscoveryDecision;
+  goalSpecification?: GoalSpecification;
 }
 
 export class GoalLoopOrchestratorError extends Error {
@@ -120,6 +136,11 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
   const generationResults: GoalTodoGenerationResult[] = [];
   const executionResults: GoalTodoExecutionResult[] = [];
   const reviewResults: GoalReviewResult[] = [];
+  const discoveryDecision = decideGoalDiscovery({
+    goal: state.goal,
+    entrypoint: options.discoveryEntrypoint ?? "pi_goal_task",
+  });
+  let goalSpecification: GoalSpecification | undefined = await store.tryLoadGoalSpecification();
 
   await store.saveState(state);
   await store.initializeResult(state);
@@ -139,6 +160,8 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       resultPath: store.paths.resultPath,
       statePath: store.paths.statePath,
       tracePath: store.paths.tracePath,
+      goalSpecPath: store.paths.goalSpecPath,
+      discoveryDecision,
       workerCostTotal: accumulatedWorkerCost(executionResults, generationResults),
       reviewerCostTotal: accumulatedReviewerCost(reviewResults),
       totalCost: accumulatedWorkerCost(executionResults, generationResults) + accumulatedReviewerCost(reviewResults),
@@ -147,6 +170,18 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
   };
 
   publish("goal_start", `Starting goal loop: ${state.goal}`);
+
+  if (!goalLoopStopReason(state, { now: now(), abortSignal: options.abortSignal })) {
+    goalSpecification = await maybeRunGoalDiscovery({
+      state,
+      store,
+      discoveryDecision,
+      existingSpecification: goalSpecification,
+      options,
+      now,
+      publish,
+    });
+  }
 
   while (state.status === "running") {
     const stopReason = goalLoopStopReason(state, { now: now(), abortSignal: options.abortSignal });
@@ -172,6 +207,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       thinkingLevel: options.thinkingLevel,
       maxBashTimeoutMs: options.maxBashTimeoutMs,
       now,
+      goalSpecification,
     });
     generationResults.push(generation);
     state = generation.state;
@@ -243,6 +279,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       modelName: options.modelName,
       thinkingLevel: options.thinkingLevel,
       now,
+      goalSpecification,
     });
     reviewResults.push(review);
     state = review.state;
@@ -265,7 +302,55 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
     executionResults,
     reviewResults,
     resultPath: store.paths.resultPath,
+    discoveryDecision,
+    ...(goalSpecification ? { goalSpecification } : {}),
   };
+}
+
+async function maybeRunGoalDiscovery(options: {
+  state: GoalLoopState;
+  store: GoalStateStore;
+  discoveryDecision: GoalDiscoveryDecision;
+  existingSpecification?: GoalSpecification;
+  options: RunGoalLoopOptions;
+  now: () => Date;
+  publish: (phase: GoalLoopProgressPhase, message: string, extra?: Partial<GoalLoopProgressUpdate>) => void;
+}): Promise<GoalSpecification | undefined> {
+  if (options.discoveryDecision.route !== "discovery") {
+    return options.existingSpecification;
+  }
+
+  if (options.existingSpecification) {
+    options.publish("discovery_complete", "Using persisted goal specification from previous discovery.");
+    return options.existingSpecification;
+  }
+
+  options.publish("discovery_start", "Goal is vague; running discovery before implementation TODO generation.");
+  try {
+    const runner = options.options.discoveryRunner ?? runDefaultGoalDiscovery;
+    const spec = await runner({
+      state: options.state,
+      store: options.store,
+      decision: options.discoveryDecision,
+      cwd: options.options.cwd,
+      abortSignal: options.options.abortSignal,
+      model: options.options.model,
+      modelName: options.options.modelName,
+      thinkingLevel: options.options.thinkingLevel,
+      now: options.now,
+    });
+    await options.store.saveGoalSpecification(spec);
+    options.publish(
+      "discovery_complete",
+      `Goal discovery complete; specification saved to ${options.store.paths.goalSpecPath}.`,
+    );
+    return spec;
+  } catch (error) {
+    throw new GoalLoopOrchestratorError(`Goal discovery failed: ${errorMessage(error)}`, {
+      cause: error,
+      state: options.state,
+    });
+  }
 }
 
 async function persistStateChange(

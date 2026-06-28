@@ -8,6 +8,7 @@ import { runGoalLoop } from "../src/goal_orchestrator.ts";
 import { buildGoalReviewTaskPayload, parseGoalReviewerOutput } from "../src/goal_review.ts";
 import { createGoalLoopState, recordGeneratedTodo, recordWorkerResult, startGoalIteration } from "../src/goal_loop.ts";
 import { GoalStateStore } from "../src/goal_state.ts";
+import { createGoalSpecification } from "../src/goal_spec.ts";
 import { buildTaskProgressModel } from "../src/task_progress.ts";
 
 const baseTime = new Date("2026-06-25T11:00:00.000Z");
@@ -38,6 +39,78 @@ const payload = buildGoalReviewTaskPayload({ state: payloadState, iteration: pay
 assert.match(payload, /Original high-level goal/);
 assert.match(payload, /Worker finished/);
 assert.match(payload, /Reply with only one JSON object/);
+assert.doesNotMatch(payload, /Persisted goal specification/);
+
+const reviewSpecification = createGoalSpecification({
+  goalRunId: "goal-review-payload",
+  originalGoal: "Review payload includes worker result",
+  summary: "Deliver the review payload against explicit criteria.",
+  now: () => baseTime,
+  scopedRequirements: {
+    inScope: [
+      {
+        id: "REQ-REVIEW-1",
+        title: "Spec-aware review",
+        description: "Reviewer must evaluate against persisted requirements rather than only the original goal.",
+        priority: "must",
+        acceptanceCriterionIds: ["AC-REVIEW-1"],
+        milestoneIds: ["MS-REVIEW-1"],
+      },
+    ],
+    outOfScope: [],
+    assumptions: [],
+    openQuestions: [],
+  },
+  milestones: [
+    {
+      id: "MS-REVIEW-1",
+      title: "Review evaluation",
+      description: "Evaluate final output against the persisted spec.",
+      requirementIds: ["REQ-REVIEW-1"],
+      acceptanceCriterionIds: ["AC-REVIEW-1"],
+      doneWhen: ["Reviewer output cites the persisted criteria."],
+    },
+  ],
+  acceptanceCriteria: [
+    {
+      id: "AC-REVIEW-1",
+      description: "Review rationale references specific persisted acceptance criteria.",
+      requirementIds: ["REQ-REVIEW-1"],
+      verificationGateIds: ["VG-REVIEW-1"],
+    },
+  ],
+  verificationGates: [
+    {
+      id: "VG-REVIEW-1",
+      title: "Review prompt verification",
+      description: "Confirm the prompt asks for spec-ID-based evaluation.",
+      required: true,
+      successCriteria: ["Prompt includes persisted requirements and acceptance criteria."],
+    },
+  ],
+  definitionOfDone: {
+    summary: "REQ-REVIEW-1 and AC-REVIEW-1 are satisfied and VG-REVIEW-1 passes.",
+    requirementIds: ["REQ-REVIEW-1"],
+    acceptanceCriterionIds: ["AC-REVIEW-1"],
+    verificationGateIds: ["VG-REVIEW-1"],
+    requiredArtifacts: ["Spec-aware reviewer rationale"],
+    notes: [],
+  },
+});
+const payloadWithSpec = buildGoalReviewTaskPayload({
+  state: payloadState,
+  iteration: payloadState.iterations[0]!,
+  goalSpecification: reviewSpecification,
+  goalSpecificationPath: "/tmp/goal/GOAL_SPEC.json",
+});
+assert.match(payloadWithSpec, /Persisted goal specification \(primary review target\)/);
+assert.match(payloadWithSpec, /Goal spec path: \/tmp\/goal\/GOAL_SPEC\.json/);
+assert.match(payloadWithSpec, /REQ-REVIEW-1/);
+assert.match(payloadWithSpec, /MS-REVIEW-1/);
+assert.match(payloadWithSpec, /AC-REVIEW-1/);
+assert.match(payloadWithSpec, /VG-REVIEW-1/);
+assert.match(payloadWithSpec, /persisted definition-of-done is satisfied/);
+assert.match(payloadWithSpec, /original high-level goal available only as traceability\/context/i);
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-goal-review-loop-test-"));
 try {

@@ -5,8 +5,13 @@ import path from "node:path";
 import { runCoordinator, type CoordinatorResult, type RunCoordinatorOptions } from "./coordinator.ts";
 import { type GoalIterationState, type GoalLoopState, recordGeneratedTodo, startGoalIteration } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
+import type { GoalSpecification } from "./goal_spec.ts";
 import { parseTasks } from "./todo_parser.ts";
-import { applyGoalInstructionsToTodoMarkdown, extractAndValidateTodoMarkdown } from "./todo_generator.ts";
+import {
+  applyGoalInstructionsToTodoMarkdown,
+  extractAndValidateTodoMarkdown,
+  validateTodoMarkdown,
+} from "./todo_generator.ts";
 
 export const GOAL_TODO_GENERATION_PAYLOAD_FILE = "TODO_GENERATION_TASK.md";
 export const GOAL_TODO_GENERATION_RAW_FILE = "GENERATED_TODO_RAW.md";
@@ -27,6 +32,7 @@ export interface GoalTodoGenerationOptions {
   now?: () => Date;
   additionalContext?: string;
   outputPath?: string;
+  goalSpecification?: GoalSpecification;
 }
 
 export interface GoalTodoGenerationResult {
@@ -68,11 +74,14 @@ export async function runGoalTodoGenerationLongTask(
 
   const rawTodoPath = options.outputPath ?? path.join(iterationDir, GOAL_TODO_GENERATION_RAW_FILE);
   const todoPath = path.join(iterationDir, GOAL_TODO_GENERATION_TODO_FILE);
+  const goalSpecification = options.goalSpecification ?? (await store.tryLoadGoalSpecification());
   const payload = buildGoalTodoGenerationTaskPayload({
     state,
     iteration: iteration.iteration,
     outputPath: rawTodoPath,
     additionalContext: options.additionalContext ?? buildPreviousIterationContext(state),
+    goalSpecification,
+    goalSpecificationPath: goalSpecification ? store.paths.goalSpecPath : undefined,
   });
   const payloadPath = path.join(iterationDir, GOAL_TODO_GENERATION_PAYLOAD_FILE);
   await writeFile(payloadPath, payload, "utf8");
@@ -93,7 +102,12 @@ export async function runGoalTodoGenerationLongTask(
 
   throwIfAborted(options.abortSignal);
   const rawOutput = await readGeneratedTodo(rawTodoPath, childResult);
-  const todoMarkdown = normalizeGeneratedTodoMarkdown(rawOutput, state.goal);
+  const todoMarkdown = normalizeGeneratedTodoMarkdown(
+    rawOutput,
+    state.goal,
+    goalSpecification,
+    store.paths.goalSpecPath,
+  );
   const taskCount = parseTasks(todoMarkdown).length;
   const contentHash = sha256(todoMarkdown);
   await writeFile(todoPath, todoMarkdown, "utf8");
@@ -137,9 +151,17 @@ export function buildGoalTodoGenerationTaskPayload(options: {
   iteration: number;
   outputPath: string;
   additionalContext?: string;
+  goalSpecification?: GoalSpecification;
+  goalSpecificationPath?: string;
 }): string {
   const context = options.additionalContext?.trim();
   const contextBlock = context ? `\nAdditional iteration context:\n\n${markdownFence(context, "text")}\n` : "";
+  const specificationBlock = options.goalSpecification
+    ? `\nPersisted goal specification (source of truth for implementation TODOs):\n\n${markdownFence(
+        buildGoalSpecificationGenerationContext(options.goalSpecification, options.goalSpecificationPath),
+        "markdown",
+      )}\n`
+    : "";
 
   return `# Pi Long Task TODO
 
@@ -151,7 +173,11 @@ export function buildGoalTodoGenerationTaskPayload(options: {
 - Write the generated Pi Long Task-compatible TODO markdown to \`${options.outputPath}\`.
 - Do not wrap the generated file in a code fence and do not include commentary outside the TODO markdown in that file.
 - Keep generated tasks focused, independently assignable, and safe for separate worker sessions.
-
+${
+  options.goalSpecification
+    ? "- A persisted goal specification is available; derive implementation TODOs from that specification rather than only the original vague goal.\n- Ensure generated tasks explicitly cover relevant requirement IDs, milestones, acceptance criteria, verification gates, constraints, and definition-of-done items from the specification.\n- Include spec IDs (for example REQ-*, MS-*, AC-*, VG-*) in generated task goals/status/verification/done-when guidance wherever applicable.\n"
+    : ""
+}
 ## Progress
 
 - [ ] TODO 1 — Generate Pi Long Task TODO markdown
@@ -180,7 +206,7 @@ export function buildGoalTodoGenerationTaskPayload(options: {
 High-level goal:
 
 ${markdownFence(options.state.goal, "text")}
-${contextBlock}`;
+${specificationBlock}${contextBlock}`;
 }
 
 function ensurePendingGenerationIteration(
@@ -233,9 +259,208 @@ async function readGeneratedTodo(rawTodoPath: string, childResult: CoordinatorRe
   }
 }
 
-function normalizeGeneratedTodoMarkdown(rawOutput: string, goal: string): string {
+function normalizeGeneratedTodoMarkdown(
+  rawOutput: string,
+  goal: string,
+  goalSpecification: GoalSpecification | undefined,
+  goalSpecificationPath: string,
+): string {
   const extracted = extractAndValidateTodoMarkdown(rawOutput);
-  return applyGoalInstructionsToTodoMarkdown(extracted, goal);
+  const withGoalInstructions = applyGoalInstructionsToTodoMarkdown(extracted, goal);
+  if (!goalSpecification) {
+    return withGoalInstructions;
+  }
+  return applyGoalSpecificationInstructionsToTodoMarkdown(
+    withGoalInstructions,
+    goalSpecification,
+    goalSpecificationPath,
+  );
+}
+
+function buildGoalSpecificationGenerationContext(spec: GoalSpecification, goalSpecificationPath?: string): string {
+  const lines = [
+    `Goal spec path: ${goalSpecificationPath ?? "<not provided>"}`,
+    `Goal run: ${spec.goalRunId}`,
+    `Original user goal: ${oneLine(spec.originalGoal)}`,
+    `Specification summary: ${oneLine(spec.summary)}`,
+    "",
+    "Implementation planning instructions:",
+    "- Treat this persisted specification as the implementation source of truth; use the original vague goal only for traceability.",
+    "- Generate tasks that map to milestones, in-scope requirements, acceptance criteria, verification gates, and definition-of-done items.",
+    "- Cite relevant IDs (REQ-*, MS-*, AC-*, VG-*) in task goals, status checklist items, verification, and done-when guidance.",
+    "- Do not create tasks for out-of-scope requirements unless needed to preserve or document non-goals.",
+    "",
+    "In-scope requirements:",
+    ...formatRequirementLines(spec.scopedRequirements.inScope),
+    "",
+    "Out-of-scope requirements / non-goals:",
+    ...formatRequirementLines(spec.scopedRequirements.outOfScope),
+    "",
+    "Milestones:",
+    ...formatMilestoneLines(spec.milestones),
+    "",
+    "Acceptance criteria:",
+    ...formatAcceptanceCriterionLines(spec.acceptanceCriteria),
+    "",
+    "Verification gates:",
+    ...formatVerificationGateLines(spec.verificationGates),
+    "",
+    "Definition of done:",
+    `- Summary: ${oneLine(spec.definitionOfDone.summary)}`,
+    `- Requirement IDs: ${formatIdList(spec.definitionOfDone.requirementIds)}`,
+    `- Acceptance criterion IDs: ${formatIdList(spec.definitionOfDone.acceptanceCriterionIds)}`,
+    `- Verification gate IDs: ${formatIdList(spec.definitionOfDone.verificationGateIds)}`,
+    ...spec.definitionOfDone.requiredArtifacts.map((artifact) => `- Required artifact: ${oneLine(artifact)}`),
+    ...spec.definitionOfDone.notes.map((note) => `- Note: ${oneLine(note)}`),
+    "",
+    "Design and product constraints:",
+    ...formatConstraintContext(spec),
+  ];
+  return lines.join("\n");
+}
+
+function applyGoalSpecificationInstructionsToTodoMarkdown(
+  markdown: string,
+  spec: GoalSpecification,
+  goalSpecificationPath: string,
+): string {
+  const additions = buildGoalSpecificationTodoInstructions(spec, goalSpecificationPath);
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const progressIndex = lines.findIndex((line) => /^##\s+Progress\s*$/i.test(line.trim()));
+  if (progressIndex < 0) {
+    return markdown;
+  }
+
+  const existingGlobalText = lines.slice(0, progressIndex).join("\n");
+  const missing = additions.filter((line) => !existingGlobalText.includes(line));
+  if (missing.length === 0) {
+    return markdown;
+  }
+
+  const before = trimTrailingBlankLines(lines.slice(0, progressIndex));
+  const after = trimLeadingBlankLines(lines.slice(progressIndex));
+  const hasGlobalHeading = /^Global instructions:\s*$/im.test(existingGlobalText);
+  const block = hasGlobalHeading ? missing : ["Global instructions:", ...missing];
+  const next = ensureTrailingNewline([...before, "", ...block, "", ...after].join("\n"));
+  validateTodoMarkdown(next);
+  return next;
+}
+
+function buildGoalSpecificationTodoInstructions(spec: GoalSpecification, goalSpecificationPath: string): string[] {
+  const lines = [
+    `- Persisted goal specification: ${goalSpecificationPath}`,
+    `- Goal specification summary: ${oneLine(spec.summary)}`,
+    `- Definition of done: ${oneLine(spec.definitionOfDone.summary)}`,
+    `- Implementation TODOs must trace to requirements: ${formatIdList(spec.definitionOfDone.requirementIds)}`,
+    `- Implementation TODOs must satisfy acceptance criteria: ${formatIdList(
+      spec.definitionOfDone.acceptanceCriterionIds,
+    )}`,
+    `- Required verification gates: ${formatIdList(requiredVerificationGateIds(spec))}`,
+  ];
+  const milestoneIds = spec.milestones.map((milestone) => milestone.id);
+  if (milestoneIds.length > 0) {
+    lines.push(`- Implementation TODOs should be sequenced by milestones: ${formatIdList(milestoneIds)}`);
+  }
+  return lines;
+}
+
+function formatRequirementLines(requirements: GoalSpecification["scopedRequirements"]["inScope"]): string[] {
+  if (requirements.length === 0) {
+    return ["- None specified."];
+  }
+  return requirements.map(
+    (requirement) =>
+      `- ${requirement.id} (${requirement.priority}) ${oneLine(requirement.title)} — ${oneLine(
+        requirement.description,
+      )}; milestones: ${formatIdList(requirement.milestoneIds)}; acceptance: ${formatIdList(
+        requirement.acceptanceCriterionIds,
+      )}`,
+  );
+}
+
+function formatMilestoneLines(milestones: GoalSpecification["milestones"]): string[] {
+  if (milestones.length === 0) {
+    return ["- None specified."];
+  }
+  return milestones.map(
+    (milestone) =>
+      `- ${milestone.id} ${oneLine(milestone.title)} — ${oneLine(milestone.description)}; requirements: ${formatIdList(
+        milestone.requirementIds,
+      )}; acceptance: ${formatIdList(milestone.acceptanceCriterionIds)}; done when: ${formatIdList(
+        milestone.doneWhen.map(oneLine),
+      )}`,
+  );
+}
+
+function formatAcceptanceCriterionLines(criteria: GoalSpecification["acceptanceCriteria"]): string[] {
+  if (criteria.length === 0) {
+    return ["- None specified."];
+  }
+  return criteria.map(
+    (criterion) =>
+      `- ${criterion.id} ${oneLine(criterion.description)}; requirements: ${formatIdList(
+        criterion.requirementIds,
+      )}; verification gates: ${formatIdList(criterion.verificationGateIds)}`,
+  );
+}
+
+function formatVerificationGateLines(gates: GoalSpecification["verificationGates"]): string[] {
+  if (gates.length === 0) {
+    return ["- None specified."];
+  }
+  return gates.map((gate) => {
+    const command = gate.command ? `; command: ${oneLine(gate.command)}` : "";
+    return `- ${gate.id} ${gate.required ? "required" : "optional"} ${oneLine(gate.title)} — ${oneLine(
+      gate.description,
+    )}${command}; success: ${formatIdList(gate.successCriteria.map(oneLine))}`;
+  });
+}
+
+function formatConstraintContext(spec: GoalSpecification): string[] {
+  const lines = [
+    ...spec.designConstraints.uxPrinciples.map((item) => `- UX principle: ${oneLine(item)}`),
+    ...spec.designConstraints.uiRequirements.map((item) => `- UI requirement: ${oneLine(item)}`),
+    ...spec.designConstraints.accessibility.map((item) => `- Accessibility: ${oneLine(item)}`),
+    ...spec.designConstraints.architecturalConstraints.map((item) => `- Architecture: ${oneLine(item)}`),
+    ...spec.designConstraints.constraints.map(
+      (constraint) => `- ${constraint.id} ${oneLine(constraint.title)} — ${oneLine(constraint.description)}`,
+    ),
+    ...spec.productConstraints.businessRules.map((item) => `- Business rule: ${oneLine(item)}`),
+    ...spec.productConstraints.compliance.map((item) => `- Compliance: ${oneLine(item)}`),
+    ...spec.productConstraints.dependencies.map((item) => `- Dependency: ${oneLine(item)}`),
+    ...spec.productConstraints.risks.map((item) => `- Risk: ${oneLine(item)}`),
+    ...spec.productConstraints.constraints.map(
+      (constraint) => `- ${constraint.id} ${oneLine(constraint.title)} — ${oneLine(constraint.description)}`,
+    ),
+  ];
+  return lines.length > 0 ? lines : ["- None specified."];
+}
+
+function requiredVerificationGateIds(spec: GoalSpecification): string[] {
+  const required = spec.verificationGates.filter((gate) => gate.required).map((gate) => gate.id);
+  return required.length > 0 ? required : spec.definitionOfDone.verificationGateIds;
+}
+
+function formatIdList(values: readonly string[]): string {
+  return values.length > 0 ? values.map(oneLine).join(", ") : "none";
+}
+
+function trimTrailingBlankLines(lines: string[]): string[] {
+  while (lines.at(-1)?.trim() === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+function trimLeadingBlankLines(lines: string[]): string[] {
+  while (lines[0]?.trim() === "") {
+    lines.shift();
+  }
+  return lines;
+}
+
+function ensureTrailingNewline(value: string): string {
+  return value.endsWith("\n") ? value : `${value}\n`;
 }
 
 function timeoutForIteration(iteration: GoalIterationState, state: GoalLoopState, now: Date): number {

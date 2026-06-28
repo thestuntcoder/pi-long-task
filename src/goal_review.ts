@@ -10,6 +10,7 @@ import {
   recordReviewerResult,
 } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
+import { goalSpecificationToMarkdown, type GoalSpecification } from "./goal_spec.ts";
 import {
   assistantTextFromEvent,
   createIsolatedWorkerSession,
@@ -34,6 +35,7 @@ export interface GoalReviewOptions {
   thinkingLevel?: string;
   now?: () => Date;
   sessionFactory?: WorkerSessionFactory;
+  goalSpecification?: GoalSpecification;
 }
 
 export interface GoalReviewResult {
@@ -97,7 +99,13 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
   await mkdir(iterationDir, { recursive: true });
   const payloadPath = path.join(iterationDir, GOAL_REVIEW_PAYLOAD_FILE);
   const rawReviewPath = path.join(iterationDir, GOAL_REVIEW_RAW_FILE);
-  const payload = buildGoalReviewTaskPayload({ state, iteration });
+  const goalSpecification = options.goalSpecification ?? (await store.tryLoadGoalSpecification());
+  const payload = buildGoalReviewTaskPayload({
+    state,
+    iteration,
+    goalSpecification,
+    goalSpecificationPath: goalSpecification ? store.paths.goalSpecPath : undefined,
+  });
   await writeFile(payloadPath, payload, "utf8");
 
   if (options.abortSignal?.aborted) {
@@ -190,7 +198,12 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
   };
 }
 
-export function buildGoalReviewTaskPayload(options: { state: GoalLoopState; iteration: GoalIterationState }): string {
+export function buildGoalReviewTaskPayload(options: {
+  state: GoalLoopState;
+  iteration: GoalIterationState;
+  goalSpecification?: GoalSpecification;
+  goalSpecificationPath?: string;
+}): string {
   const { state, iteration } = options;
   const workerResult = iteration.workerResult;
   const generatedTodo = iteration.generatedTodo;
@@ -198,15 +211,34 @@ export function buildGoalReviewTaskPayload(options: { state: GoalLoopState; iter
   const previousContextBlock = previousContext
     ? `\nPrevious iteration review context:\n\n${markdownFence(previousContext, "text")}\n`
     : "";
+  const specificationBlock = options.goalSpecification
+    ? `\nPersisted goal specification (primary review target):\n\n${markdownFence(
+        buildGoalSpecificationReviewContext(options.goalSpecification, options.goalSpecificationPath),
+        "markdown",
+      )}\n`
+    : "";
+  const reviewTargetInstruction = options.goalSpecification
+    ? "Review whether the latest worker run satisfies the persisted goal specification and definition-of-done. Treat the persisted specification as the primary review target; keep the original high-level goal available only as traceability/context."
+    : "Review whether the original high-level goal is complete after the latest worker run.";
+  const decisionRules = options.goalSpecification
+    ? `- Use "complete" only when the persisted definition-of-done is satisfied, including in-scope requirements, milestones, acceptance criteria, required verification gates, and applicable design/product constraints.
+- Use "incomplete" when any required spec requirement, milestone, acceptance criterion, verification gate, artifact, or constraint still needs work and another TODO-generation iteration should be started.
+- Use "blocked" when a required spec item cannot be evaluated or completed without external input or unavailable resources.
+- Use "failed" when the loop should stop because the run is unrecoverably failed.
+- In summary, rationale, and remainingWork, cite specific spec IDs or named criteria where applicable (for example REQ-*, MS-*, AC-*, VG-*).`
+    : `- Use "complete" only when the original high-level goal is satisfied, not merely when the worker finished its TODO.
+- Use "incomplete" when meaningful work remains and another TODO-generation iteration should be started.
+- Use "blocked" when external input or unavailable resources prevent progress.
+- Use "failed" when the loop should stop because the run is unrecoverably failed.`;
 
   return `You are a separate Pi SDK reviewer session for a goal-oriented long-task loop.
 
-Review whether the original high-level goal is complete after the latest worker run. Do not implement fixes, edit files, or commit. You may inspect files and run focused read-only verification commands when useful.
+${reviewTargetInstruction} Do not implement fixes, edit files, or commit. You may inspect files and run focused read-only verification commands when useful.
 
 Original high-level goal:
 
 ${markdownFence(state.goal, "text")}
-
+${specificationBlock}
 Goal run: ${state.goalRunId}
 Iteration: ${iteration.iteration}
 Generated TODO path: ${generatedTodo?.todoPath ?? "unknown"}
@@ -215,10 +247,7 @@ Worker result:
 ${markdownFence(JSON.stringify(workerResult ?? null, null, 2), "json")}
 ${previousContextBlock}
 Decision rules:
-- Use "complete" only when the original high-level goal is satisfied, not merely when the worker finished its TODO.
-- Use "incomplete" when meaningful work remains and another TODO-generation iteration should be started.
-- Use "blocked" when external input or unavailable resources prevent progress.
-- Use "failed" when the loop should stop because the run is unrecoverably failed.
+${decisionRules}
 
 Reply with only one JSON object, with no Markdown fence or commentary, matching this schema:
 {
@@ -408,6 +437,20 @@ async function persistStateChange(
 ): Promise<void> {
   await store.saveState(state);
   await store.appendNewTraceEvents(previousTraceLength, state);
+}
+
+function buildGoalSpecificationReviewContext(spec: GoalSpecification, goalSpecificationPath?: string): string {
+  return [
+    `Goal spec path: ${goalSpecificationPath ?? "<not provided>"}`,
+    "",
+    goalSpecificationToMarkdown(spec).trim(),
+    "",
+    "Reviewer evaluation instructions:",
+    "- Treat this persisted specification as the source of truth for final evaluation.",
+    "- Check in-scope requirements, milestones, acceptance criteria, required verification gates, required artifacts, and design/product constraints before deciding complete.",
+    "- Use the original user goal only as traceability context when interpreting the specification.",
+    "- Cite specific spec IDs or named criteria in rationale and remainingWork whenever a criterion is satisfied, missing, blocked, or not applicable.",
+  ].join("\n");
 }
 
 function previousReviewContext(state: GoalLoopState, currentIterationNumber: number): string {

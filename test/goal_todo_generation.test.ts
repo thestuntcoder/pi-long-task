@@ -6,6 +6,7 @@ import path from "node:path";
 import type { CoordinatorResult, RunCoordinatorOptions } from "../src/coordinator.ts";
 import { createGoalLoopState } from "../src/goal_loop.ts";
 import { GoalStateStore } from "../src/goal_state.ts";
+import { createGoalSpecification } from "../src/goal_spec.ts";
 import { buildGoalTodoGenerationTaskPayload, runGoalTodoGenerationLongTask } from "../src/goal_todo_generation.ts";
 import { buildTaskProgressModel } from "../src/task_progress.ts";
 import { validateTodoMarkdown } from "../src/todo_generator.ts";
@@ -22,6 +23,89 @@ assert.match(payload, /Only generate TODO markdown/);
 assert.match(payload, /Write the generated Pi Long Task-compatible TODO markdown to `\/tmp\/generated\/TODO\.md`/);
 validateTodoMarkdown(payload);
 
+const specification = createGoalSpecification({
+  goalRunId: "goal-generation",
+  originalGoal: "Add a sample settings page with tests",
+  summary: "Deliver a scoped settings page that guides users through required settings.",
+  now: () => baseTime,
+  scopedRequirements: {
+    inScope: [
+      {
+        id: "REQ-1",
+        title: "Guided onboarding checklist",
+        description: "Create an onboarding checklist that moves users through required setup steps.",
+        priority: "must",
+        acceptanceCriterionIds: ["AC-1"],
+        milestoneIds: ["MS-1"],
+        source: "Product Owner",
+      },
+    ],
+    outOfScope: [
+      {
+        id: "OOS-1",
+        title: "Billing integrations",
+        description: "Do not add billing integrations during onboarding implementation.",
+        priority: "wont",
+        acceptanceCriterionIds: [],
+        milestoneIds: [],
+      },
+    ],
+    assumptions: ["Existing routes can host the onboarding flow."],
+    openQuestions: ["Which analytics event names should be used?"],
+  },
+  milestones: [
+    {
+      id: "MS-1",
+      title: "Onboarding workflow implementation",
+      description: "Implement the guided onboarding workflow and connect it to existing navigation.",
+      requirementIds: ["REQ-1"],
+      acceptanceCriterionIds: ["AC-1"],
+      doneWhen: ["Users can complete each required onboarding step."],
+    },
+  ],
+  acceptanceCriteria: [
+    {
+      id: "AC-1",
+      description: "Users can see, complete, and revisit onboarding checklist steps.",
+      requirementIds: ["REQ-1"],
+      verificationGateIds: ["VG-1"],
+    },
+  ],
+  verificationGates: [
+    {
+      id: "VG-1",
+      title: "Focused onboarding tests",
+      description: "Run focused automated tests for onboarding checklist behavior.",
+      required: true,
+      command: "npm test -- onboarding",
+      successCriteria: ["Focused onboarding tests pass."],
+    },
+  ],
+  definitionOfDone: {
+    summary: "REQ-1 and AC-1 are implemented and VG-1 passes.",
+    requirementIds: ["REQ-1"],
+    acceptanceCriterionIds: ["AC-1"],
+    verificationGateIds: ["VG-1"],
+    requiredArtifacts: ["Updated onboarding implementation", "Focused test evidence"],
+    notes: ["Keep OOS-1 out of scope."],
+  },
+});
+
+const payloadWithSpec = buildGoalTodoGenerationTaskPayload({
+  state: { goal: "Add a sample settings page with tests", goalRunId: "goal-generation" },
+  iteration: 1,
+  outputPath: "/tmp/generated/TODO.md",
+  goalSpecification: specification,
+  goalSpecificationPath: "/tmp/goal/GOAL_SPEC.json",
+});
+assert.match(payloadWithSpec, /Persisted goal specification \(source of truth for implementation TODOs\)/);
+assert.match(payloadWithSpec, /REQ-1/);
+assert.match(payloadWithSpec, /MS-1/);
+assert.match(payloadWithSpec, /AC-1/);
+assert.match(payloadWithSpec, /VG-1/);
+assert.match(payloadWithSpec, /derive implementation TODOs from that specification/i);
+validateTodoMarkdown(payloadWithSpec);
+
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-goal-todo-generation-test-"));
 try {
   const store = new GoalStateStore({ cwd: tempRoot, goalRunId: "goal-generation" });
@@ -34,6 +118,7 @@ try {
   await store.saveState(initialState);
   await store.initializeResult(initialState);
   await store.appendNewTraceEvents(0, initialState);
+  await store.saveGoalSpecification(specification);
 
   let runnerCalls = 0;
   let capturedOptions: RunCoordinatorOptions | undefined;
@@ -44,6 +129,11 @@ try {
     assert.equal(options.goal, "Add a sample settings page with tests");
     assert.match(options.runId ?? "", /goal-generation-todo-generation-01/);
     assert.match(options.inputText ?? "", /do not implement/i);
+    assert.match(options.inputText ?? "", /Persisted goal specification/);
+    assert.match(options.inputText ?? "", /REQ-1/);
+    assert.match(options.inputText ?? "", /MS-1/);
+    assert.match(options.inputText ?? "", /AC-1/);
+    assert.match(options.inputText ?? "", /VG-1/);
 
     const outputPath = extractOutputPath(options.inputText ?? "");
     await writeFile(
@@ -133,6 +223,11 @@ try {
   const storedTodo = await readFile(result.todoPath, "utf8");
   assert.equal(storedTodo, result.todoMarkdown);
   assert.match(storedTodo, /Long task goal: Add a sample settings page with tests/);
+  assert.match(storedTodo, /Persisted goal specification:/);
+  assert.match(storedTodo, /Implementation TODOs must trace to requirements: REQ-1/);
+  assert.match(storedTodo, /Implementation TODOs must satisfy acceptance criteria: AC-1/);
+  assert.match(storedTodo, /Required verification gates: VG-1/);
+  assert.match(storedTodo, /Implementation TODOs should be sequenced by milestones: MS-1/);
 
   const loadedState = await store.loadState();
   assert.equal(loadedState.phase, "todo_generated");
