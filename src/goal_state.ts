@@ -8,10 +8,12 @@ import {
   type GoalLoopTraceEvent,
   validateGoalLoopState,
 } from "./goal_loop.ts";
+import { type GoalSpecification, validateGoalSpecification } from "./goal_spec.ts";
 
 export const GOAL_STATE_FILE = "GOAL_STATE.json";
 export const GOAL_TRACE_FILE = "GOAL_TRACE.jsonl";
 export const GOAL_RESULT_FILE = "GOAL_RESULT.md";
+export const GOAL_SPEC_FILE = "GOAL_SPEC.json";
 
 export interface GoalStateStoreOptions {
   cwd?: string;
@@ -25,6 +27,7 @@ export interface GoalStateStorePaths {
   statePath: string;
   tracePath: string;
   resultPath: string;
+  goalSpecPath: string;
   iterationsDir: string;
 }
 
@@ -40,6 +43,7 @@ export class GoalStateStore {
       statePath: path.join(goalRunDir, GOAL_STATE_FILE),
       tracePath: path.join(goalRunDir, GOAL_TRACE_FILE),
       resultPath: path.join(goalRunDir, GOAL_RESULT_FILE),
+      goalSpecPath: path.join(goalRunDir, GOAL_SPEC_FILE),
       iterationsDir: path.join(goalRunDir, "iterations"),
     };
   }
@@ -57,6 +61,28 @@ export class GoalStateStore {
   async loadState(): Promise<GoalLoopState> {
     const text = await readFile(this.paths.statePath, "utf8");
     return validateGoalLoopState(JSON.parse(text));
+  }
+
+  async saveGoalSpecification(spec: GoalSpecification): Promise<void> {
+    validateGoalSpecification(spec);
+    await this.ensureRunDir();
+    await atomicWriteFile(this.paths.goalSpecPath, `${JSON.stringify(spec, null, 2)}\n`);
+  }
+
+  async loadGoalSpecification(): Promise<GoalSpecification> {
+    const text = await readFile(this.paths.goalSpecPath, "utf8");
+    return validateGoalSpecification(JSON.parse(text));
+  }
+
+  async tryLoadGoalSpecification(): Promise<GoalSpecification | undefined> {
+    try {
+      return await this.loadGoalSpecification();
+    } catch (error) {
+      if (isNodeErrnoException(error) && error.code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   async appendTrace(event: GoalLoopTraceEvent): Promise<void> {
@@ -82,6 +108,7 @@ export class GoalStateStore {
       `Started: ${state.startedAt}`,
       `State: ${this.paths.statePath}`,
       `Trace: ${this.paths.tracePath}`,
+      `Goal specification: ${this.paths.goalSpecPath}`,
       "",
       "## Safety limits",
       "",
@@ -193,4 +220,8 @@ export function isGoalLoopState(value: unknown): value is GoalLoopState {
   } catch {
     return false;
   }
+}
+
+function isNodeErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
