@@ -1,3 +1,9 @@
+import {
+  coverageGoalAction,
+  coverageGoalVerification,
+  coverageGoalVerifyBullet,
+  parseCoverageGoal,
+} from "./coverage_goal.ts";
 import { parseTasks, TodoParseError } from "./todo_parser.ts";
 
 const TODO_HEADING_RE = /^##\s+TODO\s+(\d+)\s+[—-]\s+(.+?)\s*$/gm;
@@ -20,21 +26,21 @@ interface ExistingTask {
   body: string;
 }
 
-export function todoMarkdownFromString(rawInput: string): string | undefined {
+export function todoMarkdownFromString(rawInput: string, goal?: string): string | undefined {
   const input = rawInput.trim();
   if (!input) {
     return undefined;
   }
 
   if (hasTodoHeadings(input)) {
-    const markdown = normalizeExistingTodoMarkdown(input);
+    const markdown = applyGoalInstructionsToTodoMarkdown(normalizeExistingTodoMarkdown(input), goal);
     validateTodoMarkdown(markdown);
     return markdown;
   }
 
   const listItems = simpleListItems(input);
   if (listItems.length >= 2) {
-    const markdown = generatedTodoMarkdown(listItems);
+    const markdown = applyGoalInstructionsToTodoMarkdown(generatedTodoMarkdown(listItems), goal);
     validateTodoMarkdown(markdown);
     return markdown;
   }
@@ -116,12 +122,134 @@ export function validateTodoMarkdown(markdown: string): void {
   });
 }
 
-export function buildTodoCreationPrompt(rawInput: string): string {
-  return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.\n\nRequirements:\n- Output only markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n\nRaw input:\n\n${rawInput.trim()}\n`;
+export function applyGoalInstructionsToTodoMarkdown(markdown: string, goal?: string): string {
+  const trimmedGoal = oneLine(goal ?? "");
+  if (!trimmedGoal) {
+    return markdown;
+  }
+
+  let next = insertGlobalGoalInstructions(markdown, trimmedGoal);
+  const coverageGoal = parseCoverageGoal(trimmedGoal);
+  if (coverageGoal) {
+    next = appendCoverageVerificationToTasks(next, coverageGoalVerifyBullet(coverageGoal));
+  }
+  validateTodoMarkdown(next);
+  return next;
 }
 
-export function buildTodoRepairPrompt(rawInput: string, invalidOutput: string, validationError: string): string {
-  return `Your previous response was not valid Pi Long Task TODO markdown. Correct it now.\n\nValidation/extraction error:\n${validationError.trim() || "Unknown validation error."}\n\nRequirements:\n- Output only corrected markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n\nOriginal raw input:\n\n${rawInput.trim()}\n\nPrevious invalid output:\n\n${invalidOutput.trim()}\n`;
+function insertGlobalGoalInstructions(markdown: string, goal: string): string {
+  const coverageGoal = parseCoverageGoal(goal);
+  const additions = [`- Long task goal: ${goal}`];
+  if (coverageGoal) {
+    additions.push(`- Coverage goal: ${coverageGoalAction(coverageGoal)}`);
+    additions.push(`- Coverage verification: ${coverageGoalVerification(coverageGoal)}`);
+  }
+
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const progressIndex = lines.findIndex((line) => /^##\s+Progress\s*$/i.test(line.trim()));
+  if (progressIndex < 0) {
+    return markdown;
+  }
+
+  const existingGlobalText = lines.slice(0, progressIndex).join("\n");
+  const missing = additions.filter((line) => !existingGlobalText.includes(line));
+  if (missing.length === 0) {
+    return markdown;
+  }
+
+  const before = trimTrailingBlankLines(lines.slice(0, progressIndex));
+  const after = trimLeadingBlankLines(lines.slice(progressIndex));
+  const hasGlobalHeading = /^Global instructions:\s*$/im.test(existingGlobalText);
+  const block = hasGlobalHeading ? missing : ["Global instructions:", ...missing];
+  return ensureTrailingNewline([...before, "", ...block, "", ...after].join("\n"));
+}
+
+function appendCoverageVerificationToTasks(markdown: string, verificationBullet: string): string {
+  const tasks = parseTasks(markdown);
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  for (const task of [...tasks].reverse()) {
+    if (task.section.includes(verificationBullet)) {
+      continue;
+    }
+
+    const startIndex = task.startLine - 1;
+    const endIndex = task.endLine;
+    const verifyIndex = findVerifyLineIndex(lines, startIndex, endIndex);
+    if (verifyIndex >= 0) {
+      lines.splice(verifyIndex + 1, 0, verificationBullet);
+      continue;
+    }
+
+    const doneIndex = findDoneWhenLineIndex(lines, startIndex, endIndex);
+    const insertIndex = doneIndex >= 0 ? doneIndex : endIndex;
+    lines.splice(insertIndex, 0, "**Verify:**", verificationBullet, "");
+  }
+
+  return ensureTrailingNewline(lines.join("\n"));
+}
+
+function findVerifyLineIndex(lines: readonly string[], startIndex: number, endIndex: number): number {
+  for (let idx = startIndex; idx < endIndex; idx += 1) {
+    if (/^\*\*Verify:\*\*/i.test(lines[idx].trim())) {
+      return idx;
+    }
+  }
+  return -1;
+}
+
+function findDoneWhenLineIndex(lines: readonly string[], startIndex: number, endIndex: number): number {
+  for (let idx = startIndex; idx < endIndex; idx += 1) {
+    if (/^\*\*Done when:\*\*/i.test(lines[idx].trim())) {
+      return idx;
+    }
+  }
+  return -1;
+}
+
+function trimTrailingBlankLines(lines: string[]): string[] {
+  while (lines.at(-1)?.trim() === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+function trimLeadingBlankLines(lines: string[]): string[] {
+  while (lines[0]?.trim() === "") {
+    lines.shift();
+  }
+  return lines;
+}
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+export function buildTodoCreationPrompt(rawInput: string, goal?: string): string {
+  const goalBlock = todoGoalPromptBlock(goal);
+  return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.\n\nRequirements:\n- Output only markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n${goalBlock}\nRaw input:\n\n${rawInput.trim()}\n`;
+}
+
+export function buildTodoRepairPrompt(
+  rawInput: string,
+  invalidOutput: string,
+  validationError: string,
+  goal?: string,
+): string {
+  const goalBlock = todoGoalPromptBlock(goal);
+  return `Your previous response was not valid Pi Long Task TODO markdown. Correct it now.\n\nValidation/extraction error:\n${validationError.trim() || "Unknown validation error."}\n\nRequirements:\n- Output only corrected markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n${goalBlock}\nOriginal raw input:\n\n${rawInput.trim()}\n\nPrevious invalid output:\n\n${invalidOutput.trim()}\n`;
+}
+
+function todoGoalPromptBlock(goal: string | undefined): string {
+  const trimmed = goal?.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const coverageGoal = parseCoverageGoal(trimmed);
+  const coverageBlock = coverageGoal
+    ? `\nCoverage goal requirements:\n- Include global instructions that tell workers to ${coverageGoalAction(coverageGoal)}\n- Include verification guidance that tells workers to ${coverageGoalVerification(coverageGoal)}\n- Do not hardcode a fixed coverage threshold; use the requested threshold (${coverageGoal.thresholdText}%).\n`
+    : "";
+  return `\nOverall goal:\n\n${trimmed}\n${coverageBlock}`;
 }
 
 export function extractAndValidateTodoMarkdown(assistantText: string): string {

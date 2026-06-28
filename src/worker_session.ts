@@ -1,3 +1,4 @@
+import { coverageGoalAction, coverageGoalVerification, parseCoverageGoal } from "./coverage_goal.ts";
 import { hasTaskResult, hasTaskResultStatus, isDoneStatus, parseReportedStatus } from "./result_writer.ts";
 import type { Task } from "./todo_parser.ts";
 
@@ -8,6 +9,7 @@ export interface WorkerTaskPromptOptions {
   commitRequested: boolean;
   previousAttempts?: string;
   globalInstructions?: string;
+  goal?: string;
   maxBashTimeoutSeconds: number;
 }
 
@@ -22,7 +24,7 @@ export function taskLabel(task: Pick<Task, "taskId" | "title">): string {
 
 export function buildTaskPrompt(options: WorkerTaskPromptOptions): string {
   const commitText = options.commitRequested
-    ? "Pi Long Task will commit after your session if needed. Do not run git commit."
+    ? "Commit mode is enabled: complete your assigned work and report status accurately; Pi Long Task will commit eligible completed work after your session if needed. Do not run git commit."
     : "Do not run git commit. Pi Long Task was started with commits disabled.";
 
   const previousAttempts = (options.previousAttempts || "").trim();
@@ -47,11 +49,30 @@ ${globalInstructions}
 `
     : "";
 
+  const goal = (options.goal || "").trim();
+  const coverageGoal = parseCoverageGoal(goal);
+  const coverageGoalText = coverageGoal
+    ? `
+
+Coverage goal guidance:
+- ${coverageGoalAction(coverageGoal)}
+- ${coverageGoalVerification(coverageGoal)} Prefer the project-specific coverage script when available (for example, \`npm run test:coverage\`, \`npm run coverage\`, or \`npm test -- --coverage\`).`
+    : "";
+  const goalText = goal
+    ? `
+
+Long task goal:
+
+\`\`\`text
+${goal}
+\`\`\`${coverageGoalText}`
+    : "";
+
   return `You are one Pi SDK worker session assigned to exactly one TODO task.
 
 Assigned TODO file path: \`${options.todoPath}\`
 Assigned task: \`${taskLabel(options.task)}\`
-Attempt: ${options.attempt}
+Attempt: ${options.attempt}${goalText}
 
 Rules:
 - Work only on the assigned task below. Do not start or fix other TODO tasks.

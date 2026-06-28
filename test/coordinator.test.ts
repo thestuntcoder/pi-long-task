@@ -48,9 +48,14 @@ function assertProgressStatuses(
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-long-task-test-"));
 try {
-  const calls: Array<{ taskId: string; attempt: number; previousAttempts?: string }> = [];
+  const calls: Array<{ taskId: string; attempt: number; previousAttempts?: string; goal?: string }> = [];
   const sequentialWorker: WorkerRunner = async (options) => {
-    calls.push({ taskId: options.task.taskId, attempt: options.attempt, previousAttempts: options.previousAttempts });
+    calls.push({
+      taskId: options.task.taskId,
+      attempt: options.attempt,
+      previousAttempts: options.previousAttempts,
+      goal: options.goal,
+    });
     return outcomeFor(options, "done");
   };
 
@@ -97,6 +102,11 @@ try {
     ["2", "completed", "past"],
   ]);
   assert.equal(sequential.status, "done");
+  assert.equal(sequential.goal, undefined);
+  assert.equal(
+    progressUpdates.every((update) => update.goal === undefined),
+    true,
+  );
   assert.equal(sequential.totalTasks, 2);
   assert.equal(sequential.completedTasks, 2);
   assert.equal(sequential.attemptedTasks, 2);
@@ -112,6 +122,10 @@ try {
   assert.deepEqual(
     calls.map((call) => `${call.taskId}:${call.attempt}`),
     ["1:1", "2:1"],
+  );
+  assert.deepEqual(
+    calls.map((call) => call.goal),
+    [undefined, undefined],
   );
   const sequentialTodo = await readFile(sequential.todoPath, "utf8");
   assert.deepEqual(
@@ -200,6 +214,50 @@ try {
   assert.equal(plannerAbortSignal, undefined);
   assert.equal(planned.status, "done");
   assert.equal(planned.completedTasks, 1);
+
+  const goalProgressUpdates: CoordinatorProgressUpdate[] = [];
+  let goalPlannerGoal: string | undefined;
+  const goalWorkerGoals: Array<string | undefined> = [];
+  const goalRun = await runCoordinator({
+    inputText: "Build a checkout recovery flow from an unstructured paragraph.",
+    commit: false,
+    goal: " Ship a reliable checkout recovery experience. ",
+    cwd: tempRoot,
+    runId: "goal-propagation",
+    todoPlanner: async (options) => {
+      goalPlannerGoal = options.goal;
+      return generatedTodoMarkdown(["Goal-aware planned task"]);
+    },
+    workerRunner: async (options) => {
+      goalWorkerGoals.push(options.goal);
+      return outcomeFor(options, "done");
+    },
+    onProgress: (update) => goalProgressUpdates.push(update),
+  });
+  assert.equal(goalRun.status, "done");
+  assert.equal(goalRun.goal, "Ship a reliable checkout recovery experience.");
+  assert.equal(goalPlannerGoal, "Ship a reliable checkout recovery experience.");
+  assert.deepEqual(goalWorkerGoals, ["Ship a reliable checkout recovery experience."]);
+  assert.equal(
+    goalProgressUpdates.every((update) => update.goal === "Ship a reliable checkout recovery experience."),
+    true,
+  );
+
+  let missingInputTextPlannerInput: string | undefined;
+  const missingInputTextRun = await runCoordinator({
+    commit: false,
+    goal: "have testing line coverage above 80%",
+    cwd: tempRoot,
+    runId: "missing-input-text",
+    todoPlanner: async (options) => {
+      missingInputTextPlannerInput = options.inputText;
+      return generatedTodoMarkdown(["Raise coverage"]);
+    },
+    workerRunner: sequentialWorker,
+  });
+  assert.equal(missingInputTextRun.status, "done");
+  assert.equal(missingInputTextRun.goal, "have testing line coverage above 80%");
+  assert.equal(missingInputTextPlannerInput, "have testing line coverage above 80%");
 
   const repairPlannerInputs: string[] = [];
   const repairPlannerRun = await runCoordinator({

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  applyGoalInstructionsToTodoMarkdown,
   buildTodoCreationPrompt,
   extractTodoMarkdown,
   generatedTodoMarkdown,
@@ -69,6 +70,25 @@ assert.match(prompt, /\*\*Status:\*\*/);
 assert.match(prompt, /\*\*Verify:\*\*/);
 assert.match(prompt, /\*\*Done when:\*\*/);
 assert.match(prompt, /Build a long-task runner/);
+assert.doesNotMatch(prompt, /Overall goal:/);
+
+const promptWithGoal = buildTodoCreationPrompt(rawParagraph, "Deliver a production-ready long-task runner.");
+assert.match(promptWithGoal, /Overall goal:\n\nDeliver a production-ready long-task runner\./);
+assert.match(promptWithGoal, /Raw input:\n\nBuild a long-task runner/);
+
+const promptWithCoverageGoal = buildTodoCreationPrompt(rawParagraph, "have testing line coverage above 80%");
+assert.match(promptWithCoverageGoal, /Coverage goal requirements:/);
+assert.match(promptWithCoverageGoal, /Raise or maintain testing line coverage above 80%\./);
+assert.match(promptWithCoverageGoal, /confirm line coverage is above 80%/);
+
+const generatedWithCoverageGoal = applyGoalInstructionsToTodoMarkdown(
+  generatedTodoMarkdown(["Add parser tests", "Document coverage workflow"]),
+  "have testing line coverage above 80%",
+);
+assert.match(generatedWithCoverageGoal, /- Long task goal: have testing line coverage above 80%/);
+assert.match(generatedWithCoverageGoal, /- Coverage goal: Raise or maintain testing line coverage above 80%\./);
+assert.equal((generatedWithCoverageGoal.match(/confirm line coverage is above 80%/g) ?? []).length, 3);
+validateTodoMarkdown(generatedWithCoverageGoal);
 
 const generated = generatedTodoMarkdown(["First task", "Second task"]);
 assert.equal(extractTodoMarkdown(`Here is the plan:\n\n\`\`\`markdown\n${generated}\`\`\``), generated);

@@ -41,15 +41,41 @@ assert.match(prompt, /You are one Pi SDK worker session assigned to exactly one 
 assert.match(prompt, /Assigned TODO file path: `\/tmp\/TODO.md`/);
 assert.match(prompt, /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
 assert.match(prompt, /Attempt: 2/);
-assert.match(prompt, /Pi Long Task will commit after your session if needed\. Do not run git commit\./);
+assert.match(prompt, /Commit mode is enabled:/);
+assert.match(prompt, /Pi Long Task will commit eligible completed work after your session if needed\./);
+assert.match(prompt, /Do not run git commit\./);
 assert.match(prompt, /Global instructions from the TODO file apply to this task:/);
 assert.match(prompt, /```markdown\nGlobal guardrail\.\n```/);
 assert.match(prompt, /Assigned task content only:/);
 assert.match(prompt, /Previous attempts for this same assigned task/);
 assert.match(prompt, /Do not run bash commands with timeout greater than 300 seconds/);
+assert.doesNotMatch(prompt, /Long task goal:/);
 assert.ok(
   prompt.endsWith("Only use `status: done` if the assigned task is fully complete and verified as far as practical."),
 );
+
+const goalPrompt = buildTaskPrompt({
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  goal: "Ship a reliable parser migration.",
+  maxBashTimeoutSeconds: 120,
+});
+assert.match(goalPrompt, /Attempt: 1\n\nLong task goal:/);
+assert.match(goalPrompt, /```text\nShip a reliable parser migration\.\n```/);
+
+const coverageGoalPrompt = buildTaskPrompt({
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  goal: "have testing line coverage above 80%",
+  maxBashTimeoutSeconds: 120,
+});
+assert.match(coverageGoalPrompt, /Coverage goal guidance:/);
+assert.match(coverageGoalPrompt, /Raise or maintain testing line coverage above 80%\./);
+assert.match(coverageGoalPrompt, /confirm line coverage is above 80%; report the command and resulting line coverage/);
 
 const noCommitPrompt = buildTaskPrompt({
   todoPath: "/tmp/TODO.md",
@@ -59,6 +85,7 @@ const noCommitPrompt = buildTaskPrompt({
   maxBashTimeoutSeconds: 120,
 });
 assert.match(noCommitPrompt, /Do not run git commit\. Pi Long Task was started with commits disabled\./);
+assert.doesNotMatch(noCommitPrompt, /Commit mode is enabled/);
 assert.doesNotMatch(noCommitPrompt, /Previous attempts for this same assigned task/);
 
 assert.equal(

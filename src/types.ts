@@ -6,13 +6,21 @@ import type { SessionOutcome } from "./worker_session.ts";
 
 export const PiLongTaskParams = Type.Object(
   {
-    inputText: Type.String({
-      description: "TODO file content or the user's long-task instructions to process.",
-    }),
+    inputText: Type.Optional(
+      Type.String({
+        description:
+          "Optional TODO file content or the user's long-task instructions to process. Natural-language routing parses commit and goal separately.",
+      }),
+    ),
     commit: Type.Boolean({
       description:
         "Whether Pi Long Task may commit completed worker changes. Use true when the user asks for commits or committing as work progresses; otherwise use false.",
     }),
+    goal: Type.Optional(
+      Type.String({
+        description: "Optional high-level goal or desired outcome for the long-task run.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -64,5 +72,6 @@ export interface PiLongTaskResult {
   taskProgress: TaskProgressModel;
   workerCostTotal: number;
   commit: boolean;
+  goal?: string;
   error?: string;
 }

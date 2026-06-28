@@ -15,6 +15,7 @@ import { runGuardedSessionPrompt } from "./session_guard.ts";
 import { parseWorkerRuntimeConfig } from "./worker_config.ts";
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
+  applyGoalInstructionsToTodoMarkdown,
   buildTodoCreationPrompt,
   buildTodoRepairPrompt,
   extractAndValidateTodoMarkdown,
@@ -98,6 +99,7 @@ export interface CoordinatorProgressUpdate {
   isError?: boolean;
   totalTasks?: number;
   workerCostTotal: number;
+  goal?: string;
   currentTask?: CoordinatorProgressTask;
   subtasks?: CoordinatorProgressSubtask[];
   taskProgress?: TaskProgressModel;
@@ -142,6 +144,7 @@ export interface TodoPlannerOptions {
   gracefulShutdownMs?: number;
   sessionFactory?: WorkerSessionFactory;
   onDiagnostic?: PlannerDiagnosticHandler;
+  goal?: string;
 }
 
 export interface TaskAttemptSummary {
@@ -177,6 +180,7 @@ export interface CoordinatorResult {
   taskProgress: TaskProgressModel;
   workerCostTotal: number;
   commit: boolean;
+  goal?: string;
   error?: string;
 }
 
@@ -198,6 +202,7 @@ interface RuntimeOptions {
   maxBashTimeoutSeconds: number;
   workerModel?: unknown;
   workerModelName?: string;
+  goal?: string;
   taskThinking: string;
   todoThinking: string;
   todoTimeoutMs: number;
@@ -215,6 +220,7 @@ interface RuntimeOptions {
 
 export async function runCoordinator(options: RunCoordinatorOptions): Promise<CoordinatorResult> {
   const runtime = buildRuntimeOptions(options);
+  const inputText = coordinatorInputText(options);
   const attempts: TaskAttemptSummary[] = [];
   const outcomes: SessionOutcome[] = [];
   const commits: CoordinatorCommitSummary[] = [];
@@ -225,7 +231,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
 
   try {
     emitProgress(runtime, "Creating TODO plan...", { phase: "planning" });
-    let todoMarkdown = await generateOrNormalizeTodoMarkdown(options.inputText, runtime);
+    let todoMarkdown = await generateOrNormalizeTodoMarkdown(inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
     planningComplete = true;
     await writeFile(runtime.todoPath, todoMarkdown, "utf8");
@@ -274,6 +280,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         commitRequested: options.commit,
         previousAttempts: previousAttempts.get(nextTask.taskId)?.join("\n\n---\n\n"),
         globalInstructions: todoGlobalInstructions(todoMarkdown),
+        goal: runtime.goal,
         maxBashTimeoutSeconds: runtime.maxBashTimeoutSeconds,
         taskTimeoutSeconds: runtime.taskTimeoutSeconds,
         model: runtime.workerModel,
@@ -397,6 +404,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       taskProgress,
       workerCostTotal: runtime.workerCostState.total,
       commit: options.commit,
+      goal: runtime.goal,
       error: failure,
     };
     result.message = formatCoordinatorResultMessage(result);
@@ -446,6 +454,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
       workerCostTotal: runtime.workerCostState.total,
       commit: options.commit,
+      goal: runtime.goal,
       error: resultError,
     };
     result.message = formatCoordinatorResultMessage(result);
@@ -459,16 +468,17 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
 }
 
 async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: RuntimeOptions): Promise<string> {
-  const local = todoMarkdownFromString(inputText);
+  const local = todoMarkdownFromString(inputText, runtime.goal);
   if (local) {
     return local;
   }
 
   const plannerText = await requestTodoPlan(inputText, runtime);
-  return extractTodoMarkdownWithOneRepair(
+  const planned = await extractTodoMarkdownWithOneRepair(
     inputText,
     plannerText,
     (repairPrompt) => requestTodoPlan(repairPrompt, runtime),
+    runtime.goal,
     {
       onInvalidOutput: (validationError) =>
         recordPlannerDiagnostic(runtime, {
@@ -487,6 +497,7 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
         }),
     },
   );
+  return applyGoalInstructionsToTodoMarkdown(planned, runtime.goal);
 }
 
 interface TodoExtractionRepairHooks {
@@ -499,6 +510,7 @@ async function extractTodoMarkdownWithOneRepair(
   inputText: string,
   plannerText: string,
   requestRepair: (repairPrompt: string) => Promise<string>,
+  goal?: string,
   hooks: TodoExtractionRepairHooks = {},
 ): Promise<string> {
   try {
@@ -507,7 +519,7 @@ async function extractTodoMarkdownWithOneRepair(
     const validationError = errorMessage(error);
     hooks.onInvalidOutput?.(validationError);
     hooks.onRepairAttempt?.(validationError);
-    const repairText = await requestRepair(buildTodoRepairPrompt(inputText, plannerText, validationError));
+    const repairText = await requestRepair(buildTodoRepairPrompt(inputText, plannerText, validationError, goal));
     try {
       return extractAndValidateTodoMarkdown(repairText);
     } catch (repairError) {
@@ -532,6 +544,7 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
     gracefulShutdownMs: runtime.todoGracefulShutdownMs,
     sessionFactory: runtime.todoSessionFactory,
     onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
+    goal: runtime.goal,
   });
 }
 
@@ -555,7 +568,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
   try {
     const plannerText = await runTodoPlannerPrompt({
       session,
-      prompt: buildTodoCreationPrompt(options.inputText),
+      prompt: buildTodoCreationPrompt(options.inputText, options.goal),
       abortSignal: options.abortSignal,
       timeoutMs,
       gracefulShutdownMs,
@@ -576,6 +589,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
           diagnostics: result.diagnostics,
           onDiagnostic: options.onDiagnostic,
         }),
+      options.goal,
       {
         onInvalidOutput: (validationError) =>
           options.onDiagnostic?.({
@@ -619,7 +633,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
   if (!plannerMarkdown) {
     throw new TodoGenerationError("TODO planner did not return valid TODO markdown.");
   }
-  return plannerMarkdown;
+  return applyGoalInstructionsToTodoMarkdown(plannerMarkdown, options.goal);
 }
 
 async function runTodoPlannerPrompt(options: {
@@ -692,7 +706,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const runId = sanitizeRunId(options.runId ?? defaultRunId(options.now?.() ?? new Date()));
   const runDir = path.join(cwd, "tmp", "pi-long-task", runId);
-  const parsedWorkerConfig = parseWorkerRuntimeConfig(options.inputText);
+  const parsedWorkerConfig = parseWorkerRuntimeConfig(options.inputText ?? "");
   const configuredAttempts = options.maxAttemptsPerTask ?? parsedWorkerConfig.maxAttemptsPerTask;
   const configuredTaskTimeoutMs = options.taskTimeoutMs ?? parsedWorkerConfig.taskTimeoutMs;
   const configuredTodoTimeoutMs = options.todoTimeoutMs;
@@ -700,6 +714,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const configuredMaxBashTimeoutMs = options.maxBashTimeoutMs ?? parsedWorkerConfig.maxBashTimeoutMs;
   const workerModelName = options.workerModelName ?? parsedWorkerConfig.modelName;
   const workerModel = workerModelName ? undefined : options.workerModel;
+  const goal = normalizeOptionalText(options.goal);
 
   return {
     cwd,
@@ -718,6 +733,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
       positiveMilliseconds(configuredMaxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
     workerModel,
     workerModelName,
+    goal,
     taskThinking: options.taskThinking ?? DEFAULT_COORDINATOR_OPTIONS.taskThinking,
     todoThinking: options.todoThinking ?? DEFAULT_COORDINATOR_OPTIONS.todoThinking,
     workerRunner: options.workerRunner ?? runWorkerTask,
@@ -744,6 +760,7 @@ function emitProgress(
     resultPath: runtime.taskResultPath,
     workerCostTotal: runtime.workerCostState.total,
     ...update,
+    goal: runtime.goal,
   });
 }
 
@@ -1151,6 +1168,15 @@ function defaultRunId(now: Date): string {
 function sanitizeRunId(runId: string): string {
   const sanitized = runId.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
   return sanitized || defaultRunId(new Date());
+}
+
+function normalizeOptionalText(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function coordinatorInputText(options: RunCoordinatorOptions): string {
+  return normalizeOptionalText(options.inputText) ?? normalizeOptionalText(options.goal) ?? "";
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
