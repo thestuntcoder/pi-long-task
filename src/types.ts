@@ -40,25 +40,26 @@ export const PiGoalTaskParams = Type.Object(
     maxIterations: Type.Optional(
       Type.Integer({
         minimum: 1,
-        description: "Maximum number of generate → execute → review iterations before stopping.",
+        description: "Maximum number of generate → execute → review iterations before stopping. Defaults to 50.",
       }),
     ),
     timeoutMs: Type.Optional(
       Type.Integer({
         minimum: 1,
-        description: "Overall goal-loop timeout in milliseconds.",
+        description: "Overall goal-loop timeout in milliseconds. Defaults to 172800000 (48 hours).",
       }),
     ),
     iterationTimeoutMs: Type.Optional(
       Type.Integer({
         minimum: 1,
-        description: "Timeout budget in milliseconds for each generated TODO worker iteration.",
+        description:
+          "Timeout budget in milliseconds for each generated TODO worker iteration. Defaults to 10800000 (3 hours).",
       }),
     ),
     reviewerTimeoutMs: Type.Optional(
       Type.Integer({
         minimum: 1,
-        description: "Timeout budget in milliseconds for each reviewer session.",
+        description: "Timeout budget in milliseconds for each reviewer session. Defaults to 1800000 (30 minutes).",
       }),
     ),
     maxAttemptsPerTask: Type.Optional(

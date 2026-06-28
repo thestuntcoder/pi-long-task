@@ -21,10 +21,10 @@ const baseTime = new Date("2026-06-25T08:00:00.000Z");
 assert.deepEqual(normalizeGoalLoopLimits({ maxIterations: 2, timeoutMs: 1000 }), {
   maxIterations: 2,
   timeoutMs: 1000,
-  iterationTimeoutMs: 900_000,
-  reviewerTimeoutMs: 300_000,
+  iterationTimeoutMs: 10_800_000,
+  reviewerTimeoutMs: 1_800_000,
 });
-assert.deepEqual(normalizeGoalLoopLimits({ maxIterations: 0, timeoutMs: -1 }).maxIterations, 5);
+assert.deepEqual(normalizeGoalLoopLimits({ maxIterations: 0, timeoutMs: -1 }).maxIterations, 50);
 
 let state = createGoalLoopState({
   goal: "Ship the feature safely",

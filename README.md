@@ -280,6 +280,24 @@ Use `pi_goal_task` when you have a high-level outcome instead of a ready TODO pl
 Use pi_goal_task with goal "modernize the settings page, add tests, and update docs" and commit true.
 ```
 
+Goal loops default to `commit true`, `maxIterations 50`, a 48-hour total timeout, 3 hours per implementation iteration, and 30 minutes per reviewer pass. Override limits when you want a larger or smaller loop.
+
+Examples:
+
+```text
+Run a goal task with commits for goal: build a full Slack alternative chat app focused on speed.
+```
+
+```text
+Use pi_goal_task with goal "build a full Slack alternative chat app focused on speed" and commit true and maxIterations 100.
+```
+
+```text
+Use pi_goal_task with goal "ship a polished analytics dashboard with onboarding, tests, docs, and launch notes" and commit false and maxIterations 20.
+```
+
+For broad software-product goals like the Slack example, `pi_goal_task` first creates a software/product specification, then generates implementation TODOs from that spec, runs them, reviews completion, and repeats until the spec is complete or safety limits stop the loop.
+
 ### Discovery for vague software goals
 
 When a `pi_goal_task` goal is vague, such as a short product direction or broad feature idea, the goal loop first runs software-focused discovery before implementation TODOs are generated. Discovery turns the original goal into a persisted product definition and definition-of-done so implementation workers do not have to guess the scope.
@@ -317,10 +335,10 @@ Goal-loop artifacts are stored under `tmp/pi-goal-task/<goal-run-id>/`, includin
 
 Safety controls:
 
-- `maxIterations` stops retry loops when the reviewer keeps finding remaining work.
-- `timeoutMs` caps the overall goal loop.
-- `iterationTimeoutMs` caps each generated TODO worker iteration.
-- `reviewerTimeoutMs` caps each reviewer session.
+- `maxIterations` stops retry loops when the reviewer keeps finding remaining work; default is `50`.
+- `timeoutMs` caps the overall goal loop; default is `172800000` ms (48 hours).
+- `iterationTimeoutMs` caps each generated TODO worker iteration; default is `10800000` ms (3 hours).
+- `reviewerTimeoutMs` caps each reviewer session; default is `1800000` ms (30 minutes).
 - tool cancellation is passed through and stops the loop with `cancelled` status.
 - `maxAttemptsPerTask` and `maxBashTimeoutMs` are forwarded to worker long-task runs.
 - `commit` controls whether implementation workers may commit; goal loops default to `commit true`, so pass `commit false` when you want to review all changes first.
@@ -357,6 +375,16 @@ Safety controls:
 ```
 
 Use `pi_goal_task` for iterative goal completion. Vague `pi_goal_task` goals enter discovery and persist `GOAL_SPEC.json`; already concrete goals keep the direct implementation path. Use `pi_long_task` when you already have a concrete request or TODO markdown and want one planned long-task run.
+
+Example explicit goal-task calls:
+
+```text
+Use pi_goal_task with goal "build a full Slack alternative chat app focused on speed" and commit true.
+```
+
+```text
+Use pi_goal_task with goal "build a full Slack alternative chat app focused on speed" and commit true and maxIterations 100 and timeoutMs 172800000.
+```
 
 For natural-language requests, Pi Long Task routes phrases like "run a long task with commits" to the tool with commits enabled. Phrases like "with goal to have testing line coverage above 80%" are parsed into the `goal` option. If you ask for a long task without mentioning commits, commits stay disabled.
 

@@ -5,10 +5,10 @@ import type { CoordinatorStatus } from "./types.ts";
 export const GOAL_LOOP_STATE_SCHEMA_VERSION = 1;
 
 export const DEFAULT_GOAL_LOOP_LIMITS = {
-  maxIterations: 5,
-  timeoutMs: 3_600_000,
-  iterationTimeoutMs: 900_000,
-  reviewerTimeoutMs: 300_000,
+  maxIterations: 50,
+  timeoutMs: 172_800_000,
+  iterationTimeoutMs: 10_800_000,
+  reviewerTimeoutMs: 1_800_000,
 } as const;
 
 export type GoalLoopStatus = "running" | "done" | "partial" | "blocked" | "failed" | "cancelled";

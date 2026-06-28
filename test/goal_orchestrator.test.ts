@@ -50,7 +50,7 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
     },
     reviewerRunner: async (options) => {
       reviewerPrompts.push(options.prompt);
-      assert.equal(options.timeoutMs, 300_000);
+      assert.equal(options.timeoutMs, 1_800_000);
       assert.match(options.prompt, /Original high-level goal/);
       assert.match(options.prompt, /Persisted goal specification \(primary review target\)/);
       assert.match(options.prompt, /persisted definition-of-done is satisfied/);
