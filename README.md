@@ -18,13 +18,15 @@ Use it when a coding request is bigger than one focused interaction. Pi Long Tas
 When you ask Pi to run a long task, Pi Long Task:
 
 1. Recognizes natural-language requests like "run a long task with commits" and routes them to `pi_long_task`.
-2. Creates or cleans up a TODO plan from your request. Natural-language planning uses a bounded planner session; if generated TODO markdown is invalid, Pi Long Task asks the planner to repair it once before failing the run.
+2. Creates or cleans up a TODO plan from your request, optionally guided by a high-level `goal`. Natural-language planning uses a bounded planner session; if generated TODO markdown is invalid, Pi Long Task asks the planner to repair it once before failing the run.
 3. Works through each unfinished TODO task in order using isolated worker sessions.
 4. Registers a Pi TUI sidebar/widget when UI support is available and updates it with the current task, inferred subtask progress, and full task timeline while the run is active.
 5. Retries unfinished tasks up to the configured attempt limit.
 6. Records progress, planner diagnostics, task artifacts, and final results under `tmp/pi-long-task/<run-id>/`.
 7. Returns a summary with completed, failed, blocked, and remaining task counts, plus worker spend when available.
 8. Optionally commits completed work after each task.
+
+For a large project goal, this means Pi Long Task turns the single broad request into structured TODO tasks first, then assigns each TODO to a worker session one at a time. For example, a hypothetical request to build a fast team chat app would become a plan of focused tasks instead of one giant all-at-once implementation; workers would complete or report on each task incrementally before the coordinator moves to the next task.
 
 During and after a run you get:
 
@@ -84,6 +86,12 @@ Run a long task with commits to implement the TODOs in @TODO.md.
 Run a long task with commits to refactor the checkout flow, update the tests, and commit each completed task.
 ```
 
+Request commits and a coverage target in the same natural-language prompt:
+
+```text
+Run a long task with commits with goal to have testing line coverage above 80%.
+```
+
 Run without commits when you want to review all changes yourself before committing:
 
 ```text
@@ -93,6 +101,100 @@ Run a long task without commits to add tests for the parser and fix any failures
 ```text
 Run a long task without commits to audit the README examples and leave the final diff uncommitted.
 ```
+
+### What "with commits" means
+
+When you ask for a long task "with commits," Pi Long Task may create a git commit after each TODO task that a worker completes with eligible changes. Each worker session is expected to stay focused on its assigned TODO only, so any commit reflects a specific slice of progress rather than the entire broad request.
+
+Those incremental commits preserve completed work between worker sessions, make it easier to review what changed for each task, and provide clear checkpoints if a later task is blocked or needs another attempt.
+
+### Scope expectations for broad product goals
+
+A hypothetical request like "run a long task with commits to build a fast Slack alternative" is too large and vague to finish as one instant product build. Pi Long Task would first turn that broad goal into a realistic plan, often centered on an MVP rather than every feature of a full Slack replacement.
+
+The generated plan would break the work into focused areas such as authentication, workspace/channel data, message creation and history, realtime sync, persistence, UI screens, tests, and deployment or configuration follow-up. Each area would become one or more TODO tasks assigned to separate worker sessions, with incremental verification and optional commits along the way.
+
+The initial result should be expected to be a structured TODO plan, MVP-oriented breakdown, or first narrow implementation slice. A complete production-ready team chat product would require many focused tasks and repeated progress checks, not a single vague prompt completing everything immediately.
+
+## How to run a Long Task
+
+### 1. Prepare the work request
+
+Pi Long Task can plan from a plain-language request or from pasted TODO markdown. If you write the TODO markdown yourself, use this structure:
+
+```markdown
+# Pi Long Task TODO
+
+Global instructions:
+
+- Keep any rule that applies to every task here.
+
+## Progress
+
+- [ ] TODO 1 — First focused task
+- [ ] TODO 2 — Second focused task
+
+---
+
+## TODO 1 — First focused task
+
+**Goal:** Explain the outcome for this task.
+
+**Status:**
+
+- [ ] Implement the first focused task
+
+**Verify:**
+
+- Run the focused check for this task.
+
+**Done when:**
+
+- The task is implemented and verified.
+
+## TODO 2 — Second focused task
+
+**Goal:** Explain the outcome for this task.
+
+**Status:**
+
+- [ ] Implement the second focused task
+
+**Verify:**
+
+- Run the focused check for this task.
+
+**Done when:**
+
+- The task is implemented and verified.
+```
+
+### 2. Start Pi in the target project
+
+Install or load the extension first, then run Pi from the repository you want to modify:
+
+```bash
+cd /path/to/your/project
+pi
+```
+
+In the Pi prompt, use natural language:
+
+```text
+Run a long task without commits to implement the TODOs in @TODO.md.
+```
+
+Or call the tool explicitly:
+
+```text
+Use pi_long_task with inputText "implement the TODOs in @TODO.md" and commit false.
+```
+
+Use `with commits` or `commit true` only when you want Pi Long Task to create eligible commits after completed tasks.
+
+### 3. Monitor progress and completion
+
+During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs one isolated worker session per unfinished TODO in order, and retries unfinished tasks up to the configured attempt limit. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
 
 ## What it looks like
 
@@ -152,27 +254,111 @@ Run with commits:
 Use pi_long_task with inputText "implement the TODOs in @TODO.md" and commit true.
 ```
 
+Run with an explicit high-level goal for the planner and worker prompts:
+
+```text
+Use pi_long_task with inputText "update the checkout TODOs" and commit false and goal "ship a reliable checkout recovery experience".
+```
+
+When a goal is enough context, `inputText` can be omitted:
+
+```text
+Use pi_long_task with commit true and goal "have testing line coverage above 80%".
+```
+
 Use a pasted TODO plan:
 
 ```text
 Use pi_long_task with inputText "<paste TODO markdown here>" and commit false.
 ```
 
+## Goal-oriented iterative loop
+
+Use `pi_goal_task` when you have a high-level outcome instead of a ready TODO plan and want Pi Long Task to keep iterating until a reviewer confirms the goal is complete.
+
+```text
+Use pi_goal_task with goal "modernize the settings page, add tests, and update docs" and commit true.
+```
+
+### Discovery for vague software goals
+
+When a `pi_goal_task` goal is vague, such as a short product direction or broad feature idea, the goal loop first runs software-focused discovery before implementation TODOs are generated. Discovery turns the original goal into a persisted product definition and definition-of-done so implementation workers do not have to guess the scope.
+
+Discovery uses role-based planning outputs from these supported roles:
+
+- Product Owner
+- Project Manager
+- Software Architect/Tech Lead
+- UX/UI Designer
+- QA/Reviewer
+- Marketing/Growth, when relevant for user-facing launch or adoption context
+
+The consolidated specification is saved as `GOAL_SPEC.json` under the goal run directory. It includes traceability to the original user goal, role-output summaries, in-scope and out-of-scope requirements, assumptions, open questions, milestones, acceptance criteria, verification gates, design constraints, product constraints, optional marketing/growth context, and a definition-of-done with required artifacts and notes.
+
+For vague goals, the loop runs as:
+
+1. accept the high-level `goal`
+2. classify the goal as vague and run discovery
+3. persist `GOAL_SPEC.json`
+4. generate implementation TODO markdown from the persisted specification
+5. run that generated TODO as a normal long task in an isolated worker session
+6. run a separate reviewer session that decides `complete`, `incomplete`, `blocked`, or `failed` against the persisted specification
+7. if the reviewer says `incomplete`, generate another TODO using previous review context plus the same persisted specification and repeat
+
+Implementation TODO generation treats the persisted specification as the source of truth. Generated tasks are instructed to cover relevant requirement, milestone, acceptance-criterion, verification-gate, constraint, and definition-of-done items, including spec IDs such as `REQ-*`, `MS-*`, `AC-*`, and `VG-*` where applicable. Reviewer sessions also load the persisted specification and use it as the primary review target; the original goal remains available for traceability, but vague wording alone is not the completion standard.
+
+### Concrete goals and compatibility
+
+When a `pi_goal_task` goal is already concrete, existing direct behavior is preserved: the loop skips discovery and generates implementation TODOs from the provided goal, previous iteration context, and reviewer feedback. Goals are generally considered concrete when they already include implementation details such as files or paths, specific commands/tests, explicit acceptance criteria, or enough detailed scope for direct TODO generation.
+
+`pi_long_task` behavior is unchanged. Discovery is only enabled by default for `pi_goal_task`; direct long-task planning, TODO normalization, worker execution, progress display, retries, artifacts, and commit behavior continue to work as before.
+
+Goal-loop artifacts are stored under `tmp/pi-goal-task/<goal-run-id>/`, including `GOAL_STATE.json`, `GOAL_TRACE.jsonl`, `GOAL_RESULT.md`, optional `GOAL_SPEC.json` for discovered goals, and per-iteration generated TODO, worker, and reviewer files. Child TODO execution still writes normal `tmp/pi-long-task/<run-id>/` artifacts.
+
+Safety controls:
+
+- `maxIterations` stops retry loops when the reviewer keeps finding remaining work.
+- `timeoutMs` caps the overall goal loop.
+- `iterationTimeoutMs` caps each generated TODO worker iteration.
+- `reviewerTimeoutMs` caps each reviewer session.
+- tool cancellation is passed through and stops the loop with `cancelled` status.
+- `maxAttemptsPerTask` and `maxBashTimeoutMs` are forwarded to worker long-task runs.
+- `commit` controls whether implementation workers may commit; goal loops default to `commit true`, so pass `commit false` when you want to review all changes first.
+
 ## Options
 
-The tool has two inputs:
+`pi_long_task` has one required input and two optional inputs:
 
 ```ts
 {
-  inputText: string;
   commit: boolean;
+  inputText?: string;
+  goal?: string;
 }
 ```
 
-- `inputText` is the request or TODO markdown to work on.
 - `commit` controls whether Pi Long Task may create git commits.
+- `inputText` optionally provides the request or TODO markdown to work on.
+- `goal` optionally provides a high-level desired outcome that is passed to TODO planning and worker task prompts. Coverage goals such as `have testing line coverage above 80%` add coverage-specific planning and verification guidance.
 
-For natural-language requests, Pi Long Task routes phrases like "run a long task with commits" to the tool with commits enabled. If you ask for a long task without mentioning commits, commits stay disabled.
+`pi_goal_task` accepts a high-level goal plus safety controls:
+
+```ts
+{
+  goal: string;
+  commit?: boolean;
+  maxIterations?: number;
+  timeoutMs?: number;
+  iterationTimeoutMs?: number;
+  reviewerTimeoutMs?: number;
+  maxAttemptsPerTask?: number;
+  maxBashTimeoutMs?: number;
+}
+```
+
+Use `pi_goal_task` for iterative goal completion. Vague `pi_goal_task` goals enter discovery and persist `GOAL_SPEC.json`; already concrete goals keep the direct implementation path. Use `pi_long_task` when you already have a concrete request or TODO markdown and want one planned long-task run.
+
+For natural-language requests, Pi Long Task routes phrases like "run a long task with commits" to the tool with commits enabled. Phrases like "with goal to have testing line coverage above 80%" are parsed into the `goal` option. If you ask for a long task without mentioning commits, commits stay disabled.
 
 Natural-language routing intentionally avoids informational questions, such as "How do I run a long task with commits?", and explicit tool calls are left unchanged.
 
