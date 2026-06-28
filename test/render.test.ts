@@ -117,6 +117,19 @@ const call = renderLongTaskToolCall(
 );
 assert.equal(renderText(call), 'pi_long_task commit:on "Create a marker file and verify it with cat."');
 
+const callWithGoal = renderLongTaskToolCall(
+  {
+    commit: false,
+    goal: "Ship the accessibility fixes.",
+    inputText: "Update the product pages.",
+  },
+  theme,
+);
+assert.equal(
+  renderText(callWithGoal),
+  'pi_long_task commit:off goal:"Ship the accessibility fixes." "Update the product pages."',
+);
+
 const progressWithTaskProgress = renderLongTaskToolResult(
   {
     content: [{ type: "text", text: "Running TODO 2 — Wire Sidebar Rendering..." }],

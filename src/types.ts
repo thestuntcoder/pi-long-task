@@ -25,7 +25,60 @@ export const PiLongTaskParams = Type.Object(
   { additionalProperties: false },
 );
 
+export const PiGoalTaskParams = Type.Object(
+  {
+    goal: Type.String({
+      description:
+        "High-level goal to achieve through repeated TODO generation, long-task execution, and reviewer iterations until complete or stopped by limits.",
+    }),
+    commit: Type.Optional(
+      Type.Boolean({
+        description:
+          "Whether worker long tasks may commit completed TODO work during the goal loop. Defaults to true for goal loops.",
+      }),
+    ),
+    maxIterations: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Maximum number of generate → execute → review iterations before stopping.",
+      }),
+    ),
+    timeoutMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Overall goal-loop timeout in milliseconds.",
+      }),
+    ),
+    iterationTimeoutMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Timeout budget in milliseconds for each generated TODO worker iteration.",
+      }),
+    ),
+    reviewerTimeoutMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Timeout budget in milliseconds for each reviewer session.",
+      }),
+    ),
+    maxAttemptsPerTask: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Maximum attempts for each TODO inside worker long-task runs.",
+      }),
+    ),
+    maxBashTimeoutMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Maximum bash command timeout in milliseconds allowed in worker sessions.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export type PiLongTaskInput = Static<typeof PiLongTaskParams>;
+export type PiGoalTaskInput = Static<typeof PiGoalTaskParams>;
 
 export type CoordinatorStatus = "done" | "partial" | "blocked" | "failed";
 

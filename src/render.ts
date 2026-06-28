@@ -1,6 +1,7 @@
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
 
+import type { GoalLoopState, GoalLoopStatus } from "./goal_loop.ts";
 import type { TaskProgressModel } from "./task_progress.ts";
 import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus } from "./types.ts";
 
@@ -18,6 +19,7 @@ export interface CoordinatorResultForRendering {
   remainingTasks?: CoordinatorRemainingTask[];
   taskProgress?: TaskProgressModel;
   workerCostTotal?: number;
+  goal?: string;
   error?: string;
 }
 
@@ -80,11 +82,16 @@ export function formatCoordinatorResultMessage(result: CoordinatorResultForRende
   return lines.join("\n");
 }
 
-export function renderLongTaskToolCall(args: { inputText?: string; commit?: boolean }, theme: Theme): Text {
+export function renderLongTaskToolCall(
+  args: { inputText?: string; commit?: boolean; goal?: string },
+  theme: Theme,
+): Text {
   const commit = args.commit ? theme.fg("warning", "commit:on") : theme.fg("dim", "commit:off");
   const input = oneLine(args.inputText ?? "");
+  const goal = oneLine(args.goal ?? "");
+  const goalPreview = goal ? ` ${theme.fg("muted", `goal:${quote(truncatePlain(goal, 48))}`)}` : "";
   const preview = input ? ` ${theme.fg("muted", quote(truncatePlain(input, 96)))}` : "";
-  return new Text(`${theme.fg("toolTitle", theme.bold("pi_long_task"))} ${commit}${preview}`, 0, 0);
+  return new Text(`${theme.fg("toolTitle", theme.bold("pi_long_task"))} ${commit}${goalPreview}${preview}`, 0, 0);
 }
 
 export function renderLongTaskToolResult(
@@ -103,6 +110,203 @@ export function renderLongTaskToolResult(
   }
 
   return new Text(renderLongTaskSummary(finalDetails, options.expanded, theme), 0, 0);
+}
+
+export interface GoalLoopResultForRendering {
+  state: GoalLoopState;
+  resultPath: string;
+  workerCostTotal: number;
+  reviewerCostTotal: number;
+  totalCost: number;
+}
+
+export interface GoalTaskToolRenderDetails {
+  goalRunId: string;
+  goal: string;
+  status: GoalLoopStatus;
+  currentIteration: number;
+  totalIterations: number;
+  maxIterations: number;
+  resultPath: string;
+  statePath?: string;
+  tracePath?: string;
+  workerCostTotal?: number;
+  reviewerCostTotal?: number;
+  totalCost?: number;
+  completionReason?: string;
+  latestReviewerDecision?: string;
+  remainingWork?: string[];
+  error?: string;
+}
+
+export function formatGoalLoopResultMessage(result: GoalLoopResultForRendering): string {
+  const state = result.state;
+  const lines = [
+    `Pi Goal Task: ${state.status}`,
+    `Goal: ${state.goal}`,
+    `Iterations: ${state.iterations.length}/${state.limits.maxIterations}`,
+    `Result file: ${result.resultPath}`,
+    `State file: ${state.goalRunDir}/GOAL_STATE.json`,
+  ];
+  if (state.completion?.reason) {
+    lines.push(`Outcome: ${state.completion.reason}`);
+  }
+  if (result.totalCost > 0) {
+    lines.push(`Worker/reviewer spend: ${formatCost(result.totalCost)}`);
+  }
+  const latestReview = [...state.iterations].reverse().find((iteration) => iteration.reviewerResult)?.reviewerResult;
+  if (latestReview) {
+    lines.push(`Latest review: ${latestReview.decision} — ${latestReview.summary}`);
+    if (latestReview.remainingWork.length > 0) {
+      lines.push("Remaining work:", ...latestReview.remainingWork.map((item) => `- ${item}`));
+    }
+  }
+  return lines.join("\n");
+}
+
+export function goalTaskDetailsFromResult(result: GoalLoopResultForRendering): GoalTaskToolRenderDetails {
+  const latestReview = [...result.state.iterations]
+    .reverse()
+    .find((iteration) => iteration.reviewerResult)?.reviewerResult;
+  return {
+    goalRunId: result.state.goalRunId,
+    goal: result.state.goal,
+    status: result.state.status,
+    currentIteration: result.state.currentIteration,
+    totalIterations: result.state.iterations.length,
+    maxIterations: result.state.limits.maxIterations,
+    resultPath: result.resultPath,
+    statePath: `${result.state.goalRunDir}/GOAL_STATE.json`,
+    tracePath: `${result.state.goalRunDir}/GOAL_TRACE.jsonl`,
+    workerCostTotal: result.workerCostTotal,
+    reviewerCostTotal: result.reviewerCostTotal,
+    totalCost: result.totalCost,
+    completionReason: result.state.completion?.reason,
+    latestReviewerDecision: latestReview?.decision,
+    remainingWork: latestReview?.remainingWork,
+  };
+}
+
+export function renderGoalTaskToolCall(
+  args: { goal?: string; commit?: boolean; maxIterations?: number; timeoutMs?: number; reviewerTimeoutMs?: number },
+  theme: Theme,
+): Text {
+  const commit = (args.commit ?? true) ? theme.fg("warning", "commit:on") : theme.fg("dim", "commit:off");
+  const goal = oneLine(args.goal ?? "");
+  const limits = [
+    args.maxIterations ? `max:${args.maxIterations}` : undefined,
+    args.timeoutMs ? `timeout:${args.timeoutMs}ms` : undefined,
+    args.reviewerTimeoutMs ? `review:${args.reviewerTimeoutMs}ms` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const limitPreview = limits ? ` ${theme.fg("muted", limits)}` : "";
+  const goalPreview = goal ? ` ${theme.fg("muted", quote(truncatePlain(goal, 80)))}` : "";
+  return new Text(`${theme.fg("toolTitle", theme.bold("pi_goal_task"))} ${commit}${limitPreview}${goalPreview}`, 0, 0);
+}
+
+export function renderGoalTaskToolResult(
+  result: AgentToolResult<unknown>,
+  options: ToolRenderResultOptions,
+  theme: Theme,
+): Component {
+  const details = recordOrUndefined(result.details);
+  if (options.isPartial) {
+    return new Text(renderGoalTaskProgress(details, contentText(result), theme), 0, 0);
+  }
+
+  const finalDetails = goalTaskDetails(details);
+  if (!finalDetails) {
+    return new Text(contentText(result), 0, 0);
+  }
+
+  return new Text(renderGoalTaskSummary(finalDetails, options.expanded, theme), 0, 0);
+}
+
+function renderGoalTaskProgress(details: Record<string, unknown> | undefined, fallback: string, theme: Theme): string {
+  const message = stringValue(details?.message) || firstLine(fallback) || "Pi Goal Task is running...";
+  const phase = stringValue(details?.phase);
+  const iteration = numberValue(details?.iteration) ?? numberValue(details?.currentIteration);
+  const maxIterations = numberValue(details?.maxIterations);
+  const status = stringValue(details?.status) || "running";
+  const cost = numberValue(details?.totalCost);
+  const meta = [
+    iteration ? `iteration ${iteration}${maxIterations ? `/${maxIterations}` : ""}` : undefined,
+    status,
+    cost && cost > 0 ? formatCost(cost) : undefined,
+  ]
+    .filter(Boolean)
+    .join(` ${theme.fg("dim", "·")} `);
+  const icon = phase === "complete" ? (status === "done" ? "✓" : "!") : "+";
+  const color = phase === "complete" ? statusColor(status) : "warning";
+  return `${theme.fg(color, icon)} ${theme.fg(color, "Pi Goal Task")}${meta ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", meta)}` : ""}\n  ${theme.fg("dim", message)}`;
+}
+
+function renderGoalTaskSummary(details: GoalTaskToolRenderDetails, expanded: boolean, theme: Theme): string {
+  const statusStyle = statusColor(details.status);
+  const icon =
+    details.status === "done" ? "✓" : details.status === "failed" ? "✗" : details.status === "cancelled" ? "×" : "!";
+  const summary = [
+    `${theme.fg(statusStyle, icon)} ${theme.fg("toolTitle", theme.bold("Pi Goal Task"))} ${theme.fg(statusStyle, details.status)}`,
+    theme.fg("muted", `${details.totalIterations}/${details.maxIterations} iterations`),
+    details.latestReviewerDecision ? theme.fg("muted", `review:${details.latestReviewerDecision}`) : undefined,
+    details.totalCost ? theme.fg("muted", `spend ${formatCost(details.totalCost)}`) : undefined,
+  ].filter(Boolean);
+
+  if (!expanded) {
+    return summary.join(" — ");
+  }
+
+  const lines = [summary.join(" — "), theme.fg("muted", details.goal)];
+  if (details.completionReason) {
+    lines.push(theme.fg("dim", `Outcome: ${details.completionReason}`));
+  }
+  lines.push(theme.fg("dim", `Result: ${details.resultPath}`));
+  if (details.statePath) {
+    lines.push(theme.fg("dim", `State: ${details.statePath}`));
+  }
+  if (details.tracePath) {
+    lines.push(theme.fg("dim", `Trace: ${details.tracePath}`));
+  }
+  const remaining = details.remainingWork ?? [];
+  if (remaining.length > 0) {
+    lines.push(theme.fg("muted", "Remaining work:"), ...remaining.map((item) => theme.fg("dim", `- ${item}`)));
+  }
+  if (details.error) {
+    lines.push(theme.fg("error", `Error: ${details.error}`));
+  }
+  return lines.join("\n");
+}
+
+function goalTaskDetails(details: Record<string, unknown> | undefined): GoalTaskToolRenderDetails | undefined {
+  if (!details) {
+    return undefined;
+  }
+  const goalRunId = stringValue(details.goalRunId);
+  const goal = stringValue(details.goal);
+  const status = goalLoopStatus(details.status);
+  const resultPath = stringValue(details.resultPath);
+  if (!goalRunId || !goal || !status || !resultPath) {
+    return undefined;
+  }
+  return {
+    goalRunId,
+    goal,
+    status,
+    currentIteration: numberValue(details.currentIteration) ?? 0,
+    totalIterations: numberValue(details.totalIterations) ?? 0,
+    maxIterations: numberValue(details.maxIterations) ?? 0,
+    resultPath,
+    statePath: stringValue(details.statePath),
+    tracePath: stringValue(details.tracePath),
+    workerCostTotal: numberValue(details.workerCostTotal),
+    reviewerCostTotal: numberValue(details.reviewerCostTotal),
+    totalCost: numberValue(details.totalCost),
+    completionReason: stringValue(details.completionReason),
+    latestReviewerDecision: stringValue(details.latestReviewerDecision),
+    remainingWork: stringArray(details.remainingWork),
+    error: stringValue(details.error),
+  };
 }
 
 function renderLongTaskProgress(details: Record<string, unknown> | undefined, fallback: string, theme: Theme): string {
@@ -422,11 +626,11 @@ function remainingTaskSummaries(value: unknown): CoordinatorRemainingTask[] {
   });
 }
 
-function statusColor(status: CoordinatorStatus): "success" | "warning" | "error" {
+function statusColor(status: CoordinatorStatus | GoalLoopStatus | string): "success" | "warning" | "error" {
   if (status === "done") {
     return "success";
   }
-  if (status === "failed") {
+  if (status === "failed" || status === "cancelled") {
     return "error";
   }
   return "warning";
@@ -434,6 +638,17 @@ function statusColor(status: CoordinatorStatus): "success" | "warning" | "error"
 
 function isCoordinatorStatus(value: string): value is CoordinatorStatus {
   return value === "done" || value === "partial" || value === "blocked" || value === "failed";
+}
+
+function goalLoopStatus(value: unknown): GoalLoopStatus | undefined {
+  return value === "running" ||
+    value === "done" ||
+    value === "partial" ||
+    value === "blocked" ||
+    value === "failed" ||
+    value === "cancelled"
+    ? value
+    : undefined;
 }
 
 function contentText(result: AgentToolResult<unknown>): string {
@@ -473,6 +688,10 @@ function numberValue(value: unknown): number | undefined {
 
 function nonNegativeNumberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function formatCost(value: number): string {

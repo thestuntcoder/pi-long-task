@@ -3,9 +3,17 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
 import { runCoordinator, type CoordinatorProgressUpdate, type CoordinatorResult } from "./coordinator.ts";
+import { runGoalLoop, type GoalLoopProgressUpdate, type GoalLoopRunResult } from "./goal_orchestrator.ts";
 import { longTaskInputTransform } from "./input_router.ts";
-import { renderLongTaskToolCall, renderLongTaskToolResult } from "./render.ts";
-import { PiLongTaskParams } from "./types.ts";
+import {
+  formatGoalLoopResultMessage,
+  goalTaskDetailsFromResult,
+  renderGoalTaskToolCall,
+  renderGoalTaskToolResult,
+  renderLongTaskToolCall,
+  renderLongTaskToolResult,
+} from "./render.ts";
+import { PiGoalTaskParams, PiLongTaskParams } from "./types.ts";
 
 export function createWorkerCostAccumulator() {
   let pendingWorkerCostTotal = 0;
@@ -72,8 +80,33 @@ function toolDetails(result: CoordinatorResult) {
     taskProgress: result.taskProgress,
     workerCostTotal: result.workerCostTotal,
     summary: result.summary,
+    goal: result.goal,
     error: result.error,
   };
+}
+
+function goalLoopCostTotals(result: GoalLoopRunResult): {
+  workerCostTotal: number;
+  reviewerCostTotal: number;
+  totalCost: number;
+} {
+  const workerCostTotal = sumFinite([
+    ...result.generationResults.map((item) => item.childResult.workerCostTotal),
+    ...result.executionResults.map((item) => item.childResult.workerCostTotal),
+  ]);
+  const reviewerCostTotal = sumFinite(result.reviewResults.map((item) => item.sessionResult.reviewerCostTotal));
+  return { workerCostTotal, reviewerCostTotal, totalCost: workerCostTotal + reviewerCostTotal };
+}
+
+function goalToolDetails(result: GoalLoopRunResult) {
+  return goalTaskDetailsFromResult({ ...result, ...goalLoopCostTotals(result) });
+}
+
+function sumFinite(values: Array<number | undefined>): number {
+  return values.reduce<number>(
+    (total, value) => total + (typeof value === "number" && Number.isFinite(value) ? value : 0),
+    0,
+  );
 }
 
 const LONG_TASK_WIDGET_KEY = "pi-long-task-sidebar";
@@ -756,6 +789,60 @@ export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
             },
           ],
           details: toolDetails(result),
+        };
+      } finally {
+        sidebar?.close();
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "pi_goal_task",
+    label: "Pi Goal Task",
+    description:
+      "Run a goal-oriented long-task loop: generate TODO markdown from a high-level goal, execute it, review goal completion, and repeat until complete, cancelled, timed out, or max iterations is reached. Pass the tool cancellation signal to stop the loop.",
+    parameters: PiGoalTaskParams,
+    renderCall: renderGoalTaskToolCall,
+    renderResult: renderGoalTaskToolResult,
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const sidebar = createLongTaskSidebarController(ctx);
+      const publishGoalProgress = (update: GoalLoopProgressUpdate) => {
+        onUpdate?.({
+          content: [
+            {
+              type: "text" as const,
+              text: update.message,
+            },
+          ],
+          details: update,
+        });
+      };
+      const publishWorkerProgress = (update: CoordinatorProgressUpdate) => {
+        sidebar?.update(update);
+      };
+
+      try {
+        const result = await runGoalLoop({
+          ...params,
+          commit: params.commit ?? true,
+          cwd: ctx?.cwd,
+          model: ctx?.model,
+          abortSignal: signal,
+          onProgress: publishGoalProgress,
+          onWorkerProgress: publishWorkerProgress,
+        });
+        const costs = goalLoopCostTotals(result);
+        workerCostAccumulator.add(costs.totalCost);
+        const message = formatGoalLoopResultMessage({ ...result, ...costs });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: message,
+            },
+          ],
+          details: goalToolDetails(result),
         };
       } finally {
         sidebar?.close();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import {
+import registerPiLongTaskExtension, {
   addWorkerCostToAssistantMessage,
   createLongTaskSidebarController,
   createWorkerCostAccumulator,
@@ -80,6 +80,40 @@ const first = accumulator.applyToAssistantMessage(assistantMessage());
 assert.ok(first);
 assert.equal(first.usage.cost.total, 0.087);
 assert.equal(accumulator.applyToAssistantMessage(assistantMessage()), undefined);
+
+interface RegisteredLongTaskTool {
+  name?: string;
+  parameters?: {
+    required?: string[];
+    properties?: Record<string, { description?: string; type?: string }>;
+  };
+}
+
+const registeredEvents: string[] = [];
+const registeredTools: RegisteredLongTaskTool[] = [];
+registerPiLongTaskExtension({
+  on(event: string) {
+    registeredEvents.push(event);
+  },
+  registerTool(tool: RegisteredLongTaskTool) {
+    registeredTools.push(tool);
+  },
+} as unknown as Parameters<typeof registerPiLongTaskExtension>[0]);
+const longTaskTool = registeredTools.find((tool) => tool.name === "pi_long_task");
+assert.ok(longTaskTool);
+assert.deepEqual(longTaskTool.parameters?.required, ["commit"]);
+assert.equal(longTaskTool.parameters?.properties?.inputText?.type, "string");
+assert.doesNotMatch(longTaskTool.parameters?.properties?.inputText?.description ?? "", /required/i);
+assert.equal(longTaskTool.parameters?.properties?.goal?.type, "string");
+assert.match(longTaskTool.parameters?.properties?.goal?.description ?? "", /Optional high-level goal/);
+const goalTaskTool = registeredTools.find((tool) => tool.name === "pi_goal_task");
+assert.ok(goalTaskTool);
+assert.deepEqual(goalTaskTool.parameters?.required, ["goal"]);
+assert.equal(goalTaskTool.parameters?.properties?.goal?.type, "string");
+assert.match(goalTaskTool.parameters?.properties?.goal?.description ?? "", /High-level goal/);
+assert.equal(goalTaskTool.parameters?.properties?.maxIterations?.type, "integer");
+assert.match(goalTaskTool.parameters?.properties?.reviewerTimeoutMs?.description ?? "", /reviewer session/);
+assert.deepEqual(registeredEvents, ["message_end", "input"]);
 
 type WidgetFactory = (tui: TUI, theme: Theme) => Component;
 type WidgetContent = string[] | WidgetFactory | undefined;
