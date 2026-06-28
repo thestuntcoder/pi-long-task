@@ -180,6 +180,8 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
     });
   }
 
+  reviewerResult = enforceMinimumIterationsBeforeCompletion(reviewerResult, state, iteration.iteration);
+
   state = recordReviewerResult(state, iteration.iteration, reviewerResult, { now: now() });
   await persistStateChange(store, previousTraceLength, state);
   const updatedIteration = currentIteration(state, iteration.iteration);
@@ -220,6 +222,11 @@ export function buildGoalReviewTaskPayload(options: {
   const reviewTargetInstruction = options.goalSpecification
     ? "Review whether the latest worker run satisfies the persisted goal specification and definition-of-done. Treat the persisted specification as the primary review target; keep the original high-level goal available only as traceability/context."
     : "Review whether the original high-level goal is complete after the latest worker run.";
+  const iterationPolicy = `Goal loop iteration policy:
+- Current iteration: ${iteration.iteration}
+- Minimum iterations before completion may stop the loop: ${state.limits.minIterations}
+- Maximum iterations: ${state.limits.maxIterations}
+- If current iteration is below the minimum, do not return "complete" even if the current implementation looks good. Return "incomplete" with concrete remainingWork for the next improvement pass, such as missing verification, hardening, UX polish, security, performance, docs, edge cases, or maintainability follow-up.`;
   const decisionRules = options.goalSpecification
     ? `- Use "complete" only when the persisted definition-of-done is satisfied, including in-scope requirements, milestones, acceptance criteria, required verification gates, and applicable design/product constraints.
 - Use "incomplete" when any required spec requirement, milestone, acceptance criterion, verification gate, artifact, or constraint still needs work and another TODO-generation iteration should be started.
@@ -242,6 +249,8 @@ ${specificationBlock}
 Goal run: ${state.goalRunId}
 Iteration: ${iteration.iteration}
 Generated TODO path: ${generatedTodo?.todoPath ?? "unknown"}
+
+${iterationPolicy}
 Worker result:
 
 ${markdownFence(JSON.stringify(workerResult ?? null, null, 2), "json")}
@@ -277,6 +286,38 @@ export function parseGoalReviewerOutput(
     remainingWork: complete ? [] : remainingWork,
     reviewedAt: (options.now ?? new Date()).toISOString(),
   };
+}
+
+function enforceMinimumIterationsBeforeCompletion(
+  result: GoalReviewerResultState,
+  state: GoalLoopState,
+  iteration: number,
+): GoalReviewerResultState {
+  if (result.decision !== "complete" && !result.complete) {
+    return result;
+  }
+  if (iteration >= state.limits.minIterations) {
+    return result;
+  }
+
+  const remainingIterations = Math.max(1, state.limits.minIterations - iteration);
+  const remainingWork = result.remainingWork.length > 0 ? result.remainingWork : minimumIterationRemainingWork(state);
+  return {
+    ...result,
+    decision: "incomplete",
+    complete: false,
+    summary: `Minimum iteration target not reached (${iteration}/${state.limits.minIterations}); continuing goal loop.`,
+    rationale: `${result.rationale}\n\nReviewer completion was deferred because this goal loop requires at least ${state.limits.minIterations} iteration(s) before it may stop. ${remainingIterations} more iteration(s) are required, so the next pass should look for concrete improvements, hardening, verification, and polish rather than stopping early.`,
+    remainingWork,
+  };
+}
+
+function minimumIterationRemainingWork(state: GoalLoopState): string[] {
+  return [
+    `Continue toward the required minimum of ${state.limits.minIterations} goal-loop iterations before accepting completion.`,
+    "Run another pass focused on gaps the previous TODO did not cover: verification depth, edge cases, security, performance, UX polish, documentation, maintainability, and product completeness.",
+    "Generate concrete implementation or review tasks from the persisted goal specification and latest evidence instead of stopping after the first apparently complete pass.",
+  ];
 }
 
 export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions): Promise<GoalReviewerSessionResult> {

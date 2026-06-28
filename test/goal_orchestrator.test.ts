@@ -22,6 +22,7 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
     cwd: tempRoot,
     goalRunId: "goal-one-iteration",
     store,
+    minIterations: 1,
     maxIterations: 2,
     commit: false,
     todoGenerationRunner: async (options) => {
@@ -326,6 +327,7 @@ await withTempRoot("pi-goal-orchestrator-two-", async (tempRoot) => {
     cwd: tempRoot,
     goalRunId: "goal-two-iterations",
     store,
+    minIterations: 1,
     maxIterations: 3,
     commit: true,
     todoGenerationRunner: async (options) => {
@@ -354,6 +356,39 @@ await withTempRoot("pi-goal-orchestrator-two-", async (tempRoot) => {
     "Add verification evidence in a second iteration",
   ]);
   assert.equal(result.state.iterations[1]?.reviewerResult?.decision, "complete");
+});
+
+await withTempRoot("pi-goal-orchestrator-min-iterations-", async (tempRoot) => {
+  const store = new GoalStateStore({ cwd: tempRoot, goalRunId: "goal-min-iterations" });
+  const reviewerSummaries: string[] = [];
+  const generationInputs: string[] = [];
+
+  const result = await runGoalLoop({
+    goal: "Keep improving until the required loop count is reached",
+    cwd: tempRoot,
+    goalRunId: "goal-min-iterations",
+    store,
+    minIterations: 2,
+    maxIterations: 3,
+    commit: false,
+    todoGenerationRunner: async (options) => {
+      generationInputs.push(options.inputText ?? "");
+      const outputPath = extractGenerationOutputPath(options.inputText ?? "");
+      await writeFile(outputPath, sampleTodoMarkdown(generationInputs.length), "utf8");
+      return coordinatorResult(options, `Generated minimum iteration ${generationInputs.length} TODO`);
+    },
+    todoExecutionRunner: async (options) => coordinatorResult(options, "Worker believes goal is complete"),
+    reviewerRunner: async () => reviewerResult("complete", "Reviewer says complete", "All known criteria look done."),
+    now: () => new Date("2026-06-25T12:15:00.000Z"),
+  });
+
+  assert.equal(result.state.status, "done");
+  assert.equal(result.state.iterations.length, 2);
+  reviewerSummaries.push(...result.state.iterations.map((iteration) => iteration.reviewerResult?.summary ?? ""));
+  assert.match(reviewerSummaries[0] ?? "", /Minimum iteration target not reached/);
+  assert.equal(result.state.iterations[0]?.reviewerResult?.decision, "incomplete");
+  assert.equal(result.state.iterations[1]?.reviewerResult?.decision, "complete");
+  assert.match(generationInputs[1] ?? "", /required minimum of 2 goal-loop iterations/);
 });
 
 await withTempRoot("pi-goal-orchestrator-cancel-", async (tempRoot) => {

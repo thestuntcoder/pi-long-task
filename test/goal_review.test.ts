@@ -39,6 +39,7 @@ const payload = buildGoalReviewTaskPayload({ state: payloadState, iteration: pay
 assert.match(payload, /Original high-level goal/);
 assert.match(payload, /Worker finished/);
 assert.match(payload, /Reply with only one JSON object/);
+assert.match(payload, /Minimum iterations before completion may stop the loop: 1/);
 assert.doesNotMatch(payload, /Persisted goal specification/);
 
 const reviewSpecification = createGoalSpecification({
@@ -169,6 +170,7 @@ try {
     cwd: tempRoot,
     goalRunId: "goal-review-loop",
     store,
+    minIterations: 1,
     maxIterations: 3,
     commit: false,
     todoGenerationRunner: fakeGenerationRunner,

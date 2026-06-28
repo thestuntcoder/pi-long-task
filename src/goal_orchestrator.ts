@@ -52,6 +52,7 @@ export interface GoalLoopProgressUpdate {
   status: GoalLoopStatus;
   currentIteration: number;
   totalIterations: number;
+  minIterations: number;
   maxIterations: number;
   limits: GoalLoopLimits;
   resultPath: string;
@@ -125,6 +126,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       goalRunId:
         options.goalRunId ?? `goal-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
       goalRunDir: options.goalRunDir,
+      minIterations: options.minIterations,
       maxIterations: options.maxIterations,
       timeoutMs: options.timeoutMs,
       iterationTimeoutMs: options.iterationTimeoutMs,
@@ -155,6 +157,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       status: state.status,
       currentIteration: state.currentIteration,
       totalIterations: state.iterations.length,
+      minIterations: state.limits.minIterations,
       maxIterations: state.limits.maxIterations,
       limits: state.limits,
       resultPath: store.paths.resultPath,

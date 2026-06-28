@@ -147,7 +147,7 @@ export async function runGoalTodoGenerationLongTask(
 }
 
 export function buildGoalTodoGenerationTaskPayload(options: {
-  state: Pick<GoalLoopState, "goal" | "goalRunId">;
+  state: Pick<GoalLoopState, "goal" | "goalRunId" | "limits">;
   iteration: number;
   outputPath: string;
   additionalContext?: string;
@@ -162,6 +162,8 @@ export function buildGoalTodoGenerationTaskPayload(options: {
         "markdown",
       )}\n`
     : "";
+  const iterationPolicy = `- Goal-loop iteration target: generate implementation work for iteration ${options.iteration} of at least ${options.state.limits.minIterations} required iteration(s), with a hard maximum of ${options.state.limits.maxIterations}.
+- Do not generate a no-op TODO merely because a previous reviewer believed the goal was complete before the minimum iteration target. Always look for the next concrete improvement, hardening, verification, UX, security, performance, docs, maintainability, or product-completeness pass until the minimum is reached.`;
 
   return `# Pi Long Task TODO
 
@@ -173,6 +175,7 @@ export function buildGoalTodoGenerationTaskPayload(options: {
 - Write the generated Pi Long Task-compatible TODO markdown to \`${options.outputPath}\`.
 - Do not wrap the generated file in a code fence and do not include commentary outside the TODO markdown in that file.
 - Keep generated tasks focused, independently assignable, and safe for separate worker sessions.
+${iterationPolicy}
 ${
   options.goalSpecification
     ? "- A persisted goal specification is available; derive implementation TODOs from that specification rather than only the original vague goal.\n- Ensure generated tasks explicitly cover relevant requirement IDs, milestones, acceptance criteria, verification gates, constraints, and definition-of-done items from the specification.\n- Include spec IDs (for example REQ-*, MS-*, AC-*, VG-*) in generated task goals/status/verification/done-when guidance wherever applicable.\n"

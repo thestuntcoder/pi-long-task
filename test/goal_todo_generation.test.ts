@@ -14,13 +14,18 @@ import { validateTodoMarkdown } from "../src/todo_generator.ts";
 const baseTime = new Date("2026-06-25T09:00:00.000Z");
 
 const payload = buildGoalTodoGenerationTaskPayload({
-  state: { goal: "Ship safe goal-loop TODO generation", goalRunId: "payload-test" },
+  state: {
+    goal: "Ship safe goal-loop TODO generation",
+    goalRunId: "payload-test",
+    limits: { minIterations: 1, maxIterations: 50, timeoutMs: 1, iterationTimeoutMs: 1, reviewerTimeoutMs: 1 },
+  },
   iteration: 1,
   outputPath: "/tmp/generated/TODO.md",
 });
 assert.match(payload, /^# Pi Long Task TODO/);
 assert.match(payload, /Only generate TODO markdown/);
 assert.match(payload, /Write the generated Pi Long Task-compatible TODO markdown to `\/tmp\/generated\/TODO\.md`/);
+assert.match(payload, /iteration 1 of at least 1 required iteration/);
 validateTodoMarkdown(payload);
 
 const specification = createGoalSpecification({
@@ -92,7 +97,11 @@ const specification = createGoalSpecification({
 });
 
 const payloadWithSpec = buildGoalTodoGenerationTaskPayload({
-  state: { goal: "Add a sample settings page with tests", goalRunId: "goal-generation" },
+  state: {
+    goal: "Add a sample settings page with tests",
+    goalRunId: "goal-generation",
+    limits: { minIterations: 1, maxIterations: 50, timeoutMs: 1, iterationTimeoutMs: 1, reviewerTimeoutMs: 1 },
+  },
   iteration: 1,
   outputPath: "/tmp/generated/TODO.md",
   goalSpecification: specification,

@@ -126,6 +126,7 @@ export interface GoalTaskToolRenderDetails {
   status: GoalLoopStatus;
   currentIteration: number;
   totalIterations: number;
+  minIterations: number;
   maxIterations: number;
   resultPath: string;
   statePath?: string;
@@ -145,6 +146,7 @@ export function formatGoalLoopResultMessage(result: GoalLoopResultForRendering):
     `Pi Goal Task: ${state.status}`,
     `Goal: ${state.goal}`,
     `Iterations: ${state.iterations.length}/${state.limits.maxIterations}`,
+    `Minimum iterations: ${state.limits.minIterations}`,
     `Result file: ${result.resultPath}`,
     `State file: ${state.goalRunDir}/GOAL_STATE.json`,
   ];
@@ -174,6 +176,7 @@ export function goalTaskDetailsFromResult(result: GoalLoopResultForRendering): G
     status: result.state.status,
     currentIteration: result.state.currentIteration,
     totalIterations: result.state.iterations.length,
+    minIterations: result.state.limits.minIterations,
     maxIterations: result.state.limits.maxIterations,
     resultPath: result.resultPath,
     statePath: `${result.state.goalRunDir}/GOAL_STATE.json`,
@@ -188,12 +191,20 @@ export function goalTaskDetailsFromResult(result: GoalLoopResultForRendering): G
 }
 
 export function renderGoalTaskToolCall(
-  args: { goal?: string; commit?: boolean; maxIterations?: number; timeoutMs?: number; reviewerTimeoutMs?: number },
+  args: {
+    goal?: string;
+    commit?: boolean;
+    minIterations?: number;
+    maxIterations?: number;
+    timeoutMs?: number;
+    reviewerTimeoutMs?: number;
+  },
   theme: Theme,
 ): Text {
   const commit = (args.commit ?? true) ? theme.fg("warning", "commit:on") : theme.fg("dim", "commit:off");
   const goal = oneLine(args.goal ?? "");
   const limits = [
+    args.minIterations ? `min:${args.minIterations}` : undefined,
     args.maxIterations ? `max:${args.maxIterations}` : undefined,
     args.timeoutMs ? `timeout:${args.timeoutMs}ms` : undefined,
     args.reviewerTimeoutMs ? `review:${args.reviewerTimeoutMs}ms` : undefined,
@@ -227,11 +238,13 @@ function renderGoalTaskProgress(details: Record<string, unknown> | undefined, fa
   const message = stringValue(details?.message) || firstLine(fallback) || "Pi Goal Task is running...";
   const phase = stringValue(details?.phase);
   const iteration = numberValue(details?.iteration) ?? numberValue(details?.currentIteration);
+  const minIterations = numberValue(details?.minIterations);
   const maxIterations = numberValue(details?.maxIterations);
   const status = stringValue(details?.status) || "running";
   const cost = numberValue(details?.totalCost);
   const meta = [
     iteration ? `iteration ${iteration}${maxIterations ? `/${maxIterations}` : ""}` : undefined,
+    minIterations && iteration && iteration < minIterations ? `min:${minIterations}` : undefined,
     status,
     cost && cost > 0 ? formatCost(cost) : undefined,
   ]
@@ -249,6 +262,7 @@ function renderGoalTaskSummary(details: GoalTaskToolRenderDetails, expanded: boo
   const summary = [
     `${theme.fg(statusStyle, icon)} ${theme.fg("toolTitle", theme.bold("Pi Goal Task"))} ${theme.fg(statusStyle, details.status)}`,
     theme.fg("muted", `${details.totalIterations}/${details.maxIterations} iterations`),
+    details.totalIterations < details.minIterations ? theme.fg("muted", `min:${details.minIterations}`) : undefined,
     details.latestReviewerDecision ? theme.fg("muted", `review:${details.latestReviewerDecision}`) : undefined,
     details.totalCost ? theme.fg("muted", `spend ${formatCost(details.totalCost)}`) : undefined,
   ].filter(Boolean);
@@ -295,6 +309,7 @@ function goalTaskDetails(details: Record<string, unknown> | undefined): GoalTask
     status,
     currentIteration: numberValue(details.currentIteration) ?? 0,
     totalIterations: numberValue(details.totalIterations) ?? 0,
+    minIterations: numberValue(details.minIterations) ?? 0,
     maxIterations: numberValue(details.maxIterations) ?? 0,
     resultPath,
     statePath: stringValue(details.statePath),

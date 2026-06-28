@@ -111,6 +111,8 @@ assert.ok(goalTaskTool);
 assert.deepEqual(goalTaskTool.parameters?.required, ["goal"]);
 assert.equal(goalTaskTool.parameters?.properties?.goal?.type, "string");
 assert.match(goalTaskTool.parameters?.properties?.goal?.description ?? "", /High-level goal/);
+assert.equal(goalTaskTool.parameters?.properties?.minIterations?.type, "integer");
+assert.match(goalTaskTool.parameters?.properties?.minIterations?.description ?? "", /Minimum number/);
 assert.equal(goalTaskTool.parameters?.properties?.maxIterations?.type, "integer");
 assert.match(goalTaskTool.parameters?.properties?.reviewerTimeoutMs?.description ?? "", /reviewer session/);
 assert.deepEqual(registeredEvents, ["message_end", "input"]);

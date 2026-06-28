@@ -19,12 +19,15 @@ import { GoalStateStore } from "../src/goal_state.ts";
 const baseTime = new Date("2026-06-25T08:00:00.000Z");
 
 assert.deepEqual(normalizeGoalLoopLimits({ maxIterations: 2, timeoutMs: 1000 }), {
+  minIterations: 2,
   maxIterations: 2,
   timeoutMs: 1000,
   iterationTimeoutMs: 10_800_000,
   reviewerTimeoutMs: 1_800_000,
 });
-assert.deepEqual(normalizeGoalLoopLimits({ maxIterations: 0, timeoutMs: -1 }).maxIterations, 50);
+assert.deepEqual(normalizeGoalLoopLimits({ minIterations: 3, maxIterations: 0, timeoutMs: -1 }).maxIterations, 50);
+assert.deepEqual(normalizeGoalLoopLimits({ minIterations: 100 }).maxIterations, 100);
+assert.deepEqual(normalizeGoalLoopLimits().minIterations, 1);
 
 let state = createGoalLoopState({
   goal: "Ship the feature safely",

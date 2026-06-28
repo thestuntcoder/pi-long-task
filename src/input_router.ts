@@ -21,6 +21,8 @@ const COMMIT_TRUE_RE =
 const GOAL_RE = /\b(?:with\s+(?:the\s+)?goal|goal)\s*(?::|=|\b(?:to|of|for|that)\b)\s*([\s\S]+)$/i;
 const TRAILING_COMMIT_MODIFIER_RE =
   /(?:\s+(?:with|without|no|enable|enabled|disable|disabled)\s+commits?|\s+commits?\s*(?:true|false|on|off|enabled|disabled)|\s+commit\s*:\s*(?:true|false|on|off|yes|no))\s*$/i;
+const TRAILING_ITERATION_MODIFIER_RE =
+  /(?:[.;,\s]+(?:(?:use|set)?\s*(?:min(?:imum)?|max(?:imum)?)\s+(?:iterations?|loops?|passes?|cycles?)\s*(?::|=|of|to)?\s*\d+|at\s+least\s+\d+\s*(?:iterations?|loops?|passes?|cycles?)|(?:i\s+want\s+it\s+to\s+)?run\s+(?:for|in)\s*\d+\s*(?:iterations?|loops?|passes?|cycles?)))[.!?]*\s*$/i;
 
 export interface ParsedLongTaskRequestOptions {
   commit: boolean;
@@ -28,6 +30,7 @@ export interface ParsedLongTaskRequestOptions {
 }
 
 export interface ParsedGoalTaskRequestOptions extends ParsedLongTaskRequestOptions {
+  minIterations?: number;
   maxIterations?: number;
 }
 
@@ -60,10 +63,13 @@ export function parseLongTaskRequestOptions(text: string): ParsedLongTaskRequest
 }
 
 export function parseGoalTaskRequestOptions(text: string): ParsedGoalTaskRequestOptions {
+  const maxIterations = inferMaxIterations(text);
+  const minIterations = inferMinIterations(text) ?? inferExactIterationCount(text) ?? maxIterations;
   return {
     commit: inferCommitSetting(text) ?? true,
     goal: inferGoalSetting(text) ?? inferGoalLoopText(text),
-    maxIterations: inferMaxIterations(text),
+    minIterations,
+    maxIterations,
   };
 }
 
@@ -114,17 +120,38 @@ export function inferGoalSetting(text: string): string | undefined {
 
 function normalizeGoalText(text: string): string | undefined {
   let goal = text.trim();
-  while (TRAILING_COMMIT_MODIFIER_RE.test(goal)) {
-    goal = goal.replace(TRAILING_COMMIT_MODIFIER_RE, "").trim();
+  while (TRAILING_COMMIT_MODIFIER_RE.test(goal) || TRAILING_ITERATION_MODIFIER_RE.test(goal)) {
+    goal = goal.replace(TRAILING_COMMIT_MODIFIER_RE, "").replace(TRAILING_ITERATION_MODIFIER_RE, "").trim();
   }
   goal = goal.replace(/^["'“”‘’]+|["'“”‘’.,;:!?]+$/g, "").trim();
   return goal || undefined;
 }
 
 function inferMaxIterations(text: string): number | undefined {
-  const match = /\bmax(?:imum)?\s+(?:iterations?|loops?|passes?)\s*(?::|=|of|to)?\s*(\d+)\b/i.exec(text);
-  const value = match?.[1] ? Number.parseInt(match[1], 10) : undefined;
-  return value && Number.isFinite(value) && value > 0 ? value : undefined;
+  const match = /\bmax(?:imum)?\s+(?:iterations?|loops?|passes?|cycles?)\s*(?::|=|of|to)?\s*(\d+)\b/i.exec(text);
+  return positiveIntegerMatch(match?.[1]);
+}
+
+function inferMinIterations(text: string): number | undefined {
+  const explicitMin = /\bmin(?:imum)?\s+(?:iterations?|loops?|passes?|cycles?)\s*(?::|=|of|to)?\s*(\d+)\b/i.exec(text);
+  if (explicitMin?.[1]) {
+    return positiveIntegerMatch(explicitMin[1]);
+  }
+  const atLeast = /\bat\s+least\s+(\d+)\s*(?:iterations?|loops?|passes?|cycles?)\b/i.exec(text);
+  return positiveIntegerMatch(atLeast?.[1]);
+}
+
+function inferExactIterationCount(text: string): number | undefined {
+  const match =
+    /\b(?:run|iterate|loop|cycle|spin)(?:\s+\w+){0,6}?\s+(?:for|in)?\s*(\d+)\s*(?:iterations?|loops?|passes?|cycles?)\b/i.exec(
+      text,
+    );
+  return positiveIntegerMatch(match?.[1]);
+}
+
+function positiveIntegerMatch(value: string | undefined): number | undefined {
+  const parsed = value ? Number.parseInt(value, 10) : undefined;
+  return parsed && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function inferGoalLoopText(text: string): string | undefined {
@@ -158,11 +185,13 @@ function buildGoalTaskToolPrompt(originalText: string, options: ParsedGoalTaskRe
   const goalLine = options.goal
     ? `Set goal to ${JSON.stringify(options.goal)}.`
     : "Set goal from the original request.";
+  const minIterationsLine = options.minIterations ? [`Set minIterations to ${options.minIterations}.`] : [];
   const maxIterationsLine = options.maxIterations ? [`Set maxIterations to ${options.maxIterations}.`] : [];
   return [
     "Use the pi_goal_task tool for this request.",
     goalLine,
     `Set commit to ${options.commit ? "true" : "false"}.`,
+    ...minIterationsLine,
     ...maxIterationsLine,
     "The goal loop will generate TODO markdown, execute it as a long task, review completion, and repeat until complete or stopped by limits.",
     "Do not perform the work directly outside pi_goal_task.",

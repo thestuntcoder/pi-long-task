@@ -112,6 +112,7 @@ export class GoalStateStore {
       "",
       "## Safety limits",
       "",
+      `- Minimum iterations before completion: ${state.limits.minIterations}`,
       `- Max iterations: ${state.limits.maxIterations}`,
       `- Run timeout: ${state.limits.timeoutMs}ms`,
       `- Iteration timeout: ${state.limits.iterationTimeoutMs}ms`,

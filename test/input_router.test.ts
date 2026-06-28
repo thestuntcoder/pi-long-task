@@ -53,13 +53,25 @@ assert.equal(isNaturalLanguageGoalTaskRequest(goalLoopRequest), true);
 assert.deepEqual(parseGoalTaskRequestOptions(goalLoopRequest), {
   commit: true,
   goal: "ship the checkout flow",
+  minIterations: 2,
   maxIterations: 2,
 });
 const goalLoopTransform = goalTaskInputTransform(goalLoopRequest);
 assert.ok(goalLoopTransform);
 assert.match(goalLoopTransform, /Use the pi_goal_task tool/);
+assert.match(goalLoopTransform, /Set minIterations to 2\./);
 assert.match(goalLoopTransform, /Set maxIterations to 2\./);
 assert.match(longTaskInputTransform(goalLoopRequest) ?? "", /Use the pi_goal_task tool/);
+
+assert.deepEqual(
+  parseGoalTaskRequestOptions("Run a goal task with commits for goal: build slack. I want it to run in 100 loops."),
+  {
+    commit: true,
+    goal: "build slack",
+    minIterations: 100,
+    maxIterations: undefined,
+  },
+);
 
 assert.equal(isNaturalLanguageLongTaskRequest("How do I run a long task with commits?"), false);
 assert.equal(isNaturalLanguageLongTaskRequest("Do not run a long task with commits yet."), false);

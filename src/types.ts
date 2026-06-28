@@ -37,10 +37,18 @@ export const PiGoalTaskParams = Type.Object(
           "Whether worker long tasks may commit completed TODO work during the goal loop. Defaults to true for goal loops.",
       }),
     ),
+    minIterations: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Minimum number of generate → execute → review iterations before a complete review may stop the loop. If omitted while maxIterations is provided, maxIterations is also used as the minimum target.",
+      }),
+    ),
     maxIterations: Type.Optional(
       Type.Integer({
         minimum: 1,
-        description: "Maximum number of generate → execute → review iterations before stopping. Defaults to 50.",
+        description:
+          "Maximum number of generate → execute → review iterations before stopping. Defaults to 50; when explicitly provided without minIterations, it also acts as the minimum target.",
       }),
     ),
     timeoutMs: Type.Optional(

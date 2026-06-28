@@ -167,7 +167,7 @@ function buildScopedRequirements(goal: string): GoalScopedRequirements {
       {
         id: "REQ-1",
         title: "Primary product outcome",
-        description: `Define and deliver the smallest coherent software/product slice that satisfies the user goal: ${goal}`,
+        description: `Define and deliver the complete scoped software/product outcome described by the user goal: ${goal}`,
         priority: "must",
         acceptanceCriterionIds: ["AC-1", "AC-2"],
         milestoneIds: ["MS-1", "MS-2"],
@@ -252,10 +252,10 @@ function buildScopedRequirements(goal: string): GoalScopedRequirements {
       "Implementation workers should use this persisted specification as the definition-of-done instead of relying only on the original vague goal.",
     ],
     openQuestions: [
-      "Who are the primary and secondary users, and what job-to-be-done should the first implementation slice satisfy?",
+      "Who are the primary and secondary users, and what job-to-be-done should the complete scoped product satisfy?",
       "Which repository areas, platforms, integrations, or external services constrain the implementation?",
       "What measurable product or operational signal proves the delivered slice is successful?",
-      "Which non-goals or edge cases must remain out of scope for the first implementation pass?",
+      "Which non-goals or edge cases must remain out of scope for this goal-oriented delivery?",
     ],
   };
 }
@@ -338,7 +338,7 @@ function buildAcceptanceCriteria(goal: string): GoalAcceptanceCriterion[] {
     {
       id: "AC-6",
       description:
-        "Relevant launch, positioning, target segment, and growth metric context is available or explicitly deemed unnecessary for the first slice.",
+        "Relevant launch, positioning, target segment, and growth metric context is available or explicitly deemed unnecessary for the scoped goal.",
       requirementIds: ["REQ-6"],
       verificationGateIds: ["VG-5"],
     },
@@ -409,7 +409,7 @@ function buildDesignConstraints(goal: string): GoalDesignConstraints {
     uxPrinciples: [
       "Optimize for the primary user workflow before secondary or administrative flows.",
       "Prefer clear, reversible, and observable interactions over hidden automation.",
-      "Keep first-slice UX simple enough for implementation workers to verify without stakeholder interviews.",
+      "Keep UX states explicit enough for implementation workers to verify without stakeholder interviews.",
     ],
     uiRequirements: [
       `Any user-facing UI for '${goal}' should use existing project components, layout conventions, and content tone where available.`,
@@ -433,7 +433,7 @@ function buildDesignConstraints(goal: string): GoalDesignConstraints {
       },
       {
         id: "DC-2",
-        title: "Accessible first slice",
+        title: "Accessible scoped product",
         description:
           "Do not mark user-facing work complete without considering keyboard, screen-reader, and contrast needs.",
       },
@@ -457,8 +457,8 @@ function buildProductConstraints(goal: string): GoalProductConstraints {
       "Pi goal-task orchestration artifacts under the run directory.",
     ],
     businessRules: [
-      "Only first-slice behavior required to satisfy the scoped goal should be implemented.",
-      "Out-of-scope enhancements require a later goal or explicit stakeholder decision.",
+      "All behavior required to satisfy the scoped goal should be implemented, while unrelated expansion stays out of scope.",
+      "Out-of-scope enhancements require a later goal or explicit stakeholder decision",
     ],
     compliance: [
       "Respect existing authorization, privacy, data-retention, and safety constraints present in the repository.",
@@ -476,8 +476,9 @@ function buildProductConstraints(goal: string): GoalProductConstraints {
     constraints: [
       {
         id: "PC-1",
-        title: "Scoped first release",
-        description: "Deliver a coherent first slice rather than a broad product rewrite or speculative roadmap.",
+        title: "Scoped full-goal delivery",
+        description:
+          "Deliver the complete scoped goal rather than downgrading broad user intent to an MVP or speculative roadmap.",
       },
       {
         id: "PC-2",
@@ -497,11 +498,11 @@ function buildMarketingGrowthContext(goal: string): GoalMarketingGrowthContext {
   return {
     targetSegments: [
       `Users, teams, or operators whose workflow improves when '${goal}' is delivered.`,
-      "Early internal adopters or reviewers who can validate the first implementation slice.",
+      "Early internal adopters or reviewers who can validate the delivered scoped product.",
     ],
     positioning: [
-      "A scoped software improvement with a clear first-use outcome and reviewable definition-of-done.",
-      "Avoid promising broad product transformation beyond the accepted first slice.",
+      "A scoped software product outcome with clear user value and reviewable definition-of-done.",
+      "Avoid downgrading explicit user intent to a partial MVP unless the user asked for an MVP.",
     ],
     acquisitionChannels: [
       "Release notes, README/update documentation, in-app messaging, or internal handoff notes as appropriate.",
@@ -525,10 +526,11 @@ function buildDiscoveryConsolidation(goal: string): GoalDiscoveryConsolidation {
       {
         role: "product_owner",
         title: "Product Owner",
-        objective: "Define user value, first-slice scope, non-goals, and product acceptance for the vague goal.",
+        objective:
+          "Define user value, full scoped product requirements, non-goals, and product acceptance for the vague goal.",
         findings: [
           `The goal '${goal}' needs a primary user outcome before implementation begins.`,
-          "Scope should emphasize one coherent product slice and preserve unresolved stakeholder questions.",
+          "Scope should preserve explicit user requirements as mandatory and clarify any unresolved stakeholder questions.",
         ],
         decisions: [
           "Use REQ-1 as the core product outcome and AC-1 as the primary acceptance criterion.",
@@ -573,7 +575,7 @@ function buildDiscoveryConsolidation(goal: string): GoalDiscoveryConsolidation {
           "Use REQ-3 and AC-4 to constrain technical design.",
           "Make architecture/regression review a required gate.",
         ],
-        risks: ["New dependencies or rewrites could exceed the first-slice product scope."],
+        risks: ["New dependencies or rewrites could exceed the scoped product requirements."],
         requirementIds: ["REQ-3"],
         milestoneIds: ["MS-2"],
         acceptanceCriterionIds: ["AC-4", "AC-5"],
@@ -587,7 +589,7 @@ function buildDiscoveryConsolidation(goal: string): GoalDiscoveryConsolidation {
           "Translate vague product intent into workflow, UI state, accessibility, and design-system constraints.",
         findings: [
           "User-facing work needs explicit workflow states and accessibility expectations.",
-          "Existing design conventions should guide any first-slice UI rather than a new visual direction.",
+          "Existing design conventions should guide product UI unless the discovered requirements call for a new visual direction.",
         ],
         decisions: [
           "Use REQ-4 and AC-3 to keep UX/design review in scope.",
@@ -655,7 +657,7 @@ function buildDefinitionOfDone(
 ): GoalDefinitionOfDone {
   return {
     summary:
-      "Done when all must/should scoped requirements are implemented or explicitly deferred, acceptance criteria are satisfied, required verification gates pass or record justified blockers, and review evaluates the result against this persisted product definition.",
+      "Done when all must/should scoped requirements are implemented, acceptance criteria are satisfied, required verification gates pass or record justified blockers, and review evaluates the result against this persisted product definition. Do not treat a partial MVP as complete when the original goal requests a broader product.",
     requirementIds,
     acceptanceCriterionIds,
     verificationGateIds: requiredGateIds,

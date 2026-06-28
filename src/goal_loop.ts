@@ -5,6 +5,7 @@ import type { CoordinatorStatus } from "./types.ts";
 export const GOAL_LOOP_STATE_SCHEMA_VERSION = 1;
 
 export const DEFAULT_GOAL_LOOP_LIMITS = {
+  minIterations: 1,
   maxIterations: 50,
   timeoutMs: 172_800_000,
   iterationTimeoutMs: 10_800_000,
@@ -35,6 +36,7 @@ export type GoalIterationStatus =
 export type GoalLoopStopKind = "cancelled" | "timeout" | "max_iterations" | "complete";
 
 export interface GoalLoopLimits {
+  minIterations: number;
   maxIterations: number;
   timeoutMs: number;
   iterationTimeoutMs: number;
@@ -42,6 +44,7 @@ export interface GoalLoopLimits {
 }
 
 export interface GoalLoopLimitInput {
+  minIterations?: number;
   maxIterations?: number;
   timeoutMs?: number;
   iterationTimeoutMs?: number;
@@ -169,8 +172,16 @@ export class GoalLoopStateError extends Error {
 }
 
 export function normalizeGoalLoopLimits(input: GoalLoopLimitInput = {}): GoalLoopLimits {
+  const explicitMaxIterations = optionalPositiveInteger(input.maxIterations);
+  const minIterations = positiveInteger(
+    input.minIterations,
+    explicitMaxIterations ?? DEFAULT_GOAL_LOOP_LIMITS.minIterations,
+  );
+  const maxIterations = Math.max(minIterations, explicitMaxIterations ?? DEFAULT_GOAL_LOOP_LIMITS.maxIterations);
+
   return {
-    maxIterations: positiveInteger(input.maxIterations, DEFAULT_GOAL_LOOP_LIMITS.maxIterations),
+    minIterations,
+    maxIterations,
     timeoutMs: positiveMilliseconds(input.timeoutMs, DEFAULT_GOAL_LOOP_LIMITS.timeoutMs),
     iterationTimeoutMs: positiveMilliseconds(input.iterationTimeoutMs, DEFAULT_GOAL_LOOP_LIMITS.iterationTimeoutMs),
     reviewerTimeoutMs: positiveMilliseconds(input.reviewerTimeoutMs, DEFAULT_GOAL_LOOP_LIMITS.reviewerTimeoutMs),
@@ -442,6 +453,10 @@ export function validateGoalLoopState(value: unknown): GoalLoopState {
   if (!state.limits || typeof state.limits !== "object") {
     throw new GoalLoopStateError("Goal loop state is missing limits.");
   }
+  state.limits = normalizeGoalLoopLimits({
+    ...state.limits,
+    minIterations: state.limits.minIterations ?? DEFAULT_GOAL_LOOP_LIMITS.minIterations,
+  });
   if (!Array.isArray(state.iterations) || !Array.isArray(state.trace)) {
     throw new GoalLoopStateError("Goal loop state is missing iterations or trace arrays.");
   }
@@ -553,10 +568,14 @@ function withTrace(state: GoalLoopState, event: GoalLoopTraceEvent): GoalLoopSta
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
+  return optionalPositiveInteger(value) ?? fallback;
+}
+
+function optionalPositiveInteger(value: number | undefined): number | undefined {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return Math.floor(value);
   }
-  return fallback;
+  return undefined;
 }
 
 function positiveMilliseconds(value: number | undefined, fallback: number): number {
