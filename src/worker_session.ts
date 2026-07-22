@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { coverageGoalAction, coverageGoalVerification, parseCoverageGoal } from "./coverage_goal.ts";
 import { hasTaskResult, hasTaskResultStatus, isDoneStatus, parseReportedStatus } from "./result_writer.ts";
 import type { Task } from "./todo_parser.ts";
@@ -243,7 +245,10 @@ export interface CreateWorkerSessionOptions {
   model?: unknown;
   modelName?: string;
   thinkingLevel?: string;
+  modelRuntime?: unknown;
+  /** @deprecated Compatibility injection for Pi SDK versions before 0.80.8. */
   authStorage?: unknown;
+  /** @deprecated Compatibility injection for Pi SDK versions before 0.80.8. */
   modelRegistry?: unknown;
   settingsManager?: unknown;
   resourceLoader?: unknown;
@@ -306,14 +311,72 @@ remaining:
 - <remaining item or "none">`;
 }
 
+interface WorkerPiSdkModelExports {
+  ModelRuntime?: {
+    create(options?: { authPath?: string; modelsPath?: string | null }): Promise<unknown>;
+  };
+  AuthStorage?: {
+    create(authPath?: string): unknown;
+  };
+  ModelRegistry?: {
+    create?(authStorage: unknown, modelsPath?: string): unknown;
+  };
+}
+
+export interface WorkerModelContext {
+  resolver: unknown;
+  sessionOptions: Record<string, unknown>;
+  api: "modelRuntime" | "legacy";
+}
+
+export async function createWorkerModelContext(
+  sdk: WorkerPiSdkModelExports,
+  options: Pick<CreateWorkerSessionOptions, "modelRuntime" | "authStorage" | "modelRegistry">,
+  agentDir: string,
+): Promise<WorkerModelContext> {
+  if (options.modelRuntime) {
+    return {
+      resolver: options.modelRuntime,
+      sessionOptions: { modelRuntime: options.modelRuntime },
+      api: "modelRuntime",
+    };
+  }
+
+  if (sdk.ModelRuntime?.create) {
+    const modelRuntime = await sdk.ModelRuntime.create({
+      authPath: path.join(agentDir, "auth.json"),
+      modelsPath: path.join(agentDir, "models.json"),
+    });
+    return {
+      resolver: modelRuntime,
+      sessionOptions: { modelRuntime },
+      api: "modelRuntime",
+    };
+  }
+
+  const authStorage = options.authStorage ?? sdk.AuthStorage?.create(path.join(agentDir, "auth.json"));
+  const modelRegistry =
+    options.modelRegistry ?? sdk.ModelRegistry?.create?.(authStorage, path.join(agentDir, "models.json"));
+  if (!authStorage || !modelRegistry) {
+    throw new Error(
+      "Pi Long Task cannot initialize worker model services: this Pi SDK exposes neither ModelRuntime.create() nor the legacy AuthStorage.create()/ModelRegistry.create() API.",
+    );
+  }
+
+  return {
+    resolver: modelRegistry,
+    sessionOptions: { authStorage, modelRegistry },
+    api: "legacy",
+  };
+}
+
 export async function createIsolatedWorkerSession(
   options: CreateWorkerSessionOptions,
 ): Promise<WorkerSessionFactoryResult> {
   const pi = await import("@earendil-works/pi-coding-agent");
   const cwd = options.cwd;
   const agentDir = options.agentDir ?? pi.getAgentDir();
-  const authStorage = options.authStorage ?? pi.AuthStorage.create();
-  const modelRegistry = options.modelRegistry ?? pi.ModelRegistry.create(authStorage as never);
+  const modelContext = await createWorkerModelContext(pi as unknown as WorkerPiSdkModelExports, options, agentDir);
   const settingsManager = options.settingsManager ?? pi.SettingsManager.create(cwd, agentDir);
 
   applyWorkerSettingsDefaults(settingsManager);
@@ -330,12 +393,12 @@ export async function createIsolatedWorkerSession(
   await resourceLoader.reload();
 
   const model =
-    options.model ?? (options.modelName ? await resolveWorkerModel(modelRegistry, options.modelName) : undefined);
+    options.model ??
+    (options.modelName ? await resolveWorkerModel(modelContext.resolver, options.modelName) : undefined);
   const createOptions: Record<string, unknown> = {
     cwd,
     agentDir,
-    authStorage,
-    modelRegistry,
+    ...modelContext.sessionOptions,
     settingsManager,
     resourceLoader,
     tools: [...(options.tools ?? DEFAULT_WORKER_TOOLS)],
@@ -672,24 +735,18 @@ function applyWorkerSettingsDefaults(settingsManager: unknown): void {
   }
 }
 
-async function resolveWorkerModel(modelRegistry: unknown, modelName: string): Promise<unknown> {
+async function resolveWorkerModel(modelResolver: unknown, modelName: string): Promise<unknown> {
   const [provider, ...modelIdParts] = modelName.split("/");
   const modelId = modelIdParts.join("/");
-  if (provider && modelId && isRecord(modelRegistry) && typeof modelRegistry.find === "function") {
-    const registryModel = modelRegistry.find(provider, modelId);
-    if (registryModel) {
-      return registryModel;
-    }
+  if (!provider || !modelId || !isRecord(modelResolver)) {
+    return undefined;
   }
 
-  try {
-    const ai = await import("@earendil-works/pi-ai");
-    if (typeof ai.getModel === "function" && provider && modelId) {
-      const getModel = ai.getModel as (providerName: string, modelId: string) => unknown;
-      return getModel(provider, modelId);
-    }
-  } catch {
-    // Optional peer resolution can fail in tests that inject a session factory.
+  if (typeof modelResolver.getModel === "function") {
+    return modelResolver.getModel(provider, modelId);
+  }
+  if (typeof modelResolver.find === "function") {
+    return modelResolver.find(provider, modelId);
   }
   return undefined;
 }

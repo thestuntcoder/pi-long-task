@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   assistantMessageText,
@@ -9,6 +10,7 @@ import {
   disableExtensionsForWorker,
   buildTaskPrompt,
   buildTimeLimitMessage,
+  createWorkerModelContext,
   lastAssistantTextFromEvents,
   lastAssistantTextFromMessages,
   runWorkerTask,
@@ -144,6 +146,76 @@ assert.equal(
   "last event",
 );
 assert.match(buildMissingTaskResultMessage(), /TASK_RESULT:\nstatus: done\|partial\|blocked\|failed/);
+
+const agentDir = path.join(path.sep, "tmp", "pi-long-task-agent");
+let modernCreateOptions: { authPath?: string; modelsPath?: string | null } | undefined;
+const modernRuntime = { getModel: () => undefined };
+const modernModelContext = await createWorkerModelContext(
+  {
+    ModelRuntime: {
+      async create(options) {
+        modernCreateOptions = options;
+        return modernRuntime;
+      },
+    },
+    AuthStorage: {
+      create() {
+        throw new Error("legacy AuthStorage must not be used when ModelRuntime is available");
+      },
+    },
+  },
+  {},
+  agentDir,
+);
+assert.equal(modernModelContext.api, "modelRuntime");
+assert.equal(modernModelContext.resolver, modernRuntime);
+assert.deepEqual(modernModelContext.sessionOptions, { modelRuntime: modernRuntime });
+assert.deepEqual(modernCreateOptions, {
+  authPath: path.join(agentDir, "auth.json"),
+  modelsPath: path.join(agentDir, "models.json"),
+});
+
+const injectedRuntime = { getModel: () => undefined };
+const injectedModelContext = await createWorkerModelContext({}, { modelRuntime: injectedRuntime }, agentDir);
+assert.deepEqual(injectedModelContext, {
+  resolver: injectedRuntime,
+  sessionOptions: { modelRuntime: injectedRuntime },
+  api: "modelRuntime",
+});
+
+const legacyAuthStorage = { legacyAuth: true };
+const legacyModelRegistry = { find: () => undefined };
+let legacyRegistryArgs: unknown[] = [];
+const legacyModelContext = await createWorkerModelContext(
+  {
+    AuthStorage: {
+      create(authPath) {
+        assert.equal(authPath, path.join(agentDir, "auth.json"));
+        return legacyAuthStorage;
+      },
+    },
+    ModelRegistry: {
+      create(authStorage, modelsPath) {
+        legacyRegistryArgs = [authStorage, modelsPath];
+        return legacyModelRegistry;
+      },
+    },
+  },
+  {},
+  agentDir,
+);
+assert.equal(legacyModelContext.api, "legacy");
+assert.equal(legacyModelContext.resolver, legacyModelRegistry);
+assert.deepEqual(legacyModelContext.sessionOptions, {
+  authStorage: legacyAuthStorage,
+  modelRegistry: legacyModelRegistry,
+});
+assert.deepEqual(legacyRegistryArgs, [legacyAuthStorage, path.join(agentDir, "models.json")]);
+
+await assert.rejects(
+  createWorkerModelContext({}, {}, agentDir),
+  /exposes neither ModelRuntime\.create\(\) nor the legacy AuthStorage\.create\(\)\/ModelRegistry\.create\(\) API/,
+);
 
 class FakeWorkerSession {
   prompts: string[] = [];

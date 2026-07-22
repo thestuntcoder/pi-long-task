@@ -429,6 +429,8 @@ cd /path/to/pi-long-task
 npm run check
 ```
 
+The development SDK tracks current Pi releases. Pi Long Task uses Pi's `ModelRuntime` worker API on Pi 0.80.8 and newer, with a legacy worker-model fallback for older compatible Pi releases.
+
 Check that Pi can load the extension:
 
 ```bash
