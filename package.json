@@ -60,5 +60,8 @@
   "bugs": {
     "url": "https://github.com/thestuntcoder/pi-long-task/issues"
   },
-  "homepage": "https://github.com/thestuntcoder/pi-long-task#readme"
+  "homepage": "https://github.com/thestuntcoder/pi-long-task#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  }
 }

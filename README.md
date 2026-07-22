@@ -420,6 +420,12 @@ This lets you keep existing local work separate from Pi Long Task changes.
 
 Commit messages are generated from the task title and adjusted to resemble recent commit-message style in the repository. Pi Long Task does not prefix commits with generated labels like `Complete TODO 1 — ...`.
 
+## Runtime compatibility
+
+Pi Long Task requires Node.js 22.19 or newer, matching the supported runtime of the Pi SDK versions used by the package. The extension and isolated-worker setup are validated against Pi 0.80.7 (legacy `AuthStorage`/`ModelRegistry`), Pi 0.80.8 (the `ModelRuntime` transition), and Pi 0.81.1. Older Pi releases may use the legacy fallback but are not part of the validated matrix.
+
+The Pi TUI is optional: JSON and print modes run without sidebar registration, and RPC mode uses the non-component widget path. Git is required only when commit mode is enabled. Model credentials are not required to load the extension, but they are required to execute planner, worker, or reviewer model sessions.
+
 ## Development and validation
 
 Run the local development checks:
@@ -429,7 +435,7 @@ cd /path/to/pi-long-task
 npm run check
 ```
 
-The development SDK tracks current Pi releases. Pi Long Task uses Pi's `ModelRuntime` worker API on Pi 0.80.8 and newer, with a legacy worker-model fallback for older compatible Pi releases.
+The development SDK tracks current Pi releases. There is no separate build command: Pi loads the TypeScript extension directly through its supported package loader, while `npm run typecheck` validates the source without emitting JavaScript.
 
 Check that Pi can load the extension:
 
