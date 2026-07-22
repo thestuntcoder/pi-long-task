@@ -85,6 +85,12 @@ export async function runGoalTodoGenerationLongTask(
   });
   const payloadPath = path.join(iterationDir, GOAL_TODO_GENERATION_PAYLOAD_FILE);
   await writeFile(payloadPath, payload, "utf8");
+  const childTimeoutMs = timeoutForIteration(iteration, state, now());
+  if (childTimeoutMs <= 0) {
+    throw new GoalTodoGenerationError(
+      `Goal iteration ${iteration.iteration} has no time remaining for TODO generation.`,
+    );
+  }
 
   const childResult = await (options.longTaskRunner ?? runCoordinator)({
     inputText: payload,
@@ -96,7 +102,7 @@ export async function runGoalTodoGenerationLongTask(
     workerModel: options.model,
     workerModelName: options.modelName,
     taskThinking: options.thinkingLevel,
-    taskTimeoutMs: timeoutForIteration(iteration, state, now()),
+    taskTimeoutMs: childTimeoutMs,
     maxBashTimeoutMs: options.maxBashTimeoutMs,
   });
 
@@ -125,6 +131,7 @@ export async function runGoalTodoGenerationLongTask(
       generatorRunDir: childResult.runDir,
       generatorResultPath: childResult.resultPath,
       generatorTaskResultPath: childResult.taskResultPath,
+      generatorWorkerCostTotal: childResult.workerCostTotal,
     },
     { now: now() },
   );
@@ -467,14 +474,14 @@ function ensureTrailingNewline(value: string): string {
 }
 
 function timeoutForIteration(iteration: GoalIterationState, state: GoalLoopState, now: Date): number {
-  if (!iteration.deadlineAt) {
-    return state.limits.iterationTimeoutMs;
+  const iterationRemaining = iteration.deadlineAt
+    ? Date.parse(iteration.deadlineAt) - now.getTime()
+    : state.limits.iterationTimeoutMs;
+  const overallRemaining = state.deadlineAt ? Date.parse(state.deadlineAt) - now.getTime() : state.limits.timeoutMs;
+  if (!Number.isFinite(iterationRemaining) || !Number.isFinite(overallRemaining)) {
+    return 0;
   }
-  const remaining = Date.parse(iteration.deadlineAt) - now.getTime();
-  if (!Number.isFinite(remaining) || remaining <= 0) {
-    return 1_000;
-  }
-  return Math.min(state.limits.iterationTimeoutMs, Math.max(1_000, Math.floor(remaining)));
+  return Math.floor(Math.min(state.limits.iterationTimeoutMs, iterationRemaining, overallRemaining));
 }
 
 function buildPreviousIterationContext(state: GoalLoopState): string {

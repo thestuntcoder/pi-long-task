@@ -97,6 +97,31 @@ export class GoalStateStore {
     }
   }
 
+  async initializeResultIfMissing(state: GoalLoopState): Promise<boolean> {
+    try {
+      await readFile(this.paths.resultPath, "utf8");
+      return false;
+    } catch (error) {
+      if (!isNodeErrnoException(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    await this.initializeResult(state);
+    return true;
+  }
+
+  async durableTraceLength(): Promise<number> {
+    try {
+      const text = await readFile(this.paths.tracePath, "utf8");
+      return text.split(/\r?\n/).filter((line) => line.trim()).length;
+    } catch (error) {
+      if (isNodeErrnoException(error) && error.code === "ENOENT") {
+        return 0;
+      }
+      throw error;
+    }
+  }
+
   async initializeResult(state: GoalLoopState): Promise<void> {
     validateGoalLoopState(state);
     await this.ensureRunDir();

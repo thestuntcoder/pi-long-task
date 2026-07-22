@@ -24,6 +24,7 @@ interface ExistingTask {
   taskId: string;
   title: string;
   body: string;
+  done: boolean;
 }
 
 export function todoMarkdownFromString(rawInput: string, goal?: string): string | undefined {
@@ -73,9 +74,6 @@ export function validateTodoMarkdown(markdown: string): void {
   if (!PROGRESS_HEADING_RE.test(trimmed)) {
     throw new TodoGenerationError("TODO markdown must include a `## Progress` section.");
   }
-  if (!/^---\s*$/m.test(trimmed)) {
-    throw new TodoGenerationError("TODO markdown must include a `---` separator before task sections.");
-  }
 
   let tasks;
   try {
@@ -91,6 +89,11 @@ export function validateTodoMarkdown(markdown: string): void {
     throw new TodoGenerationError("TODO markdown must include at least one task section.");
   }
 
+  const progressEntries = validatedProgressEntries(markdown, tasks[0].startLine - 1);
+  if (progressEntries.length !== tasks.length) {
+    throw new TodoGenerationError("Progress section must contain exactly one line for every task section.");
+  }
+
   tasks.forEach((task, idx) => {
     const expectedId = String(idx + 1);
     if (task.taskId !== expectedId) {
@@ -99,9 +102,11 @@ export function validateTodoMarkdown(markdown: string): void {
       );
     }
 
-    const progressLine = progressLineRegex(task.taskId, task.title);
-    if (!progressLine.test(markdown)) {
-      throw new TodoGenerationError(`Progress section must include an unchecked line for TODO ${task.taskId}.`);
+    const progressEntry = progressEntries[idx];
+    if (progressEntry?.taskId !== task.taskId || progressEntry.title !== task.title) {
+      throw new TodoGenerationError(
+        `Progress section entry ${idx + 1} must match TODO ${task.taskId} — ${task.title}.`,
+      );
     }
 
     if (!/\*\*Goal:\*\*/.test(task.section)) {
@@ -310,7 +315,7 @@ function normalizeExistingTodoMarkdown(input: string): string {
   }
 
   const globalInstructions = extractGlobalInstructions(input);
-  const progress = tasks.map((task, idx) => `- [ ] TODO ${idx + 1} — ${task.title}`).join("\n");
+  const progress = tasks.map((task, idx) => `- [${task.done ? "x" : " "}] TODO ${idx + 1} — ${task.title}`).join("\n");
   const sections = tasks.map((task, idx) => normalizeTaskSection({ ...task, taskId: String(idx + 1) })).join("\n\n");
 
   const globalBlock = globalInstructions ? `\n\n${globalInstructions}` : "";
@@ -318,17 +323,18 @@ function normalizeExistingTodoMarkdown(input: string): string {
 }
 
 function extractExistingTasks(input: string): ExistingTask[] {
-  TODO_HEADING_RE.lastIndex = 0;
-  const matches = [...input.matchAll(TODO_HEADING_RE)];
-  return matches.map((match, idx) => {
-    const bodyStart = (match.index ?? 0) + match[0].length;
-    const bodyEnd = idx + 1 < matches.length ? (matches[idx + 1].index ?? input.length) : input.length;
-    return {
-      taskId: match[1],
-      title: cleanTitle(match[2]),
-      body: input.slice(bodyStart, bodyEnd).trim(),
-    };
-  });
+  let tasks;
+  try {
+    tasks = parseTasks(input);
+  } catch {
+    return [];
+  }
+  return tasks.map((task) => ({
+    taskId: task.taskId,
+    title: cleanTitle(task.title),
+    body: task.section.replace(/^##\s+TODO\s+\d+\s+[—-]\s+.*(?:\r?\n)?/, "").trim(),
+    done: task.done,
+  }));
 }
 
 function extractGlobalInstructions(input: string): string {
@@ -424,12 +430,57 @@ function lowercaseFirst(value: string): string {
   return `${value[0].toLocaleLowerCase()}${value.slice(1)}`;
 }
 
-function progressLineRegex(taskId: string, title: string): RegExp {
-  return new RegExp(`^\\s*-\\s+\\[ \\]\\s+TODO\\s+${escapeRegExp(taskId)}\\s+[—-]\\s+${escapeRegExp(title)}\\s*$`, "m");
+function validatedProgressEntries(
+  markdown: string,
+  firstTaskIndex: number,
+): Array<{ taskId: string; title: string; done: boolean }> {
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const visible = visibleLineIndexes(lines);
+  const progressIndex = visible.find((idx) => idx < firstTaskIndex && /^##\s+Progress\s*$/i.test(lines[idx].trim()));
+  if (progressIndex === undefined) {
+    throw new TodoGenerationError("TODO markdown must include a `## Progress` section before task sections.");
+  }
+  const separatorIndex = visible.find(
+    (idx) => idx > progressIndex && idx < firstTaskIndex && /^---\s*$/.test(lines[idx].trim()),
+  );
+  if (separatorIndex === undefined) {
+    throw new TodoGenerationError("TODO markdown must include a `---` separator before task sections.");
+  }
+
+  const entries: Array<{ taskId: string; title: string; done: boolean }> = [];
+  for (let idx = progressIndex + 1; idx < separatorIndex; idx += 1) {
+    if (!visible.includes(idx)) {
+      continue;
+    }
+    const match = /^\s*-\s+\[([ xX])\]\s+TODO\s+(\d+)\s+[—-]\s+(.+?)\s*$/.exec(lines[idx]);
+    if (match) {
+      entries.push({ taskId: match[2], title: match[3].trim(), done: match[1].toLowerCase() === "x" });
+    } else if (/\bTODO\s+\d+\b/i.test(lines[idx])) {
+      throw new TodoGenerationError(`Malformed progress entry: ${lines[idx].trim()}`);
+    }
+  }
+  return entries;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function visibleLineIndexes(lines: readonly string[]): number[] {
+  const indexes: number[] = [];
+  let fence: string | undefined;
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const match = /^\s*(`{3,}|~{3,})/.exec(lines[idx]);
+    if (match) {
+      const marker = match[1];
+      if (!fence) {
+        fence = marker;
+      } else if (marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (!fence) {
+      indexes.push(idx);
+    }
+  }
+  return indexes;
 }
 
 function fencedMarkdownBlocks(text: string): string[] {

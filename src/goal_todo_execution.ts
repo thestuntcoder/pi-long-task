@@ -120,6 +120,23 @@ export async function runGoalTodoExecutionLongTask(
 
   const progressEvents: CoordinatorProgressUpdate[] = [];
   const workerStartedAt = now();
+  const childTimeoutMs = timeoutForIteration(iteration, state, workerStartedAt);
+  if (childTimeoutMs <= 0) {
+    const failure = await recordExecutionFailure({
+      state,
+      iteration,
+      store,
+      previousTraceLength,
+      progressLogPath,
+      message: `Goal iteration ${iteration.iteration} has no time remaining for TODO execution.`,
+      error: new Error("iteration deadline exceeded"),
+      now,
+    });
+    throw new GoalTodoExecutionError(failure.workerResult.summary, {
+      state: failure.state,
+      workerResult: failure.workerResult,
+    });
+  }
   let childResult: CoordinatorResult;
   try {
     childResult = await (options.longTaskRunner ?? runCoordinator)({
@@ -132,7 +149,7 @@ export async function runGoalTodoExecutionLongTask(
       workerModel: options.model,
       workerModelName: options.modelName,
       taskThinking: options.thinkingLevel,
-      taskTimeoutMs: timeoutForIteration(iteration, state, now()),
+      taskTimeoutMs: childTimeoutMs,
       maxBashTimeoutMs: options.maxBashTimeoutMs,
       maxAttemptsPerTask: options.maxAttemptsPerTask,
       onProgress: (update) => {
@@ -294,14 +311,14 @@ async function writeProgressLog(progressLogPath: string, events: CoordinatorProg
 }
 
 function timeoutForIteration(iteration: GoalIterationState, state: GoalLoopState, now: Date): number {
-  if (!iteration.deadlineAt) {
-    return state.limits.iterationTimeoutMs;
+  const iterationRemaining = iteration.deadlineAt
+    ? Date.parse(iteration.deadlineAt) - now.getTime()
+    : state.limits.iterationTimeoutMs;
+  const overallRemaining = state.deadlineAt ? Date.parse(state.deadlineAt) - now.getTime() : state.limits.timeoutMs;
+  if (!Number.isFinite(iterationRemaining) || !Number.isFinite(overallRemaining)) {
+    return 0;
   }
-  const remaining = Date.parse(iteration.deadlineAt) - now.getTime();
-  if (!Number.isFinite(remaining) || remaining <= 0) {
-    return 1_000;
-  }
-  return Math.min(state.limits.iterationTimeoutMs, Math.max(1_000, Math.floor(remaining)));
+  return Math.floor(Math.min(state.limits.iterationTimeoutMs, iterationRemaining, overallRemaining));
 }
 
 function errorMessage(error: unknown): string {

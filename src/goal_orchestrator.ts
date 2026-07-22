@@ -8,9 +8,11 @@ import {
   type GoalDiscoveryEntrypoint,
   type GoalDiscoveryRunner,
 } from "./goal_discovery.ts";
-import type { GoalLoopLimits, GoalLoopStatus } from "./goal_loop.ts";
+import type { GoalIterationStatus, GoalLoopLimits, GoalLoopStatus } from "./goal_loop.ts";
 import {
+  cancelGoalLoop,
   createGoalLoopState,
+  failGoalLoop,
   goalLoopStopReason,
   startGoalIteration,
   type GoalLoopLimitInput,
@@ -145,8 +147,8 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
   let goalSpecification: GoalSpecification | undefined = await store.tryLoadGoalSpecification();
 
   await store.saveState(state);
-  await store.initializeResult(state);
-  await store.appendNewTraceEvents(0, state);
+  await store.initializeResultIfMissing(state);
+  await store.appendNewTraceEvents(await store.durableTraceLength(), state);
   const publish = (phase: GoalLoopProgressPhase, message: string, extra: Partial<GoalLoopProgressUpdate> = {}) => {
     options.onProgress?.({
       message,
@@ -165,136 +167,201 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       tracePath: store.paths.tracePath,
       goalSpecPath: store.paths.goalSpecPath,
       discoveryDecision,
-      workerCostTotal: accumulatedWorkerCost(executionResults, generationResults),
-      reviewerCostTotal: accumulatedReviewerCost(reviewResults),
-      totalCost: accumulatedWorkerCost(executionResults, generationResults) + accumulatedReviewerCost(reviewResults),
+      workerCostTotal: accumulatedWorkerCost(state),
+      reviewerCostTotal: accumulatedReviewerCost(state),
+      totalCost: accumulatedWorkerCost(state) + accumulatedReviewerCost(state),
       ...extra,
     });
   };
 
   publish("goal_start", `Starting goal loop: ${state.goal}`);
 
-  if (!goalLoopStopReason(state, { now: now(), abortSignal: options.abortSignal })) {
-    goalSpecification = await maybeRunGoalDiscovery({
-      state,
-      store,
-      discoveryDecision,
-      existingSpecification: goalSpecification,
-      options,
-      now,
-      publish,
-    });
-  }
-
-  while (state.status === "running") {
-    const stopReason = goalLoopStopReason(state, { now: now(), abortSignal: options.abortSignal });
-    if (stopReason) {
-      const previousTraceLength = state.trace.length;
-      state = startGoalIteration(state, { now: now(), abortSignal: options.abortSignal });
-      await persistStateChange(store, previousTraceLength, state);
-      break;
+  try {
+    if (!goalLoopStopReason(state, { now: now(), abortSignal: options.abortSignal })) {
+      goalSpecification = await maybeRunGoalDiscovery({
+        state,
+        store,
+        discoveryDecision,
+        existingSpecification: goalSpecification,
+        options,
+        now,
+        publish,
+      });
     }
 
-    const nextIteration = state.currentIteration > 0 ? state.currentIteration : state.iterations.length + 1;
-    publish("todo_generation_start", `Goal iteration ${nextIteration}: generating TODO markdown.`, {
-      iteration: nextIteration,
-    });
-    const generation = await runGoalTodoGenerationLongTask({
-      state,
-      cwd: options.cwd,
-      store,
-      longTaskRunner: options.todoGenerationRunner,
-      abortSignal: options.abortSignal,
-      model: options.model,
-      modelName: options.modelName,
-      thinkingLevel: options.thinkingLevel,
-      maxBashTimeoutMs: options.maxBashTimeoutMs,
-      now,
-      goalSpecification,
-    });
-    generationResults.push(generation);
-    state = generation.state;
-    publish("todo_generated", `Goal iteration ${state.currentIteration}: generated TODO markdown.`, {
-      iteration: state.currentIteration,
-    });
+    while (state.status === "running") {
+      const phaseNow = now();
+      const stopReason = goalLoopStopReason(state, { now: phaseNow, abortSignal: options.abortSignal });
+      if (stopReason) {
+        const previousTraceLength = state.trace.length;
+        state = startGoalIteration(state, { now: phaseNow, abortSignal: options.abortSignal });
+        await persistStateChange(store, previousTraceLength, state);
+        break;
+      }
 
-    try {
-      publish(
-        "todo_execution_start",
-        `Goal iteration ${state.currentIteration}: running generated TODO as a long task.`,
-        {
-          iteration: state.currentIteration,
-        },
-      );
-      const execution = await runGoalTodoExecutionLongTask({
-        state,
-        cwd: options.cwd,
-        store,
-        longTaskRunner: options.todoExecutionRunner,
-        abortSignal: options.abortSignal,
-        model: options.model,
-        modelName: options.modelName,
-        thinkingLevel: options.thinkingLevel,
-        maxBashTimeoutMs: options.maxBashTimeoutMs,
-        maxAttemptsPerTask: options.maxAttemptsPerTask,
-        commit: options.commit,
-        now,
-        onProgress: (update) => {
-          publish("todo_execution_start", `Goal iteration ${state.currentIteration}: ${update.message}`, {
-            iteration: state.currentIteration,
-            workerStatus: update.status,
-            childProgress: update,
-          });
-          options.onWorkerProgress?.(update);
-        },
-      });
-      executionResults.push(execution);
-      state = execution.state;
-      publish(
-        "todo_executed",
-        `Goal iteration ${state.currentIteration}: worker finished with ${execution.childResult.status}.`,
-        {
-          iteration: state.currentIteration,
-          workerStatus: execution.childResult.status,
-        },
-      );
-    } catch (error) {
-      if (error instanceof GoalTodoExecutionError && error.state) {
-        state = error.state;
-      } else {
-        throw new GoalLoopOrchestratorError(`Goal TODO execution failed: ${errorMessage(error)}`, {
-          cause: error,
-          state,
+      const current = state.iterations.find((item) => item.iteration === state.currentIteration);
+      if (current && isActiveIterationPhase(current.status) && deadlineExpired(current.deadlineAt, phaseNow)) {
+        const previousTraceLength = state.trace.length;
+        state = failGoalLoop(state, `Goal iteration ${current.iteration} exceeded its iteration deadline.`, {
+          now: phaseNow,
+          status: "partial",
         });
+        await persistStateChange(store, previousTraceLength, state);
+        break;
+      }
+
+      const currentStatus = current?.status;
+      if (!current || currentStatus === "reviewed_incomplete") {
+        const nextIteration = state.iterations.length + 1;
+        publish("todo_generation_start", `Goal iteration ${nextIteration}: generating TODO markdown.`, {
+          iteration: nextIteration,
+        });
+        const generation = await runGoalTodoGenerationLongTask({
+          state,
+          cwd: options.cwd,
+          store,
+          longTaskRunner: options.todoGenerationRunner,
+          abortSignal: options.abortSignal,
+          model: options.model,
+          modelName: options.modelName,
+          thinkingLevel: options.thinkingLevel,
+          maxBashTimeoutMs: options.maxBashTimeoutMs,
+          now,
+          goalSpecification,
+        });
+        generationResults.push(generation);
+        state = generation.state;
+        publish("todo_generated", `Goal iteration ${state.currentIteration}: generated TODO markdown.`, {
+          iteration: state.currentIteration,
+        });
+        continue;
+      }
+
+      if (currentStatus === "pending") {
+        publish("todo_generation_start", `Goal iteration ${current.iteration}: resuming TODO generation.`, {
+          iteration: current.iteration,
+        });
+        const generation = await runGoalTodoGenerationLongTask({
+          state,
+          cwd: options.cwd,
+          store,
+          longTaskRunner: options.todoGenerationRunner,
+          abortSignal: options.abortSignal,
+          model: options.model,
+          modelName: options.modelName,
+          thinkingLevel: options.thinkingLevel,
+          maxBashTimeoutMs: options.maxBashTimeoutMs,
+          now,
+          goalSpecification,
+        });
+        generationResults.push(generation);
+        state = generation.state;
+        publish("todo_generated", `Goal iteration ${state.currentIteration}: generated TODO markdown.`, {
+          iteration: state.currentIteration,
+        });
+        continue;
+      }
+
+      if (currentStatus === "todo_generated") {
+        publish("todo_execution_start", `Goal iteration ${current.iteration}: running generated TODO as a long task.`, {
+          iteration: current.iteration,
+        });
+        try {
+          const execution = await runGoalTodoExecutionLongTask({
+            state,
+            cwd: options.cwd,
+            store,
+            longTaskRunner: options.todoExecutionRunner,
+            abortSignal: options.abortSignal,
+            model: options.model,
+            modelName: options.modelName,
+            thinkingLevel: options.thinkingLevel,
+            maxBashTimeoutMs: options.maxBashTimeoutMs,
+            maxAttemptsPerTask: options.maxAttemptsPerTask,
+            commit: options.commit,
+            now,
+            onProgress: (update) => {
+              publish("todo_execution_start", `Goal iteration ${state.currentIteration}: ${update.message}`, {
+                iteration: state.currentIteration,
+                workerStatus: update.status,
+                childProgress: update,
+              });
+              options.onWorkerProgress?.(update);
+            },
+          });
+          executionResults.push(execution);
+          state = execution.state;
+          publish(
+            "todo_executed",
+            `Goal iteration ${state.currentIteration}: worker finished with ${execution.childResult.status}.`,
+            {
+              iteration: state.currentIteration,
+              workerStatus: execution.childResult.status,
+            },
+          );
+        } catch (error) {
+          if (error instanceof GoalTodoExecutionError && error.state) {
+            state = error.state;
+          } else {
+            throw error;
+          }
+        }
+        continue;
+      }
+
+      if (currentStatus === "todo_executed" || currentStatus === "failed") {
+        publish("review_start", `Goal iteration ${current.iteration}: reviewing goal completion.`, {
+          iteration: current.iteration,
+        });
+        const review = await runGoalReviewSession({
+          state,
+          cwd: options.cwd,
+          store,
+          reviewerRunner: options.reviewerRunner,
+          abortSignal: options.abortSignal,
+          model: options.model,
+          modelName: options.modelName,
+          thinkingLevel: options.thinkingLevel,
+          now,
+          goalSpecification,
+          timeoutMs: remainingReviewTimeout(state, current.deadlineAt, now()),
+        });
+        reviewResults.push(review);
+        state = review.state;
+        publish(
+          "reviewed",
+          `Goal iteration ${review.iteration.iteration}: reviewer decided ${review.reviewerResult.decision}.`,
+          {
+            iteration: review.iteration.iteration,
+            reviewerDecision: review.reviewerResult.decision,
+            remainingWork: review.reviewerResult.remainingWork,
+          },
+        );
+        continue;
+      }
+
+      throw new GoalLoopOrchestratorError(`Cannot resume goal iteration ${current.iteration} from ${currentStatus}.`, {
+        state,
+      });
+    }
+  } catch (error) {
+    const errorState = stateFromError(error);
+    if (errorState) {
+      state = errorState;
+    } else {
+      try {
+        state = await store.loadState();
+      } catch {
+        // Retain the latest in-memory state when no newer durable state is available.
       }
     }
-
-    publish("review_start", `Goal iteration ${state.currentIteration}: reviewing goal completion.`, {
-      iteration: state.currentIteration,
-    });
-    const review = await runGoalReviewSession({
-      state,
-      cwd: options.cwd,
-      store,
-      reviewerRunner: options.reviewerRunner,
-      abortSignal: options.abortSignal,
-      model: options.model,
-      modelName: options.modelName,
-      thinkingLevel: options.thinkingLevel,
-      now,
-      goalSpecification,
-    });
-    reviewResults.push(review);
-    state = review.state;
-    publish(
-      "reviewed",
-      `Goal iteration ${review.iteration.iteration}: reviewer decided ${review.reviewerResult.decision}.`,
-      {
-        iteration: review.iteration.iteration,
-        reviewerDecision: review.reviewerResult.decision,
-        remainingWork: review.reviewerResult.remainingWork,
-      },
-    );
+    if (state.status === "running") {
+      const previousTraceLength = state.trace.length;
+      state = options.abortSignal?.aborted
+        ? cancelGoalLoop(state, `Goal loop aborted: ${errorMessage(error)}`, { now: now() })
+        : failGoalLoop(state, `Goal loop failed: ${errorMessage(error)}`, { now: now() });
+      await persistStateChange(store, previousTraceLength, state);
+    }
   }
 
   publish("complete", `Goal loop ${state.status}: ${state.completion?.reason ?? "finished"}`);
@@ -365,18 +432,42 @@ async function persistStateChange(
   await store.appendNewTraceEvents(previousTraceLength, state);
 }
 
-function accumulatedWorkerCost(
-  executionResults: GoalTodoExecutionResult[],
-  generationResults: GoalTodoGenerationResult[],
-): number {
-  return sumFinite([
-    ...executionResults.map((result) => result.childResult.workerCostTotal),
-    ...generationResults.map((result) => result.childResult.workerCostTotal),
-  ]);
+function isActiveIterationPhase(status: GoalIterationStatus): boolean {
+  return status === "pending" || status === "todo_generated" || status === "todo_executed" || status === "failed";
 }
 
-function accumulatedReviewerCost(reviewResults: GoalReviewResult[]): number {
-  return sumFinite(reviewResults.map((result) => result.sessionResult.reviewerCostTotal));
+function deadlineExpired(deadlineAt: string | undefined, now: Date): boolean {
+  return Boolean(deadlineAt && now.getTime() >= Date.parse(deadlineAt));
+}
+
+function remainingReviewTimeout(state: GoalLoopState, iterationDeadlineAt: string | undefined, now: Date): number {
+  const remaining = [
+    state.limits.reviewerTimeoutMs,
+    state.deadlineAt ? Date.parse(state.deadlineAt) - now.getTime() : Number.POSITIVE_INFINITY,
+    iterationDeadlineAt ? Date.parse(iterationDeadlineAt) - now.getTime() : Number.POSITIVE_INFINITY,
+  ].filter((value) => Number.isFinite(value));
+  return Math.max(1, Math.floor(Math.min(...remaining)));
+}
+
+function stateFromError(error: unknown): GoalLoopState | undefined {
+  if (typeof error !== "object" || error === null || !("state" in error)) {
+    return undefined;
+  }
+  const state = (error as { state?: unknown }).state;
+  return state && typeof state === "object" ? (state as GoalLoopState) : undefined;
+}
+
+function accumulatedWorkerCost(state: GoalLoopState): number {
+  return sumFinite(
+    state.iterations.flatMap((iteration) => [
+      iteration.generatedTodo?.generatorWorkerCostTotal,
+      iteration.workerResult?.workerCostTotal,
+    ]),
+  );
+}
+
+function accumulatedReviewerCost(state: GoalLoopState): number {
+  return sumFinite(state.iterations.map((iteration) => iteration.reviewerResult?.reviewerCostTotal));
 }
 
 function sumFinite(values: Array<number | undefined>): number {

@@ -6,6 +6,7 @@ import {
   hasTaskResultStatus,
   isDoneStatus,
   isPartialStatus,
+  parseCompleteTaskResult,
   parseReportedStatus,
 } from "../src/result_writer.ts";
 
@@ -96,4 +97,31 @@ assert.equal(isPartialStatus("unknown"), true);
 assert.equal(
   extractResultSummary(`${plain}\nextra text`, 20),
   "TASK_RESULT:\nstatus:\n\n[truncated by Pi Long Task]\n",
+);
+
+assert.equal(parseCompleteTaskResult("TASK_RESULT:\nstatus: done"), undefined);
+assert.equal(
+  parseCompleteTaskResult(`
+\`\`\`text
+TASK_RESULT:
+status: done
+summary: stale example
+changes:
+- stale
+verification:
+- stale
+remaining:
+- none
+\`\`\`
+
+TASK_RESULT:
+status: partial
+summary: final result
+changes:
+- none
+verification:
+- not run
+remaining:
+- work remains`)?.status,
+  "partial",
 );

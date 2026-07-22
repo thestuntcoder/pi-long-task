@@ -10,14 +10,14 @@ import {
   recordReviewerResult,
 } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
+import { runGuardedSessionPrompt } from "./session_guard.ts";
 import { goalSpecificationToMarkdown, type GoalSpecification } from "./goal_spec.ts";
 import {
-  assistantTextFromEvent,
   createIsolatedWorkerSession,
   DEFAULT_WORKER_TOOLS,
-  lastAssistantTextFromMessages,
   workerUsageCostFromEvent,
   workerUsageCostFromStats,
+  workerUsageCostKeyFromEvent,
   type WorkerSessionFactory,
 } from "./worker_session.ts";
 
@@ -36,6 +36,7 @@ export interface GoalReviewOptions {
   now?: () => Date;
   sessionFactory?: WorkerSessionFactory;
   goalSpecification?: GoalSpecification;
+  timeoutMs?: number;
 }
 
 export interface GoalReviewResult {
@@ -121,7 +122,7 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
       prompt: payload,
       cwd: path.resolve(options.cwd ?? process.cwd()),
       abortSignal: options.abortSignal,
-      timeoutMs: state.limits.reviewerTimeoutMs,
+      timeoutMs: options.timeoutMs ?? state.limits.reviewerTimeoutMs,
       model: options.model,
       modelName: options.modelName,
       thinkingLevel: options.thinkingLevel,
@@ -148,6 +149,36 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
 
   const rawReviewerOutput = sessionResult.assistantText;
   await writeFile(rawReviewPath, rawReviewerOutput, "utf8");
+
+  if (sessionResult.aborted) {
+    const reason = sessionResult.error ?? "Goal review was aborted.";
+    state = cancelGoalLoop(state, reason, { now: now() });
+    await persistStateChange(store, previousTraceLength, state);
+    await store.writeIterationSnapshot(currentIteration(state, iteration.iteration));
+    throw new GoalReviewError(reason, { state });
+  }
+  if (sessionResult.timedOut || sessionResult.error) {
+    const message = sessionResult.timedOut
+      ? `Reviewer session timed out: ${sessionResult.error ?? "time budget exceeded"}`
+      : `Reviewer session failed: ${sessionResult.error}`;
+    const failure = await recordReviewFailure({
+      state,
+      iteration,
+      store,
+      previousTraceLength,
+      payloadPath,
+      rawReviewPath,
+      message,
+      error: sessionResult.error ?? message,
+      rawReviewerOutput,
+      sessionResult,
+      now,
+    });
+    throw new GoalReviewError(failure.reviewerResult.summary, {
+      state: failure.state,
+      reviewerResult: failure.reviewerResult,
+    });
+  }
 
   let reviewerResult: GoalReviewerResultState;
   try {
@@ -322,33 +353,17 @@ function minimumIterationRemainingWork(state: GoalLoopState): string[] {
 
 export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions): Promise<GoalReviewerSessionResult> {
   const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
-  const events: unknown[] = [];
-  let assistantText = "";
-  let timedOut = false;
-  let aborted = false;
-  let error: string | undefined;
   let reviewerCostTotal = 0;
   let session: Awaited<ReturnType<typeof sessionFactory>>["session"] | undefined;
-  let unsubscribe: (() => void) | undefined;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-
-  const abortSession = async (reason: string) => {
-    if (!session || aborted) {
-      return;
-    }
-    aborted = true;
-    error = error ?? reason;
-    await session.abort?.();
-  };
-  const abortListener = () => {
-    void abortSession("reviewer session aborted by outer signal").catch((exc: unknown) => {
-      error = error ?? errorMessage(exc);
-    });
-  };
+  const costsByMessage = new Map<string, number>();
 
   try {
     if (options.abortSignal?.aborted) {
-      throw new Error("reviewer session aborted before start");
+      return {
+        assistantText: "",
+        aborted: true,
+        error: errorMessage(options.abortSignal.reason ?? "reviewer session aborted before start"),
+      };
     }
     const factoryResult = await sessionFactory({
       cwd: options.cwd,
@@ -358,55 +373,65 @@ export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions)
       thinkingLevel: options.thinkingLevel,
     });
     session = factoryResult.session;
-    unsubscribe = session.subscribe((event: unknown) => {
-      events.push(event);
-      const text = assistantTextFromEvent(event);
-      if (text) {
-        assistantText = text;
-      }
-      const cost = workerUsageCostFromEvent(event);
-      if (cost !== undefined) {
-        reviewerCostTotal = Math.max(reviewerCostTotal, cost);
-      }
+    const promptResult = await runGuardedSessionPrompt({
+      session,
+      prompt: options.prompt,
+      abortSignal: options.abortSignal,
+      timeoutMs: options.timeoutMs,
+      gracefulShutdownMs: 0,
+      diagnostics: factoryResult.diagnostics,
+      dispose: false,
+      onEvent: (event) => {
+        const cost = workerUsageCostFromEvent(event);
+        if (cost === undefined) {
+          return;
+        }
+        const key = workerUsageCostKeyFromEvent(event);
+        if (key) {
+          costsByMessage.set(key, cost);
+          reviewerCostTotal = [...costsByMessage.values()].reduce((total, item) => total + item, 0);
+        } else {
+          reviewerCostTotal += cost;
+        }
+      },
     });
-    options.abortSignal?.addEventListener("abort", abortListener, { once: true });
-    if (options.timeoutMs > 0) {
-      timeout = setTimeout(() => {
-        timedOut = true;
-        void abortSession(`reviewer exceeded ${options.timeoutMs}ms timeout`).catch((exc: unknown) => {
-          error = error ?? errorMessage(exc);
-        });
-      }, options.timeoutMs);
-    }
-    await session.prompt(options.prompt);
-    assistantText = latestAssistantText(session, assistantText);
-  } catch (exc) {
-    error = error ?? errorMessage(exc);
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-    options.abortSignal?.removeEventListener("abort", abortListener);
-    unsubscribe?.();
-    if (session) {
-      assistantText = latestAssistantText(session, assistantText);
-      const statsCost = session.getSessionStats ? workerUsageCostFromStats(await session.getSessionStats()) : undefined;
+
+    try {
+      const stats = session.getSessionStats ? await session.getSessionStats() : undefined;
+      const statsCost = workerUsageCostFromStats(stats);
       if (statsCost !== undefined) {
         reviewerCostTotal = statsCost;
       }
-      session.dispose?.();
+    } catch {
+      // Event-based accounting remains available when session stats fail.
+    }
+
+    return {
+      assistantText: promptResult.assistantText,
+      reviewerSessionId: promptResult.sessionId,
+      reviewerSessionFile: promptResult.sessionFile,
+      reviewerCostTotal,
+      timedOut: promptResult.timedOut,
+      aborted: promptResult.aborted,
+      error: promptResult.error,
+    };
+  } catch (exc) {
+    return {
+      assistantText: "",
+      reviewerSessionId: session?.sessionId,
+      reviewerSessionFile: session?.sessionFile,
+      reviewerCostTotal,
+      error: errorMessage(exc),
+    };
+  } finally {
+    if (session) {
+      try {
+        await Promise.resolve(session.dispose?.());
+      } catch {
+        // Cleanup is best-effort and must not replace a useful reviewer outcome.
+      }
     }
   }
-
-  return {
-    assistantText,
-    reviewerSessionId: session?.sessionId,
-    reviewerSessionFile: session?.sessionFile,
-    reviewerCostTotal,
-    timedOut,
-    aborted: aborted || Boolean(options.abortSignal?.aborted),
-    error,
-  };
 }
 
 function currentReviewableIteration(state: GoalLoopState): GoalIterationState {
@@ -582,13 +607,6 @@ function defaultSummary(decision: GoalReviewerDecision): string {
     case "failed":
       return "Reviewer found the goal loop failed.";
   }
-}
-
-function latestAssistantText(
-  session: { getLastAssistantText?: () => string | undefined; messages?: unknown[] },
-  fallback: string,
-): string {
-  return session.getLastAssistantText?.() || lastAssistantTextFromMessages(session.messages) || fallback;
 }
 
 function markdownFence(value: string, language: string): string {

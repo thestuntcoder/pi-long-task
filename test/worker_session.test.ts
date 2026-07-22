@@ -630,3 +630,102 @@ assert.equal(runningBashSession.steers.length, 1);
 assert.match(runningBashSession.steers[0], /reached its 0s time budget/);
 assert.ok(timeoutOutcome.compactionEvents.includes("aborted running bash before graceful shutdown request"));
 assert.ok(timeoutOutcome.events.some((event) => event.type === "tool_execution_start" && event.toolName === "bash"));
+
+const incompleteDoneSession = new FakeWorkerSession(["TASK_RESULT:\nstatus: done", "TASK_RESULT:\nstatus: done"]);
+const incompleteDoneOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({ session: incompleteDoneSession }),
+});
+assert.equal(incompleteDoneSession.prompts.length, 2);
+assert.equal(incompleteDoneOutcome.reportedStatus, "done");
+assert.equal(incompleteDoneOutcome.done, false);
+
+class ErrorAfterResultSession extends FakeWorkerSession {
+  override async prompt(text: string): Promise<void> {
+    await super.prompt(text);
+    throw new Error("transport failed after response");
+  }
+}
+const errorAfterResultOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({
+    session: new ErrorAfterResultSession([
+      "TASK_RESULT:\nstatus: done\nsummary: complete text\nchanges:\n- none\nverification:\n- passed\nremaining:\n- none",
+    ]),
+  }),
+});
+assert.equal(errorAfterResultOutcome.reportedStatus, "done");
+assert.equal(errorAfterResultOutcome.done, false);
+assert.equal(errorAfterResultOutcome.error, "transport failed after response");
+
+class NonSettlingWorkerSession {
+  abortCalls = 0;
+  disposeCalls = 0;
+  subscribe(): () => void {
+    return () => {};
+  }
+  async prompt(): Promise<void> {
+    await new Promise<void>(() => {});
+  }
+  async steer(): Promise<void> {
+    await new Promise<void>(() => {});
+  }
+  abort(): void {
+    this.abortCalls += 1;
+  }
+  dispose(): void {
+    this.disposeCalls += 1;
+  }
+}
+const nonSettlingController = new AbortController();
+const nonSettlingSession = new NonSettlingWorkerSession();
+const nonSettlingPromise = runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  abortSignal: nonSettlingController.signal,
+  sessionFactory: async () => ({ session: nonSettlingSession }),
+});
+setTimeout(() => nonSettlingController.abort(new Error("bounded cancellation")), 5);
+const boundedAbortOutcome = await Promise.race([
+  nonSettlingPromise,
+  new Promise<never>((_, reject) => setTimeout(() => reject(new Error("worker cancellation hung")), 100)),
+]);
+assert.equal(boundedAbortOutcome.aborted, true);
+assert.equal(nonSettlingSession.abortCalls, 1);
+assert.equal(nonSettlingSession.disposeCalls, 1);
+
+const timeoutHangSession = new NonSettlingWorkerSession();
+const boundedTimeoutOutcome = await Promise.race([
+  runWorkerTask({
+    cwd: "/tmp/project",
+    todoPath: "/tmp/TODO.md",
+    task,
+    attempt: 1,
+    commitRequested: false,
+    maxBashTimeoutSeconds: 300,
+    taskTimeoutSeconds: 0.005,
+    gracefulShutdownSeconds: 0.005,
+    sessionFactory: async () => ({ session: timeoutHangSession }),
+  }),
+  new Promise<never>((_, reject) => setTimeout(() => reject(new Error("worker timeout hung")), 150)),
+]);
+assert.equal(boundedTimeoutOutcome.timedOut, true);
+assert.equal(boundedTimeoutOutcome.aborted, true);
+assert.equal(timeoutHangSession.abortCalls, 1);

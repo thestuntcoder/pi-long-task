@@ -92,3 +92,25 @@ validateTodoMarkdown(generatedWithCoverageGoal);
 
 const generated = generatedTodoMarkdown(["First task", "Second task"]);
 assert.equal(extractTodoMarkdown(`Here is the plan:\n\n\`\`\`markdown\n${generated}\`\`\``), generated);
+
+const resumed = generated
+  .replace("- [ ] TODO 1 — First task", "- [x] TODO 1 — First task")
+  .replace("- [ ] Complete first task", "- [x] Complete first task");
+const normalizedResume = todoMarkdownFromString(resumed);
+assert.ok(normalizedResume);
+assert.deepEqual(
+  parseTasks(normalizedResume).map((task) => task.done),
+  [true, false],
+);
+validateTodoMarkdown(normalizedResume);
+
+const emptyStatus = generatedTodoMarkdown(["Empty status"]).replace(
+  "**Status:**\n- [ ] Complete empty status",
+  "**Status:**\n\n**Verify:**\n- [ ] This verification checkbox must not become status\n\n**Verify:**",
+);
+assert.throws(() => validateTodoMarkdown(emptyStatus), /must include status checkboxes/);
+
+const misplacedProgress = generated
+  .replace("- [ ] TODO 1 — First task\n", "")
+  .replace("**Verify:**", "**Verify:**\n- [ ] TODO 1 — First task");
+assert.throws(() => validateTodoMarkdown(misplacedProgress), /exactly one line for every task/);

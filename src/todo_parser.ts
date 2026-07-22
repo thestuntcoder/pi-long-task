@@ -25,6 +25,8 @@ export class TodoParseError extends Error {
 const TASK_HEADING_RE = /^##\s+TODO\s+(\d+)\s+[—-]\s+(.+?)\s*$/;
 const CHECKBOX_RE = /^(\s*-\s+\[)([ xX])(\].*)$/;
 const GLOBAL_PROGRESS_HEADING_RE = /^##\s+Progress\s*$/i;
+const FIELD_HEADING_RE = /^\*\*[^*\r\n]+:\*\*\s*$/;
+const FENCE_LINE_RE = /^\s*(`{3,}|~{3,})/;
 
 function progressRegexForTask(taskId: string): RegExp {
   return new RegExp(`^(\\s*-\\s+\\[)([ xX])(\\]\\s+TODO\\s+${escapeRegExp(taskId)}\\b.*)$`);
@@ -54,18 +56,32 @@ interface TaskHeading {
 
 function parseTaskHeadings(lines: string[]): TaskHeading[] {
   const headings: TaskHeading[] = [];
+  let fence: string | undefined;
 
   lines.forEach((line, idx) => {
-    const match = TASK_HEADING_RE.exec(stripLineBreaks(line));
-    if (!match) {
+    const stripped = stripLineBreaks(line);
+    const fenceMatch = FENCE_LINE_RE.exec(stripped);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!fence) {
+        fence = marker;
+      } else if (marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = undefined;
+      }
+      return;
+    }
+    if (fence) {
       return;
     }
 
-    headings.push({
-      startIdx: idx,
-      taskId: match[1],
-      title: match[2].trim(),
-    });
+    const match = TASK_HEADING_RE.exec(stripped);
+    if (match) {
+      headings.push({
+        startIdx: idx,
+        taskId: match[1],
+        title: match[2].trim(),
+      });
+    }
   });
 
   return headings;
@@ -73,9 +89,17 @@ function parseTaskHeadings(lines: string[]): TaskHeading[] {
 
 function findProgressDone(lines: string[], taskId: string): boolean | undefined {
   const regex = progressRegexForTask(taskId);
+  const progressStart = lines.findIndex((line) => GLOBAL_PROGRESS_HEADING_RE.test(stripLineBreaks(line).trim()));
+  if (progressStart < 0) {
+    return undefined;
+  }
 
-  for (const line of lines) {
-    const match = regex.exec(stripLineBreaks(line));
+  for (let idx = progressStart + 1; idx < lines.length; idx += 1) {
+    const stripped = stripLineBreaks(lines[idx]);
+    if (/^\s*---\s*$/.test(stripped) || TASK_HEADING_RE.test(stripped)) {
+      break;
+    }
+    const match = regex.exec(stripped);
     if (match) {
       return match[2].toLowerCase() === "x";
     }
@@ -114,7 +138,7 @@ function findStatusItems(lines: string[], startIdx: number, endIdx: number): Tas
       continue;
     }
 
-    if (seenCheckbox) {
+    if (FIELD_HEADING_RE.test(stripped) || seenCheckbox) {
       break;
     }
   }
@@ -152,7 +176,7 @@ function markStatusBlockDone(lines: string[], startIdx: number, endIdx: number):
       continue;
     }
 
-    if (seenCheckbox) {
+    if (FIELD_HEADING_RE.test(stripped) || seenCheckbox) {
       break;
     }
   }

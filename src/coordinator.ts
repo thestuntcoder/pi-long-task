@@ -228,14 +228,21 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   await mkdir(runtime.runDir, { recursive: true });
   await writeFile(runtime.taskResultPath, initialTaskResultMarkdown(runtime.runId), "utf8");
   let planningComplete = false;
+  let latestTodoMarkdown: string | undefined;
+  let latestTasks: Task[] = [];
+  let activeTask: Task | undefined;
+  let activeAttempt: number | undefined;
+  const protectedDirtyPathsByTask = new Map<string, Set<string>>();
 
   try {
     emitProgress(runtime, "Creating TODO plan...", { phase: "planning" });
     let todoMarkdown = await generateOrNormalizeTodoMarkdown(inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
     planningComplete = true;
+    latestTodoMarkdown = todoMarkdown;
     await writeFile(runtime.todoPath, todoMarkdown, "utf8");
     const initialTasks = parseTasks(todoMarkdown);
+    latestTasks = initialTasks;
     emitProgress(runtime, `Created TODO plan with ${initialTasks.length} task(s).`, {
       phase: "planned",
       totalTasks: initialTasks.length,
@@ -247,6 +254,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
 
     while (!runtime.abortSignal?.aborted) {
       const tasksBeforeAttempt = parseTasks(todoMarkdown);
+      latestTasks = tasksBeforeAttempt;
       const nextTask = tasksBeforeAttempt.find((task) => !task.done);
       if (!nextTask) {
         break;
@@ -269,9 +277,15 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           }),
         },
       );
-      const preExistingDirtyPaths = options.commit
-        ? await gitDirtyPaths(runtime.cwd, runtime.taskResultPath, runtime.todoPath, runtime.runDir)
-        : new Set<string>();
+      let preExistingDirtyPaths = protectedDirtyPathsByTask.get(nextTask.taskId);
+      if (!preExistingDirtyPaths) {
+        preExistingDirtyPaths = options.commit
+          ? await gitDirtyPaths(runtime.cwd, runtime.taskResultPath, runtime.todoPath, runtime.runDir)
+          : new Set<string>();
+        protectedDirtyPathsByTask.set(nextTask.taskId, preExistingDirtyPaths);
+      }
+      activeTask = nextTask;
+      activeAttempt = attempt;
       const outcome = await runtime.workerRunner({
         cwd: runtime.cwd,
         todoPath: runtime.todoPath,
@@ -294,11 +308,6 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       outcomes.push(outcome);
       finalizeWorkerCost(runtime.workerCostState, outcome);
 
-      if (outcome.done) {
-        todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
-        await writeFile(runtime.todoPath, todoMarkdown, "utf8");
-      }
-
       const attemptDetails: TaskAttemptSummary = {
         taskId: nextTask.taskId,
         title: nextTask.title,
@@ -309,6 +318,14 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       };
       attempts.push(attemptDetails);
       await appendTaskResult(runtime.taskResultPath, nextTask, outcome);
+
+      if (outcome.done) {
+        todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
+        latestTodoMarkdown = todoMarkdown;
+        await writeFile(runtime.todoPath, todoMarkdown, "utf8");
+      }
+      activeTask = undefined;
+      activeAttempt = undefined;
 
       let taskCommitHash: string | undefined;
       let taskCommitError: string | undefined;
@@ -360,12 +377,13 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       }
     }
 
-    if (runtime.abortSignal?.aborted && !failure) {
-      failure = "Pi Long Task run aborted.";
-    }
-
     const finalTodoMarkdown = await readFile(runtime.todoPath, "utf8");
     const finalTasks = parseTasks(finalTodoMarkdown);
+    latestTodoMarkdown = finalTodoMarkdown;
+    latestTasks = finalTasks;
+    if (runtime.abortSignal?.aborted && !failure && finalTasks.some((task) => !task.done)) {
+      failure = "Pi Long Task run aborted.";
+    }
     const completedTasks = finalTasks.filter((task) => task.done).length;
     const remainingTasks = remainingTaskSummaries(finalTasks, attempts);
     const blockedTasks = remainingTasks.filter((task) => task.status === "blocked").length;
@@ -427,12 +445,41 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       ? `${message} See ${runtime.taskResultPath} for planner diagnostics.`
       : message;
     const summary = `Pi Long Task failed: ${resultError}`;
+    const failureNote =
+      planningComplete && activeTask
+        ? `TODO ${activeTask.taskId} — ${activeTask.title} (attempt ${activeAttempt ?? "unknown"}) failed: ${message}`
+        : message;
     try {
-      await appendFailureNote(runtime.taskResultPath, message, !planningComplete ? runtime.plannerDiagnostics : []);
+      await appendFailureNote(runtime.taskResultPath, failureNote, !planningComplete ? runtime.plannerDiagnostics : []);
     } catch {
       // Best effort only; the original error is returned below.
     }
 
+    if (planningComplete && activeTask && activeAttempt !== undefined) {
+      attempts.push({
+        taskId: activeTask.taskId,
+        title: activeTask.title,
+        attempt: activeAttempt,
+        reportedStatus: "failed",
+        done: false,
+        error: message,
+      });
+    }
+    if (planningComplete) {
+      try {
+        latestTodoMarkdown = await readFile(runtime.todoPath, "utf8");
+        latestTasks = parseTasks(latestTodoMarkdown);
+      } catch {
+        // Retain the last valid in-memory task snapshot.
+      }
+    }
+    const completedTasks = latestTasks.filter((task) => task.done).length;
+    const remainingTasks = remainingTaskSummaries(latestTasks, attempts);
+    const blockedTasks = remainingTasks.filter((task) => task.status === "blocked").length;
+    const failedTasks = remainingTasks.filter(
+      (task) => task.status !== "blocked" && task.status !== "not_started",
+    ).length;
+    const taskProgress = buildCompletionTaskProgressModel(latestTasks, attempts, "failed");
     const result: CoordinatorResult = {
       status: "failed",
       summary,
@@ -442,16 +489,16 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       todoPath: runtime.todoPath,
       resultPath: runtime.taskResultPath,
       taskResultPath: runtime.taskResultPath,
-      totalTasks: 0,
-      completedTasks: 0,
-      failedTasks: 0,
-      blockedTasks: 0,
+      totalTasks: latestTasks.length,
+      completedTasks,
+      failedTasks,
+      blockedTasks,
       attemptedTasks: attempts.length,
-      remainingTasks: [],
+      remainingTasks,
       outcomes,
       commits,
       attempts,
-      taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
+      taskProgress,
       workerCostTotal: runtime.workerCostState.total,
       commit: options.commit,
       goal: runtime.goal,
@@ -461,7 +508,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     emitProgress(runtime, "Pi Long Task failed.", {
       phase: "complete",
       status: "failed",
-      taskProgress: buildTaskProgressModel({ tasks: [], attempts }),
+      totalTasks: latestTasks.length,
+      taskProgress,
     });
     return result;
   }

@@ -1,7 +1,13 @@
 import path from "node:path";
 
 import { coverageGoalAction, coverageGoalVerification, parseCoverageGoal } from "./coverage_goal.ts";
-import { hasTaskResult, hasTaskResultStatus, isDoneStatus, parseReportedStatus } from "./result_writer.ts";
+import {
+  hasCompleteTaskResult,
+  hasTaskResult,
+  isDoneStatus,
+  parseCompleteTaskResult,
+  parseReportedStatus,
+} from "./result_writer.ts";
 import type { Task } from "./todo_parser.ts";
 
 export interface WorkerTaskPromptOptions {
@@ -436,6 +442,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
   let messageUsageCostTotal = 0;
   let hasMessageUsageCost = false;
   let sessionStatsCostTotal: number | undefined;
+  let resolvePromptWait: (() => void) | undefined;
 
   const prompt = buildTaskPrompt(options);
   const taskTimeoutSeconds = options.taskTimeoutSeconds ?? DEFAULT_TASK_TIMEOUT_SECONDS;
@@ -483,38 +490,86 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     timers.add(timer);
   };
 
-  const requestGracefulTaskResult = async (message: string, options: { shutdown?: boolean } = {}) => {
+  const requestGracefulTaskResult = (message: string, options: { shutdown?: boolean } = {}) => {
     if (!session || finished || aborted) {
       return;
     }
     if (options.shutdown) {
       shutdownRequested = true;
     }
-    if (session.isBashRunning && session.abortBash) {
-      session.abortBash();
-      compactionEvents.push("aborted running bash before graceful shutdown request");
-    }
-    if ((session.isStreaming || session.isBashRunning) && session.steer) {
-      await session.steer(message);
-    } else {
-      await session.prompt(message);
+    try {
+      if (session.isBashRunning && session.abortBash) {
+        session.abortBash();
+        compactionEvents.push("aborted running bash before graceful shutdown request");
+      }
+      const request =
+        (session.isStreaming || session.isBashRunning) && session.steer
+          ? session.steer(message)
+          : session.followUp
+            ? session.followUp(message)
+            : session.steer
+              ? session.steer(message)
+              : undefined;
+      if (!request) {
+        compactionEvents.push("graceful TASK_RESULT request skipped: session does not support steer/followUp");
+        return;
+      }
+      void request.catch((exc: unknown) => {
+        compactionEvents.push(`graceful TASK_RESULT request failed: ${errorMessage(exc)}`);
+      });
+    } catch (exc) {
+      compactionEvents.push(`graceful TASK_RESULT request failed: ${errorMessage(exc)}`);
     }
   };
 
-  const abortSession = async (reason: string) => {
+  const abortSession = (reason: string) => {
     if (!session || finished || aborted) {
       return;
     }
     aborted = true;
     shutdownRequested = true;
     error = error ?? reason;
-    await session.abort?.();
+    try {
+      const abortResult = session.abort?.();
+      void Promise.resolve(abortResult).catch((exc: unknown) => {
+        compactionEvents.push(`session abort failed: ${errorMessage(exc)}`);
+      });
+    } catch (exc) {
+      compactionEvents.push(`session abort failed: ${errorMessage(exc)}`);
+    }
+    resolvePromptWait?.();
+    resolvePromptWait = undefined;
+  };
+
+  const waitForPrompt = async (text: string): Promise<void> => {
+    if (!session) {
+      return;
+    }
+    let settled = false;
+    const completed = new Promise<void>((resolve) => {
+      resolvePromptWait = resolve;
+    });
+    void session.prompt(text).then(
+      () => {
+        settled = true;
+        resolvePromptWait?.();
+        resolvePromptWait = undefined;
+      },
+      (exc: unknown) => {
+        settled = true;
+        error = error ?? errorMessage(exc);
+        resolvePromptWait?.();
+        resolvePromptWait = undefined;
+      },
+    );
+    await completed;
+    if (!settled && !aborted) {
+      error = error ?? "worker prompt ended without settling";
+    }
   };
 
   const abortListener = () => {
-    void abortSession("worker session aborted by outer signal").catch((exc: unknown) => {
-      compactionEvents.push(`abort by outer signal failed: ${errorMessage(exc)}`);
-    });
+    abortSession("worker session aborted by outer signal");
   };
 
   try {
@@ -612,12 +667,12 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     options.abortSignal?.addEventListener("abort", abortListener, { once: true });
 
     if (taskTimeoutSeconds > 0) {
-      schedule(async () => {
-        if (finished || hasTaskResultStatus(assistantText)) {
+      schedule(() => {
+        if (finished || hasCompleteTaskResult(assistantText)) {
           return;
         }
         timedOut = true;
-        await requestGracefulTaskResult(buildTimeLimitMessage(taskTimeoutSeconds), { shutdown: true });
+        requestGracefulTaskResult(buildTimeLimitMessage(taskTimeoutSeconds), { shutdown: true });
         if (gracefulShutdownSeconds > 0) {
           schedule(
             () => abortSession(`task exceeded ${taskTimeoutSeconds.toFixed(0)}s timeout`),
@@ -627,12 +682,14 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
       }, taskTimeoutSeconds * 1000);
     }
 
-    await session.prompt(prompt);
+    await waitForPrompt(prompt);
     assistantText = latestAssistantText(session, assistantText);
 
-    if (!hasTaskResultStatus(assistantText) && !aborted && !options.abortSignal?.aborted) {
-      contextObservations.push("missing TASK_RESULT status after initial prompt; requested required block once");
-      await requestGracefulTaskResult(buildMissingTaskResultMessage());
+    if (!hasCompleteTaskResult(assistantText) && !error && !aborted && !timedOut && !options.abortSignal?.aborted) {
+      contextObservations.push(
+        "missing TASK_RESULT status after initial prompt, or required fields were incomplete; requested required block once",
+      );
+      await waitForPrompt(buildMissingTaskResultMessage());
       assistantText = latestAssistantText(session, assistantText);
     }
   } catch (exc) {
@@ -647,7 +704,11 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
       sessionFile = session.sessionFile ?? sessionFile;
       sessionId = session.sessionId ?? sessionId;
       sessionStatsCostTotal = await workerUsageCostFromSessionStats(session);
-      session.dispose?.();
+      try {
+        await Promise.resolve(session.dispose?.());
+      } catch (exc) {
+        compactionEvents.push(`session dispose failed: ${errorMessage(exc)}`);
+      }
     }
   }
 
@@ -655,7 +716,8 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     assistantText = buildLongTaskFailureTaskResult(error ?? (timedOut ? "task timed out" : "worker session aborted"));
   }
 
-  const reportedStatus = parseReportedStatus(assistantText);
+  const parsedResult = parseCompleteTaskResult(assistantText);
+  const reportedStatus = parsedResult?.status ?? parseReportedStatus(assistantText);
   const capturedWorkerCost = selectWorkerCostTotal({
     messageCostTotal: hasMessageUsageCost ? messageUsageCostTotal : undefined,
     statsCostTotal: sessionStatsCostTotal,
@@ -666,7 +728,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     startedAt,
     endedAt: now().toISOString(),
     reportedStatus,
-    done: isDoneStatus(reportedStatus),
+    done: Boolean(parsedResult && isDoneStatus(reportedStatus) && !error && !aborted && !timedOut),
     assistantText,
     sessionFile,
     sessionId,

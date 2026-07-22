@@ -68,6 +68,7 @@ export interface GeneratedTodoState {
   generatorRunDir?: string;
   generatorResultPath?: string;
   generatorTaskResultPath?: string;
+  generatorWorkerCostTotal?: number;
 }
 
 export interface GoalWorkerResultState {
@@ -399,6 +400,35 @@ export function recordReviewerResult(
       },
     };
   });
+}
+
+export function failGoalLoop(
+  state: GoalLoopState,
+  reason: string,
+  options: { now?: Date; status?: "failed" | "partial" } = {},
+): GoalLoopState {
+  if (isTerminalGoalLoopStatus(state.status)) {
+    return state;
+  }
+  const timestamp = (options.now ?? new Date()).toISOString();
+  const status = options.status ?? "failed";
+  const phase: GoalLoopPhase = status === "failed" ? "failed" : "complete";
+  const completion: GoalCompletionState = { status, reason, completedAt: timestamp };
+  const iterations = state.iterations.map((iteration) =>
+    iteration.iteration === state.currentIteration && !isTerminalIterationStatus(iteration.status)
+      ? { ...iteration, status: "failed" as const, updatedAt: timestamp, completion }
+      : iteration,
+  );
+  return withTrace(
+    { ...state, status, phase, completion, iterations, updatedAt: timestamp },
+    {
+      timestamp,
+      phase,
+      event: status === "partial" ? "timeout" : "failed",
+      message: reason,
+      iteration: state.currentIteration || undefined,
+    },
+  );
 }
 
 export function cancelGoalLoop(

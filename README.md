@@ -194,7 +194,7 @@ Use `with commits` or `commit true` only when you want Pi Long Task to create el
 
 ### 3. Monitor progress and completion
 
-During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs one isolated worker session per unfinished TODO in order, and retries unfinished tasks up to the configured attempt limit. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
+During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs one isolated worker session per unfinished TODO in order, and retries unfinished tasks up to the configured attempt limit. Checked progress in pasted TODO markdown is preserved, so completed tasks are skipped when that artifact is supplied again. A task is marked complete only after the worker returns every required `TASK_RESULT` field without a session error, timeout, or cancellation, and the attempt evidence is appended before the TODO completion marker. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
 
 ## What it looks like
 
@@ -331,16 +331,16 @@ When a `pi_goal_task` goal is already concrete, existing direct behavior is pres
 
 `pi_long_task` behavior is unchanged. Discovery is only enabled by default for `pi_goal_task`; direct long-task planning, TODO normalization, worker execution, progress display, retries, artifacts, and commit behavior continue to work as before.
 
-Goal-loop artifacts are stored under `tmp/pi-goal-task/<goal-run-id>/`, including `GOAL_STATE.json`, `GOAL_TRACE.jsonl`, `GOAL_RESULT.md`, optional `GOAL_SPEC.json` for discovered goals, and per-iteration generated TODO, worker, and reviewer files. Child TODO execution still writes normal `tmp/pi-long-task/<run-id>/` artifacts.
+Goal-loop artifacts are stored under `tmp/pi-goal-task/<goal-run-id>/`, including `GOAL_STATE.json`, `GOAL_TRACE.jsonl`, `GOAL_RESULT.md`, optional `GOAL_SPEC.json` for discovered goals, and per-iteration generated TODO, worker, and reviewer files. Persisted `pending`, `todo_generated`, `todo_executed`, `failed`, and reviewed boundaries can be resumed by SDK callers without rerunning completed phases or rewriting existing result/trace history. Child TODO execution still writes normal `tmp/pi-long-task/<run-id>/` artifacts.
 
 Safety controls:
 
 - `minIterations` prevents early success before the requested number of loops; default is `1`.
 - `maxIterations` stops retry loops when the reviewer keeps finding remaining work; default is `50`. If explicitly provided without `minIterations`, it is also used as the minimum target.
 - `timeoutMs` caps the overall goal loop; default is `172800000` ms (48 hours).
-- `iterationTimeoutMs` caps each generated TODO worker iteration; default is `10800000` ms (3 hours).
-- `reviewerTimeoutMs` caps each reviewer session; default is `1800000` ms (30 minutes).
-- tool cancellation is passed through and stops the loop with `cancelled` status.
+- `iterationTimeoutMs` caps each generation, execution, and review sequence; default is `10800000` ms (3 hours).
+- `reviewerTimeoutMs` caps each reviewer session within the remaining overall and iteration budgets; default is `1800000` ms (30 minutes).
+- tool cancellation is passed through, bounded locally even if an SDK prompt does not settle after abort, and stops the loop with `cancelled` status.
 - `maxAttemptsPerTask` and `maxBashTimeoutMs` are forwarded to worker long-task runs.
 - `commit` controls whether implementation workers may commit; goal loops default to `commit true`, so pass `commit false` when you want to review all changes first.
 
@@ -414,7 +414,7 @@ When `commit` is `true`, it may commit eligible task changes after a task report
 
 - generated run files under `tmp/pi-long-task/`
 - generated `TASK_RESULT.md` files
-- files that were already dirty before the task started
+- files that were already dirty before the task's first attempt (the same protected baseline is retained across retries)
 
 This lets you keep existing local work separate from Pi Long Task changes.
 
