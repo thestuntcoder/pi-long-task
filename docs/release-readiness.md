@@ -4,9 +4,9 @@ Review date: 2026-07-22.
 
 ## Recommendation
 
-**Do not publish yet.** The reviewed package behavior and packaged native smoke are green, but the repository is not release-ready because the completed TODO 5 correctness fixes remain uncommitted. The TODO 6 metadata and release files are committed, and the release candidate is versioned `0.3.13`, a patch release from the published and tagged `0.3.12`.
+**Ready to publish.** The completed correctness fixes are recorded in focused commit `7d341de`, the release candidate is versioned `0.3.13`, and the repository passed the full clean-tree release gate. Version `0.3.13` is recommended for tagging and publication as a patch release from the published and tagged `0.3.12`.
 
-After the TODO 5 fix and this final review update are recorded as focused commits, rerun `npm ci`, `npm run check`, `npm pack --dry-run --json`, the packaged native smoke, and `git status --short --branch` from a clean checkout. If those commands reproduce this review, `0.3.13` is recommended for tagging and publication.
+Validation was repeated after the implementation commit: dependency installation, all static and automated checks, package inspection, and native smoke from an extracted release tarball passed. The only audit finding is the documented inherited, development-only `protobufjs` advisory; it is not bundled in the published package.
 
 ## Metadata and package contents
 
@@ -22,7 +22,7 @@ The README matches the reviewed behavior for complete `TASK_RESULT` requirements
 
 ## Validation results
 
-The functional and packaging checks were repeated again during the final review against the intended candidate contents. They do not satisfy the final clean-checkout gate because the TODO 5 implementation and this review update are still working-tree changes.
+The functional and packaging checks were repeated against the committed candidate contents and satisfy the final clean-checkout gate.
 
 - `npm ci` — passed on Node `22.22.3` with npm `10.9.8`; 319 packages installed from lockfile version 3.
 - `npm run check` — passed: Prettier, ESLint, TypeScript no-emit checking, and all 37 Node test-runner tests (37 passed, 0 failed, 0 skipped).
@@ -35,16 +35,9 @@ The functional and packaging checks were repeated again during the final review 
 
 ## Commit-history and clean-tree gate
 
-Six review commits are currently present. The first four are focused and clearly named:
+The review baseline, correctness audit, runtime compatibility assessment, regression assessment, release metadata, and implementation are all committed. The release-blocking TODO 5 source, test, README, and validation-record changes are recorded together in focused commit `7d341de` (`Fix long-task lifecycle and resume handling`). No source or package changes remain uncommitted.
 
-1. `Establish Baseline and Review Scope`
-2. `Audit Plugin Correctness`
-3. `Verify Pi and Runtime Compatibility`
-4. `Assess Regression Coverage`
-5. `Complete Release Readiness Review` (version/lockfile update, changelog, and initial release review)
-6. `Complete Release Readiness Review` (release-review result update only)
-
-The two consecutive release-review subjects are understandable from their diffs but unnecessarily duplicate the same subject; this is non-blocking history polish. More importantly, the TODO 5 correctness implementation, tests, README changes, and fix-validation record remain uncommitted across 17 paths before this review edit. Because the worker is explicitly prohibited from running `git commit`, this is a release-process blocker rather than an unverified code-path failure. No tag or npm publication should occur until the coordinator records the TODO 5 work and this final review update as focused commits and the full validation is repeated with a clean tree.
+The final release checks were run from that committed state. This review update is the release-record-only change and does not affect package contents or runtime behavior. After it is committed, the branch satisfies the clean-tree requirement for tagging and publication.
 
 ## Remaining risks
 
