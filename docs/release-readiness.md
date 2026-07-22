@@ -6,7 +6,7 @@ Review date: 2026-07-22.
 
 **Do not publish yet.** The reviewed package behavior and packaged native smoke are green, but the repository is not release-ready because the completed TODO 5 correctness fixes remain uncommitted. The TODO 6 metadata and release files are committed, and the release candidate is versioned `0.3.13`, a patch release from the published and tagged `0.3.12`.
 
-After the TODO 5 fix is recorded as a focused commit, rerun `npm ci`, `npm run check`, `npm pack --dry-run --json`, the packaged native smoke, and `git status --short --branch` from a clean checkout. If those commands reproduce this review, `0.3.13` is recommended for tagging and publication.
+After the TODO 5 fix and this final review update are recorded as focused commits, rerun `npm ci`, `npm run check`, `npm pack --dry-run --json`, the packaged native smoke, and `git status --short --branch` from a clean checkout. If those commands reproduce this review, `0.3.13` is recommended for tagging and publication.
 
 ## Metadata and package contents
 
@@ -22,27 +22,29 @@ The README matches the reviewed behavior for complete `TASK_RESULT` requirements
 
 ## Validation results
 
-The functional and packaging checks were repeated after the TODO 6 commit against the intended candidate contents. They do not satisfy the final clean-checkout gate because the TODO 5 implementation is still present only as working-tree changes.
+The functional and packaging checks were repeated again during the final review against the intended candidate contents. They do not satisfy the final clean-checkout gate because the TODO 5 implementation and this review update are still working-tree changes.
 
 - `npm ci` — passed on Node `22.22.3` with npm `10.9.8`; 319 packages installed from lockfile version 3.
 - `npm run check` — passed: Prettier, ESLint, TypeScript no-emit checking, and all 37 Node test-runner tests (37 passed, 0 failed, 0 skipped).
 - `npm pack --dry-run --json` — passed for `pi-long-task@0.3.13`; 27 expected files, 93,441 bytes packed and 410,810 bytes unpacked, with no bundled dependencies.
 - Packaged native smoke — passed by creating an actual `0.3.13` tarball, extracting it, loading that extracted package with `pi -e`, and executing representative `pi_long_task` runs against `openai-codex/gpt-5.5:minimal`. Both `commit: false` and `commit: true` completed, wrote and verified their marker files, and the commit-enabled case created exactly one eligible commit.
+- `npm view pi-long-task version --json` — reported `0.3.12` as the currently published version.
 - `git diff --check` — passed.
 - `npm audit --audit-level=moderate` — failed only on the inherited development-only `protobufjs` advisory described below.
 - Package/runtime compatibility remains validated on Pi `0.80.7`, `0.80.8`, and `0.81.1` as recorded in [`pi-runtime-compatibility.md`](pi-runtime-compatibility.md).
 
 ## Commit-history and clean-tree gate
 
-The five review commits currently present are focused and understandable:
+Six review commits are currently present. The first four are focused and clearly named:
 
 1. `Establish Baseline and Review Scope`
 2. `Audit Plugin Correctness`
 3. `Verify Pi and Runtime Compatibility`
 4. `Assess Regression Coverage`
-5. `Complete Release Readiness Review`
+5. `Complete Release Readiness Review` (version/lockfile update, changelog, and initial release review)
+6. `Complete Release Readiness Review` (release-review result update only)
 
-The release-readiness commit contains only the version/lockfile update, changelog, and release review. The TODO 5 correctness implementation, tests, README changes, and fix-validation record remain uncommitted across 17 paths. Because the worker is explicitly prohibited from running `git commit`, this is a release-process blocker rather than an unverified code-path failure. No tag or npm publication should occur until the coordinator records that work in a focused fix commit and the full validation is repeated with a clean tree.
+The two consecutive release-review subjects are understandable from their diffs but unnecessarily duplicate the same subject; this is non-blocking history polish. More importantly, the TODO 5 correctness implementation, tests, README changes, and fix-validation record remain uncommitted across 17 paths before this review edit. Because the worker is explicitly prohibited from running `git commit`, this is a release-process blocker rather than an unverified code-path failure. No tag or npm publication should occur until the coordinator records the TODO 5 work and this final review update as focused commits and the full validation is repeated with a clean tree.
 
 ## Remaining risks
 
