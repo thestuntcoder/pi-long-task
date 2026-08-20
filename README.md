@@ -1,6 +1,12 @@
 # Pi Long Task
 
-Pi Long Task is a Pi extension that breaks large coding requests into tracked TODOs, executes them in isolated worker sessions, registers a real Pi TUI progress sidebar while a run is active, and optionally commits completed work.
+[![npm version](https://img.shields.io/npm/v/pi-long-task.svg)](https://www.npmjs.com/package/pi-long-task)
+[![Node.js >= 22.19](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Pi Long Task** is a long-running task runner and subagent orchestrator for the [Pi coding agent](https://github.com/earendil-works/pi). It is a Pi extension that breaks large coding requests into tracked TODOs, executes them in isolated AI worker sessions, registers a real Pi TUI progress sidebar while a run is active, and optionally commits completed work.
+
+If you are looking for a way to run long-running, multi-step, autonomous coding tasks with Pi — refactors, test coverage pushes, full feature builds, or entire product goals — this extension handles the planning, delegation, progress tracking, retries, and safe git commits for you.
 
 Use it when a coding request is bigger than one focused interaction. Pi Long Task creates or cleans up the TODO plan, hands each TODO to a fresh worker session, tracks every attempt, and keeps the run artifacts so you can inspect what happened later.
 
@@ -197,6 +203,8 @@ Use `with commits` or `commit true` only when you want Pi Long Task to create el
 During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs one isolated worker session per unfinished TODO in order, and retries unfinished tasks up to the configured attempt limit. Checked progress in pasted TODO markdown is preserved, so completed tasks are skipped when that artifact is supplied again. A task is marked complete only after the worker returns every required `TASK_RESULT` field without a session error, timeout, or cancellation, and the attempt evidence is appended before the TODO completion marker. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
 
 ## What it looks like
+
+![Pi Long Task running in the Pi TUI with a live progress sidebar showing the task timeline, subtasks, and worker spend](docs/assets/package-preview.png)
 
 In Pi TUI, Pi Long Task keeps worker activity in the main tool result flow and registers a real right-side TUI sidebar for the run timeline:
 
@@ -459,6 +467,10 @@ That smoke test creates disposable git repos and verifies both `commit: false` a
 - Real runs require usable Pi model credentials, such as a working Pi login or API key for the selected model.
 - Worker spend is added to the main Pi `$ spent` total as cost-only usage. Token counts are not merged into the main thread because worker sessions have separate context windows, and merging their token usage would corrupt the main conversation's context statistics.
 - Run artifacts are written under `tmp/pi-long-task/<run-id>/`.
+
+## Keywords
+
+Pi extension, Pi package, Pi coding agent, AI coding agent, AI coding assistant, LLM agent, agentic coding, subagent orchestration, long-running tasks, task runner, task orchestration, TODO planner, autonomous coding, background coding agent, isolated worker sessions, multi-step coding tasks.
 
 ## License
 

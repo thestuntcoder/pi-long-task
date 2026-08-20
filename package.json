@@ -2,14 +2,38 @@
   "name": "pi-long-task",
   "version": "0.3.13",
   "type": "module",
-  "description": "Pi extension for breaking down and running long coding tasks safely.",
+  "description": "Pi coding agent extension that breaks large coding requests into tracked TODOs and runs them in isolated AI worker sessions. A long-running task runner and subagent orchestrator for Pi, with a live TUI progress sidebar, retries, goal loops, and optional per-task git commits.",
   "keywords": [
+    "pi",
     "pi-package",
-    "long-task",
-    "task-runner",
+    "pi-extension",
+    "pi-coding-agent",
     "coding-agent",
-    "pi-extension"
+    "ai-coding-agent",
+    "ai-coding-assistant",
+    "llm-agent",
+    "agentic-coding",
+    "subagent",
+    "long-task",
+    "long-running-tasks",
+    "task-runner",
+    "task-orchestration",
+    "todo-planner",
+    "autonomous-coding",
+    "background-agent",
+    "worker-sessions",
+    "ai-automation",
+    "developer-tools"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thestuntcoder/pi-long-task.git"
+  },
+  "homepage": "https://github.com/thestuntcoder/pi-long-task#readme",
+  "bugs": "https://github.com/thestuntcoder/pi-long-task/issues",
+  "engines": {
+    "node": ">=22.19"
+  },
   "files": [
     "CHANGELOG.md",
     "LICENSE",
