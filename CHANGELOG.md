@@ -2,6 +2,13 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## 0.3.15 - 2026-08-20
+
+### Changed
+
+- Show the full active task status in a dedicated "Active status" section below the active task in the TUI sidebar, wrapping instead of truncating long status messages.
+- Wrap the active task status message and current task line in the plain widget fallback instead of hard-truncating them.
+
 ## 0.3.14 - 2026-08-20
 
 ### Documentation and metadata
