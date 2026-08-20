@@ -275,7 +275,10 @@ function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
   const progress = update.taskProgress;
   const summary = progress?.summary;
   const statusDetails = sidebarUpdateStateDetails(update);
-  const lines = ["Pi Long Task", `${statusDetails.icon} ${statusDetails.label} · ${update.message}`];
+  const lines = [
+    "Pi Long Task",
+    ...wrapPlainText(`${statusDetails.icon} ${statusDetails.label} · ${update.message}`, 96),
+  ];
   if (summary) {
     lines.push(
       `Tasks: ${summary.completedTasks}/${summary.totalTasks} · ${summary.completedPercent}%` +
@@ -290,7 +293,9 @@ function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
     const currentTask = currentIndex >= 0 ? progress.tasks[currentIndex] : undefined;
     if (currentTask) {
       const details = taskStatusDetails(currentTask.status);
-      lines.push(`${details.label}: ${details.icon} TODO ${currentTask.taskId} — ${currentTask.title}`);
+      lines.push(
+        ...wrapPlainText(`${details.label}: ${details.icon} TODO ${currentTask.taskId} — ${currentTask.title}`, 96),
+      );
     }
   }
   if (update.workerCostTotal > 0) {
@@ -346,11 +351,6 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
   }
   rows.push(renderSidebarStateLine(update, theme));
 
-  const message = normalizeMessageForSidebar(update.message, update);
-  if (message) {
-    rows.push(...wrapPlainText(message, width, 2).map((line) => theme.fg("dim", line)));
-  }
-
   if (!progress || progress.tasks.length === 0) {
     rows.push("", sidebarHeading("Context", theme), theme.fg("muted", "Waiting for TODO plan"));
     if (update.workerCostTotal > 0) {
@@ -395,6 +395,12 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
     rows.push(...wrapPlainText(currentTask.title, width, 2).map((line) => theme.fg("muted", line)));
   } else {
     rows.push(theme.fg("success", "No active task"));
+  }
+
+  const message = normalizeMessageForSidebar(update.message, update);
+  if (currentTask && message) {
+    rows.push("", sidebarHeading("Active status", theme));
+    rows.push(...wrapPlainText(message, width, 6).map((line) => theme.fg("dim", line)));
   }
 
   rows.push("", sidebarHeading("Task timeline", theme));

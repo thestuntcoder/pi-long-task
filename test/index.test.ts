@@ -326,6 +326,33 @@ assert.equal(constrainedWidgetLines.length, 6, "sidebar should reserve 8 termina
 assert.match(constrainedWidgetLines.at(-1) ?? "", /… \d+ more/);
 (sidebarTui as unknown as { terminal: { rows: number } }).terminal.rows = 40;
 
+const longTitle =
+  "Refactor the sidebar so the active task title and its current state message wrap across lines instead of being shortened";
+const longMessage =
+  "Worker is updating the sidebar renderer so long active task titles and status details stay visible without truncation";
+sidebar.update({
+  ...sidebarUpdate,
+  message: longMessage,
+  title: longTitle,
+  currentTask: { taskId: "2", title: longTitle, status: "in_progress" },
+  taskProgress: {
+    ...sidebarUpdate.taskProgress,
+    tasks: sidebarUpdate.taskProgress.tasks.map((task) => (task.taskId === "2" ? { ...task, title: longTitle } : task)),
+  },
+});
+const flatOverlay = (overlayComponent?.render(96) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+assert.match(flatOverlay, /Active status/);
+assert.ok(
+  flatOverlay.includes("stay visible without truncation"),
+  "sidebar should show the full active task status below the active task",
+);
+const flatWidget = (widgetComponent?.render(80) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+assert.match(flatWidget, /Active status/);
+assert.ok(
+  flatWidget.includes("stay visible without truncation"),
+  "widget sidebar should show the full active task status below the active task",
+);
+
 sidebar.update({
   ...sidebarUpdate,
   message: "TODO 2 done.",
@@ -347,8 +374,8 @@ const doneWidget = widgetComponent?.render(80).join("\n") ?? "";
 assert.match(doneWidget, /✓ done/);
 assert.match(doneWidget, /2\/3 tasks complete/);
 assert.match(doneWidget, /67% complete/);
-assert.equal(renderRequests, 2);
-assert.equal(overlayRenderRequests, 2);
+assert.equal(renderRequests, 3);
+assert.equal(overlayRenderRequests, 3);
 
 sidebar.close();
 assert.equal(widgetCalls.at(-1)?.content, undefined);
