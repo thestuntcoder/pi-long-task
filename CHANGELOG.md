@@ -2,6 +2,13 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## 0.3.14 - 2026-08-20
+
+### Documentation and metadata
+
+- Improve npm and GitHub discoverability with a richer package description, expanded keywords, and added `repository`, `homepage`, `bugs`, and `engines` fields.
+- Add npm version, Node.js, and license badges, a keyword-rich introduction, and the embedded package preview image to the README.
+
 ## 0.3.13 - 2026-07-22
 
 ### Fixed
