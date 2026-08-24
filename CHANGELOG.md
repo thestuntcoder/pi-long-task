@@ -2,6 +2,14 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## 0.3.16 - 2026-08-20
+
+### Changed
+
+- Make the sidebar's "Active status" follow live worker commentary and tool activity instead of repeating a generic coordinator message.
+- Show active bash commands and read, edit, and write paths, including tool completion or failure state.
+- Preserve the latest worker activity across unrelated cost updates while keeping the compact fallback layout unchanged.
+
 ## 0.3.15 - 2026-08-20
 
 ### Changed
