@@ -629,7 +629,11 @@ assert.equal(runningBashSession.abortBashCalls, 1);
 assert.equal(runningBashSession.steers.length, 1);
 assert.match(runningBashSession.steers[0], /reached its 0s time budget/);
 assert.ok(timeoutOutcome.compactionEvents.includes("aborted running bash before graceful shutdown request"));
-assert.ok(timeoutOutcome.events.some((event) => event.type === "tool_execution_start" && event.toolName === "bash"));
+assert.ok(
+  timeoutOutcome.events.some(
+    (event) => event.type === "tool_execution_start" && event.toolName === "bash" && event.activity === "$ sleep 60",
+  ),
+);
 
 const incompleteDoneSession = new FakeWorkerSession(["TASK_RESULT:\nstatus: done", "TASK_RESULT:\nstatus: done"]);
 const incompleteDoneOutcome = await runWorkerTask({

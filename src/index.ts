@@ -277,7 +277,7 @@ function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
   const statusDetails = sidebarUpdateStateDetails(update);
   const lines = [
     "Pi Long Task",
-    ...wrapPlainText(`${statusDetails.icon} ${statusDetails.label} · ${update.message}`, 96),
+    `${statusDetails.icon} ${statusDetails.label} · ${update.activeStatus ?? update.message}`,
   ];
   if (summary) {
     lines.push(
@@ -293,9 +293,7 @@ function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
     const currentTask = currentIndex >= 0 ? progress.tasks[currentIndex] : undefined;
     if (currentTask) {
       const details = taskStatusDetails(currentTask.status);
-      lines.push(
-        ...wrapPlainText(`${details.label}: ${details.icon} TODO ${currentTask.taskId} — ${currentTask.title}`, 96),
-      );
+      lines.push(`${details.label}: ${details.icon} TODO ${currentTask.taskId} — ${currentTask.title}`);
     }
   }
   if (update.workerCostTotal > 0) {
@@ -397,10 +395,10 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
     rows.push(theme.fg("success", "No active task"));
   }
 
-  const message = normalizeMessageForSidebar(update.message, update);
-  if (currentTask && message) {
+  const activeStatus = update.activeStatus ?? normalizeMessageForSidebar(update.message, update);
+  if (currentTask && activeStatus) {
     rows.push("", sidebarHeading("Active status", theme));
-    rows.push(...wrapPlainText(message, width, 6).map((line) => theme.fg("dim", line)));
+    rows.push(...wrapPlainText(activeStatus, width, 6).map((line) => theme.fg("accent", line)));
   }
 
   rows.push("", sidebarHeading("Task timeline", theme));

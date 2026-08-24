@@ -332,7 +332,8 @@ const longMessage =
   "Worker is updating the sidebar renderer so long active task titles and status details stay visible without truncation";
 sidebar.update({
   ...sidebarUpdate,
-  message: longMessage,
+  message: "Generic coordinator progress message",
+  activeStatus: longMessage,
   title: longTitle,
   currentTask: { taskId: "2", title: longTitle, status: "in_progress" },
   taskProgress: {

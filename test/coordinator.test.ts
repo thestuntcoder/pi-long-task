@@ -722,7 +722,10 @@ Max bash timeout: 42s
     cwd: tempRoot,
     runId: "worker-tool-progress",
     workerRunner: async (options) => {
-      options.onEvent?.({ type: "tool_execution_start", toolName: "bash" });
+      options.onEvent?.({ type: "message_update", textDelta: "Reviewing the current sidebar " });
+      options.onEvent?.({ type: "message_update", textDelta: "state." });
+      options.onEvent?.({ type: "message_end", activity: "Inspecting the sidebar progress renderer" });
+      options.onEvent?.({ type: "tool_execution_start", toolName: "bash", activity: "$ npm test -- sidebar" });
       options.onEvent?.({ type: "tool_execution_end", toolName: "bash", isError: true });
       return outcomeFor(options, "done");
     },
@@ -741,11 +744,20 @@ Max bash timeout: 42s
     [["1", "current", "current"]],
   );
 
+  const streamedActivity = workerToolUpdates.find(
+    (update) => update.phase === "worker_tool" && update.workerEventType === "message_update",
+  );
+  assert.equal(streamedActivity?.activeStatus, "Reviewing the current sidebar state.");
+  const assistantActivity = workerToolUpdates.find(
+    (update) => update.phase === "worker_tool" && update.workerEventType === "message_end",
+  );
+  assert.equal(assistantActivity?.activeStatus, "Inspecting the sidebar progress renderer");
   const bashStart = workerToolUpdates.find(
     (update) => update.phase === "worker_tool" && update.workerEventType === "tool_execution_start",
   );
   assert.equal(bashStart?.toolName, "bash");
   assert.equal(bashStart?.status, "started");
+  assert.equal(bashStart?.activeStatus, "$ npm test -- sidebar");
   assert.equal(bashStart?.currentTask?.status, "in_progress");
   assert.deepEqual(bashStart?.subtasks, [{ text: "Complete emit worker tool progress", status: "in_progress" }]);
   const bashEnd = workerToolUpdates.find(
@@ -753,6 +765,7 @@ Max bash timeout: 42s
   );
   assert.equal(bashEnd?.toolName, "bash");
   assert.equal(bashEnd?.status, "failed");
+  assert.equal(bashEnd?.activeStatus, "Failed: $ npm test -- sidebar");
   assert.equal(bashEnd?.isError, true);
   const taskDone = workerToolUpdates.find((update) => update.phase === "task_done");
   assert.equal(taskDone?.currentTask?.status, "done");

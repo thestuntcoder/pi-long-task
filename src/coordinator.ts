@@ -96,6 +96,7 @@ export interface CoordinatorProgressUpdate {
   commitSkipped?: string;
   toolName?: string;
   workerEventType?: string;
+  activeStatus?: string;
   isError?: boolean;
   totalTasks?: number;
   workerCostTotal: number;
@@ -215,6 +216,9 @@ interface RuntimeOptions {
   now: () => Date;
   onProgress?: CoordinatorProgressHandler;
   workerCostState: WorkerCostState;
+  workerActivityByWorker: Map<string, string>;
+  workerTextByWorker: Map<string, string>;
+  workerTextPublishedLengthByWorker: Map<string, number>;
   plannerDiagnostics: PlannerDiagnostic[];
 }
 
@@ -261,6 +265,12 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       }
 
       const attempt = (previousAttempts.get(nextTask.taskId)?.length ?? 0) + 1;
+      const initialActivity =
+        nextTask.statusItems.find((item) => !item.done)?.text ?? `Starting TODO ${nextTask.taskId}`;
+      const worker = workerKey(nextTask.taskId, attempt);
+      runtime.workerActivityByWorker.set(worker, initialActivity);
+      runtime.workerTextByWorker.delete(worker);
+      runtime.workerTextPublishedLengthByWorker.delete(worker);
       emitProgress(
         runtime,
         `Running TODO ${nextTask.taskId} — ${nextTask.title}${attempt > 1 ? ` (attempt ${attempt})` : ""}...`,
@@ -269,6 +279,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           taskId: nextTask.taskId,
           title: nextTask.title,
           attempt,
+          activeStatus: initialActivity,
           ...currentTaskProgress(nextTask, "in_progress"),
           taskProgress: buildTaskProgressModel({
             tasks: tasksBeforeAttempt,
@@ -792,6 +803,9 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     now: options.now ?? (() => new Date()),
     onProgress: options.onProgress,
     workerCostState: createWorkerCostState(),
+    workerActivityByWorker: new Map(),
+    workerTextByWorker: new Map(),
+    workerTextPublishedLengthByWorker: new Map(),
     plannerDiagnostics: [],
   };
 }
@@ -950,11 +964,74 @@ function emitWorkerEventProgress(
   task: Pick<Task, "taskId" | "title" | "statusItems">,
   attempts: readonly TaskAttemptSummary[],
   attempt: number,
-  event: { type: string; toolName?: string; isError?: boolean; usageCostTotal?: number; usageCostKey?: string },
+  event: {
+    type: string;
+    toolName?: string;
+    activity?: string;
+    textDelta?: string;
+    isError?: boolean;
+    usageCostTotal?: number;
+    usageCostKey?: string;
+  },
 ): void {
-  if (event.usageCostTotal !== undefined) {
-    const changed = recordLiveWorkerCost(runtime.workerCostState, workerKey(task.taskId, attempt), event);
-    if (changed) {
+  const worker = workerKey(task.taskId, attempt);
+  let activeStatus = runtime.workerActivityByWorker.get(worker);
+
+  if (event.type === "message_update" && event.textDelta) {
+    const workerText = `${runtime.workerTextByWorker.get(worker) ?? ""}${event.textDelta}`;
+    runtime.workerTextByWorker.set(worker, workerText);
+    const streamedStatus = activeStatusFromWorkerText(workerText);
+    const publishedLength = runtime.workerTextPublishedLengthByWorker.get(worker) ?? 0;
+    const publishBoundary = /[\n.!?:]\s*$/.test(event.textDelta) || streamedStatus.length - publishedLength >= 48;
+    if (streamedStatus && publishBoundary) {
+      activeStatus = streamedStatus;
+      runtime.workerActivityByWorker.set(worker, activeStatus);
+      runtime.workerTextPublishedLengthByWorker.set(worker, streamedStatus.length);
+      emitProgress(runtime, activeStatus, {
+        phase: "worker_tool",
+        taskId: task.taskId,
+        title: task.title,
+        attempt,
+        status: "in_progress",
+        workerEventType: event.type,
+        activeStatus,
+        ...currentTaskProgress(task, "in_progress"),
+        taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
+      });
+    }
+    return;
+  }
+
+  if (event.type === "message_end") {
+    runtime.workerTextByWorker.delete(worker);
+    runtime.workerTextPublishedLengthByWorker.delete(worker);
+  }
+
+  if (event.activity) {
+    activeStatus = event.activity;
+    runtime.workerActivityByWorker.set(worker, activeStatus);
+  }
+
+  const costChanged =
+    event.usageCostTotal !== undefined && recordLiveWorkerCost(runtime.workerCostState, worker, event);
+
+  if (event.type === "message_end" && event.activity) {
+    emitProgress(runtime, event.activity, {
+      phase: "worker_tool",
+      taskId: task.taskId,
+      title: task.title,
+      attempt,
+      status: "in_progress",
+      workerEventType: event.type,
+      activeStatus,
+      ...currentTaskProgress(task, "in_progress"),
+      taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
+    });
+    return;
+  }
+
+  if (!event.toolName || (event.type !== "tool_execution_start" && event.type !== "tool_execution_end")) {
+    if (costChanged) {
       emitProgress(
         runtime,
         `TODO ${task.taskId}: worker cost updated to ${formatCost(runtime.workerCostState.total)}.`,
@@ -965,17 +1042,25 @@ function emitWorkerEventProgress(
           attempt,
           status: "in_progress",
           workerEventType: event.type,
+          activeStatus,
           ...currentTaskProgress(task, "in_progress"),
           taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
         },
       );
     }
-  }
-
-  if (!event.toolName || (event.type !== "tool_execution_start" && event.type !== "tool_execution_end")) {
     return;
   }
+
   const action = event.type === "tool_execution_start" ? "started" : event.isError ? "failed" : "finished";
+  if (event.type === "tool_execution_end") {
+    const previousActivity = runtime.workerActivityByWorker.get(worker) ?? `Running ${event.toolName}`;
+    activeStatus = event.isError ? `Failed: ${previousActivity}` : `Finished: ${previousActivity}`;
+    runtime.workerActivityByWorker.set(worker, activeStatus);
+  } else if (!activeStatus) {
+    activeStatus = `Running ${event.toolName}`;
+    runtime.workerActivityByWorker.set(worker, activeStatus);
+  }
+
   const update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath" | "workerCostTotal"> = {
     phase: "worker_tool",
     taskId: task.taskId,
@@ -984,6 +1069,7 @@ function emitWorkerEventProgress(
     status: action,
     toolName: event.toolName,
     workerEventType: event.type,
+    activeStatus,
     isError: event.isError,
     ...currentTaskProgress(task, "in_progress"),
     taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
@@ -991,7 +1077,12 @@ function emitWorkerEventProgress(
   if (event.isError) {
     update.status = "failed";
   }
-  emitProgress(runtime, `TODO ${task.taskId}: worker tool ${event.toolName} ${action}.`, update);
+  emitProgress(runtime, activeStatus, update);
+}
+
+function activeStatusFromWorkerText(text: string): string {
+  const taskResultIndex = text.indexOf("TASK_RESULT:");
+  return (taskResultIndex >= 0 ? text.slice(0, taskResultIndex) : text).replace(/\s+/g, " ").trim();
 }
 
 function emitTaskOutcomeProgress(

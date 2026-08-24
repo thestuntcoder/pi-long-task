@@ -275,6 +275,7 @@ export interface CapturedWorkerEvent {
   type: string;
   textDelta?: string;
   toolName?: string;
+  activity?: string;
   isError?: boolean;
   note?: string;
   usageCostTotal?: number;
@@ -887,18 +888,25 @@ function summarizeWorkerEvent(event: unknown): CapturedWorkerEvent | undefined {
   }
 
   if (event.type.startsWith("tool_execution_")) {
+    const toolName = typeof event.toolName === "string" ? event.toolName : undefined;
     return {
       type: event.type,
-      toolName: typeof event.toolName === "string" ? event.toolName : undefined,
+      toolName,
+      activity:
+        event.type === "tool_execution_start" && toolName ? workerToolActivity(toolName, event.args) : undefined,
       isError: typeof event.isError === "boolean" ? event.isError : undefined,
     };
   }
 
   if (event.type === "message_end") {
     const usageCostTotal = workerUsageCostFromEvent(event);
-    return usageCostTotal === undefined
-      ? { type: event.type }
-      : { type: event.type, usageCostTotal, usageCostKey: workerUsageCostKeyFromEvent(event) };
+    const activity = workerAssistantActivity(assistantMessageText(event.message));
+    return {
+      type: event.type,
+      activity: activity || undefined,
+      usageCostTotal,
+      usageCostKey: usageCostTotal === undefined ? undefined : workerUsageCostKeyFromEvent(event),
+    };
   }
 
   if (
@@ -913,6 +921,36 @@ function summarizeWorkerEvent(event: unknown): CapturedWorkerEvent | undefined {
   }
 
   return undefined;
+}
+
+function workerToolActivity(toolName: string, argsValue: unknown): string {
+  const args = isRecord(argsValue) ? argsValue : undefined;
+  const path = args && typeof args.path === "string" ? args.path : "";
+
+  switch (toolName) {
+    case "bash": {
+      const command = args && typeof args.command === "string" ? oneLine(args.command) : "";
+      return command ? `$ ${command}` : "Running bash";
+    }
+    case "read":
+      return path ? `Reading ${path}` : "Reading a file";
+    case "edit":
+      return path ? `Editing ${path}` : "Editing a file";
+    case "write":
+      return path ? `Writing ${path}` : "Writing a file";
+    default:
+      return `Running ${toolName}`;
+  }
+}
+
+function workerAssistantActivity(text: string): string {
+  const taskResultIndex = text.indexOf("TASK_RESULT:");
+  const activity = oneLine(taskResultIndex >= 0 ? text.slice(0, taskResultIndex) : text);
+  return activity || (taskResultIndex >= 0 ? "Reporting task results" : "");
+}
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 export function workerUsageCostFromEvent(event: unknown): number | undefined {
