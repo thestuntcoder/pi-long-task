@@ -1053,11 +1053,15 @@ function emitWorkerEventProgress(
 
   const action = event.type === "tool_execution_start" ? "started" : event.isError ? "failed" : "finished";
   if (event.type === "tool_execution_end") {
-    const previousActivity = runtime.workerActivityByWorker.get(worker) ?? `Running ${event.toolName}`;
+    const previousActivity = stripToolOutcomePrefix(
+      runtime.workerActivityByWorker.get(worker) ?? `Running ${event.toolName}`,
+    );
     activeStatus = event.isError ? `Failed: ${previousActivity}` : `Finished: ${previousActivity}`;
     runtime.workerActivityByWorker.set(worker, activeStatus);
-  } else if (!activeStatus) {
-    activeStatus = `Running ${event.toolName}`;
+  } else {
+    // Every tool start begins a new activity. Keeping the previous tool's completed
+    // status here causes each later tool end to prepend another "Finished:" label.
+    activeStatus = event.activity ?? `Running ${event.toolName}`;
     runtime.workerActivityByWorker.set(worker, activeStatus);
   }
 
@@ -1078,6 +1082,10 @@ function emitWorkerEventProgress(
     update.status = "failed";
   }
   emitProgress(runtime, activeStatus, update);
+}
+
+function stripToolOutcomePrefix(activity: string): string {
+  return activity.replace(/^(?:(?:Finished|Failed):\s*)+/i, "");
 }
 
 function activeStatusFromWorkerText(text: string): string {

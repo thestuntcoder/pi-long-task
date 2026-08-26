@@ -727,6 +727,9 @@ Max bash timeout: 42s
       options.onEvent?.({ type: "message_end", activity: "Inspecting the sidebar progress renderer" });
       options.onEvent?.({ type: "tool_execution_start", toolName: "bash", activity: "$ npm test -- sidebar" });
       options.onEvent?.({ type: "tool_execution_end", toolName: "bash", isError: true });
+      options.onEvent?.({ type: "tool_execution_start", toolName: "read" });
+      options.onEvent?.({ type: "tool_execution_end", toolName: "read" });
+      options.onEvent?.({ type: "tool_execution_end", toolName: "read" });
       return outcomeFor(options, "done");
     },
     onProgress: (update) => workerToolUpdates.push(update),
@@ -767,6 +770,13 @@ Max bash timeout: 42s
   assert.equal(bashEnd?.status, "failed");
   assert.equal(bashEnd?.activeStatus, "Failed: $ npm test -- sidebar");
   assert.equal(bashEnd?.isError, true);
+  const readUpdates = workerToolUpdates.filter(
+    (update) => update.phase === "worker_tool" && update.toolName === "read",
+  );
+  assert.deepEqual(
+    readUpdates.map((update) => update.activeStatus),
+    ["Running read", "Finished: Running read", "Finished: Running read"],
+  );
   const taskDone = workerToolUpdates.find((update) => update.phase === "task_done");
   assert.equal(taskDone?.currentTask?.status, "done");
   assert.deepEqual(taskDone?.subtasks, [{ text: "Complete emit worker tool progress", status: "done" }]);
