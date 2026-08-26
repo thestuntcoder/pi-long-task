@@ -2,6 +2,13 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## 0.3.17 - 2026-08-26
+
+### Fixed
+
+- Prevent repeated `Finished:` and `Failed:` prefixes from accumulating in the sidebar's active status across tool events.
+- Reset the active status at every tool start so a completed tool's status cannot leak into the next tool.
+
 ## 0.3.16 - 2026-08-20
 
 ### Changed
