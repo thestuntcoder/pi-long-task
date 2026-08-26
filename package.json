@@ -1,6 +1,6 @@
 {
   "name": "pi-long-task",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "type": "module",
   "description": "Pi coding agent extension that breaks large coding requests into tracked TODOs and runs them in isolated AI worker sessions. A long-running task runner and subagent orchestrator for Pi, with a live TUI progress sidebar, retries, goal loops, and optional per-task git commits.",
   "keywords": [
