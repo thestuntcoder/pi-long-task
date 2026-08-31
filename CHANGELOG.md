@@ -2,6 +2,15 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## 0.4.0 - 2026-08-31
+
+### Added
+
+- Accept additional plain-text guidance while a long task is running and incorporate queued messages into revised TODO plans.
+- Preserve completed work across plan revisions using stable task identities, while scheduling corrective follow-up work when guidance invalidates prior results.
+- Atomically persist and re-render revised plans, continue from the next eligible task, and prevent obsolete in-flight workers from completing replacement tasks.
+- Report accepted and rejected revisions through live progress, retaining the current plan when revision generation or validation fails.
+
 ## 0.3.17 - 2026-08-26
 
 ### Fixed
