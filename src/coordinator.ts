@@ -10,7 +10,7 @@ import type {
 } from "./types.ts";
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
-import { extractResultSummary } from "./result_writer.ts";
+import { extractResultSummary, hasCompleteTaskResult } from "./result_writer.ts";
 import { runGuardedSessionPrompt } from "./session_guard.ts";
 import {
   generatePlanRevision,
@@ -28,6 +28,16 @@ import {
 } from "./plan_store.ts";
 import type { SerializedSteeringQueue, SteeringMessage } from "./steering.ts";
 import { parseWorkerRuntimeConfig } from "./worker_config.ts";
+import {
+  classifyWorkerSessionRetry,
+  createWorkerSessionCompatibilityFingerprint,
+  decideWorkerSessionReuse,
+  DEFAULT_WORKER_SESSION_REUSE_CONTEXT_THRESHOLD_PERCENT,
+  DEFAULT_WORKER_SESSION_REUSE_ENABLED,
+  resolveWorkerSessionReuseConfig,
+  type WorkerSessionCompatibilityFingerprint,
+  type WorkerSessionHealth,
+} from "./worker_reuse_policy.ts";
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
   applyGoalInstructionsToTodoMarkdown,
@@ -40,12 +50,21 @@ import {
 } from "./todo_generator.ts";
 import { parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
 import {
+  buildWorkerSessionCreationFailureOutcome,
   createIsolatedWorkerSession,
+  createWorkerSessionResource,
+  DEFAULT_WORKER_TOOLS,
+  disposeWorkerSessionResource,
   runWorkerTask,
+  runWorkerTaskAssignment,
+  workerSessionContextUsagePercent,
   type RunWorkerTaskOptions,
   type SessionOutcome,
+  type WorkerSessionDiagnostic,
   type WorkerSessionFactory,
   type WorkerSessionLike,
+  type WorkerSessionResource,
+  type WorkerUsageTotals,
 } from "./worker_session.ts";
 
 export type { CoordinatorStatus } from "./types.ts";
@@ -58,6 +77,8 @@ export const DEFAULT_COORDINATOR_OPTIONS = {
   maxBashTimeoutMs: 300_000,
   taskThinking: "high",
   todoThinking: "xhigh",
+  workerSessionReuse: DEFAULT_WORKER_SESSION_REUSE_ENABLED,
+  workerSessionReuseContextThresholdPercent: DEFAULT_WORKER_SESSION_REUSE_CONTEXT_THRESHOLD_PERCENT,
 } as const;
 
 export type WorkerRunner = (options: RunWorkerTaskOptions) => Promise<SessionOutcome>;
@@ -65,6 +86,7 @@ export type CoordinatorProgressPhase =
   | "planning"
   | "planned"
   | "task_start"
+  | "worker_session"
   | "worker_tool"
   | "task_done"
   | "task_blocked"
@@ -124,6 +146,10 @@ export interface CoordinatorProgressUpdate {
   plannerDiagnostics?: string[];
   plannerSessionFile?: string;
   plannerSessionId?: string;
+  workerSessionEvent?: WorkerSessionDiagnostic["event"];
+  workerSessionReason?: string;
+  workerSessionContextUsagePercent?: number;
+  workerSessionContextThresholdPercent?: number;
 }
 
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
@@ -146,6 +172,10 @@ export interface RunCoordinatorOptions extends PiLongTaskInput {
   maxBashTimeoutMs?: number;
   taskThinking?: string;
   todoThinking?: string;
+  /** Set false to retain the legacy one-session-per-task lifecycle. */
+  workerSessionReuse?: boolean;
+  /** Rotate before another assignment when context usage reaches this percentage. */
+  workerSessionReuseContextThresholdPercent?: number;
   now?: () => Date;
   onProgress?: CoordinatorProgressHandler;
   /** Run-scoped FIFO populated by the extension input handler during active execution. */
@@ -190,6 +220,14 @@ export interface TaskAttemptSummary {
   resultText?: string;
 }
 
+export interface WorkerSessionMetrics {
+  starts: number;
+  reuses: number;
+  rotations: number;
+  retained: number;
+  rotationReasons: Record<string, number>;
+}
+
 export interface CoordinatorResult {
   status: CoordinatorStatus;
   summary: string;
@@ -210,6 +248,10 @@ export interface CoordinatorResult {
   attempts: TaskAttemptSummary[];
   taskProgress: TaskProgressModel;
   workerCostTotal: number;
+  /** Sum of task/attempt token deltas; omitted when statistics are unavailable. */
+  workerUsageTotal?: WorkerUsageTotals;
+  /** Additive lifecycle counters for adaptive worker-session reuse. */
+  workerSessionMetrics?: WorkerSessionMetrics;
   commit: boolean;
   goal?: string;
   error?: string;
@@ -236,9 +278,12 @@ interface RuntimeOptions {
   goal?: string;
   taskThinking: string;
   todoThinking: string;
+  workerSessionReuse: boolean;
+  workerSessionReuseContextThresholdPercent: number;
   todoTimeoutMs: number;
   todoGracefulShutdownMs: number;
   workerRunner: WorkerRunner;
+  useRetainedWorkerLifecycle: boolean;
   todoPlanner: TodoPlanner;
   abortSignal?: AbortSignal;
   workerSessionFactory?: WorkerSessionFactory;
@@ -250,12 +295,461 @@ interface RuntimeOptions {
   workerTextByWorker: Map<string, string>;
   workerTextPublishedLengthByWorker: Map<string, number>;
   plannerDiagnostics: PlannerDiagnostic[];
+  workerSessionMetrics: WorkerSessionMetrics;
   steeringQueue?: SerializedSteeringQueue;
   onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
 }
 
+type RetainedWorkerReuseScope = "sequential_task" | "partial_continuation";
+
+export interface WorkerAssignmentIdentity {
+  /** Unique invocation identity, even when a replacement reuses a task ID and attempt number. */
+  assignmentId: string;
+  /** Stable task identity or semantic fingerprint from the plan that launched this assignment. */
+  taskIdentity: string;
+  /** Accepted-steering generation at the assignment boundary. */
+  steeringGeneration: number;
+  /** Structural plan generation from which the assignment was selected. */
+  planAuthorityToken: string;
+}
+
+interface RetainedWorkerState {
+  resource: WorkerSessionResource;
+  compatibility: WorkerSessionCompatibilityFingerprint;
+  health: WorkerSessionHealth;
+  contextUsagePercent?: number;
+  previousTask: Pick<Task, "taskId" | "title">;
+  previousAttempt: number;
+  previousAssignmentIdentity: WorkerAssignmentIdentity;
+  reportDiagnostic: (diagnostic: WorkerSessionDiagnostic) => void;
+  reuseScope: RetainedWorkerReuseScope;
+}
+
+interface ActiveWorkerSessionAssignment {
+  identity: WorkerAssignmentIdentity;
+  controller: AbortController;
+  tainted: boolean;
+  rotationReported: boolean;
+  resource?: WorkerSessionResource;
+  reportDiagnostic?: (diagnostic: WorkerSessionDiagnostic) => void;
+  resolveCompletion: () => void;
+  completion: Promise<void>;
+}
+
+export interface CoordinatorWorkerSessionOwnerOptions {
+  runId: string;
+  cwd: string;
+  workerSessionReuse: boolean;
+  workerSessionReuseContextThresholdPercent: number;
+}
+
+/** Run-scoped owner for the single retained worker session and its assignment lock. */
+export class CoordinatorWorkerSessionOwner {
+  private retained: RetainedWorkerState | undefined;
+  private active: ActiveWorkerSessionAssignment | undefined;
+  private closed = false;
+  private disposePromise: Promise<void> | undefined;
+  private assignmentSequence = 0;
+  private readonly runtime: CoordinatorWorkerSessionOwnerOptions;
+
+  constructor(runtime: CoordinatorWorkerSessionOwnerOptions) {
+    this.runtime = runtime;
+  }
+
+  async run(options: RunWorkerTaskOptions, identity?: WorkerAssignmentIdentity): Promise<SessionOutcome> {
+    if (this.closed) {
+      throw new Error("retained worker session owner is closed");
+    }
+    const assignmentIdentity = identity ?? this.defaultIdentity(options);
+    if (this.active) {
+      throw new Error("retained worker session already has an active assignment");
+    }
+
+    let resolveCompletion: (() => void) | undefined;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const active: ActiveWorkerSessionAssignment = {
+      identity: assignmentIdentity,
+      controller: new AbortController(),
+      tainted: false,
+      rotationReported: false,
+      resolveCompletion: resolveCompletion as () => void,
+      completion,
+    };
+    this.active = active;
+    const assignmentOptions = {
+      ...options,
+      abortSignal: combineAbortSignals(options.abortSignal, active.controller.signal),
+    };
+    try {
+      return await this.runExclusive(assignmentOptions, assignmentIdentity, active);
+    } finally {
+      const activeResource = active.resource;
+      const retained = this.retained;
+      if (active.tainted && activeResource && retained?.resource === activeResource) {
+        retained.health = "cancelled";
+        await this.disposeRetainedResource(activeResource);
+      }
+      if (this.active === active) {
+        this.active = undefined;
+      }
+      active.resolveCompletion();
+    }
+  }
+
+  private async runExclusive(
+    options: RunWorkerTaskOptions,
+    identity: WorkerAssignmentIdentity,
+    active: ActiveWorkerSessionAssignment,
+  ): Promise<SessionOutcome> {
+    const compatibility = this.compatibilityFor(options);
+    const diagnostics: WorkerSessionDiagnostic[] = [];
+    const report = (diagnostic: WorkerSessionDiagnostic) => {
+      diagnostics.push(diagnostic);
+      options.onSessionDiagnostic?.(diagnostic);
+    };
+    active.reportDiagnostic = report;
+    const diagnosticContext = (retained: RetainedWorkerState) => ({
+      ...(retained.contextUsagePercent !== undefined ? { contextUsagePercent: retained.contextUsagePercent } : {}),
+      contextThresholdPercent: this.runtime.workerSessionReuseContextThresholdPercent,
+      previousTaskId: retained.previousTask.taskId,
+    });
+
+    let reusedFrom: Pick<Task, "taskId" | "title"> | undefined;
+    if (this.retained && !this.assignmentMatchesRetainedScope(options, this.retained)) {
+      // A partial-work session is continuity for exactly the next attempt of
+      // that task. It must never spill into unrelated work or a later retry.
+      report({
+        event: "session_rotated",
+        reasonCode: "partial_continuation_scope_mismatch",
+        ...diagnosticContext(this.retained),
+      });
+      await this.disposeRetained();
+    }
+    if (this.retained) {
+      const decision = decideWorkerSessionReuse({
+        config: {
+          enabled: this.runtime.workerSessionReuse,
+          contextThresholdPercent: this.runtime.workerSessionReuseContextThresholdPercent,
+        },
+        candidate: {
+          health: this.retained.health,
+          compatibility: this.retained.compatibility,
+          contextUsagePercent: this.retained.contextUsagePercent,
+          assignmentState: "idle",
+          disposed: this.retained.resource.disposed,
+        },
+        requestedCompatibility: compatibility,
+      });
+      if (decision.reusable) {
+        reusedFrom = this.retained.previousTask;
+        report({
+          event: "session_reused",
+          reasonCode: decision.reasonCode,
+          ...diagnosticContext(this.retained),
+        });
+      } else {
+        report({
+          event: "session_rotated",
+          reasonCode: decision.reasonCode,
+          ...diagnosticContext(this.retained),
+        });
+        await this.disposeRetained();
+      }
+    }
+
+    if (!this.retained) {
+      try {
+        this.retained = {
+          resource: await createWorkerSessionResource(options, options.sessionFactory ?? createIsolatedWorkerSession),
+          compatibility,
+          health: "healthy",
+          previousTask: options.task,
+          previousAttempt: options.attempt,
+          previousAssignmentIdentity: identity,
+          reportDiagnostic: report,
+          reuseScope: "sequential_task",
+        };
+        report({
+          event: "session_started",
+          reasonCode: diagnostics.some((item) => item.event === "session_rotated")
+            ? "rotation_completed"
+            : "fresh_session",
+          contextThresholdPercent: this.runtime.workerSessionReuseContextThresholdPercent,
+        });
+      } catch (error) {
+        const failed = buildWorkerSessionCreationFailureOutcome(options, error);
+        failed.sessionDiagnostics = diagnostics;
+        return failed;
+      }
+    }
+
+    active.resource = this.retained.resource;
+    let outcome: SessionOutcome;
+    try {
+      outcome = await runWorkerTaskAssignment(
+        options,
+        this.retained.resource,
+        reusedFrom ? { previousTask: reusedFrom } : undefined,
+      );
+    } catch (error) {
+      this.retained.health = active.tainted ? "cancelled" : "unrecoverable_error";
+      if (!active.rotationReported) {
+        active.rotationReported = true;
+        report({
+          event: "session_rotated",
+          reasonCode: "health_unrecoverable_error",
+          ...diagnosticContext(this.retained),
+        });
+      }
+      await this.disposeRetained();
+      throw error;
+    }
+
+    if (this.retained) {
+      const cancelled = Boolean(options.abortSignal?.aborted);
+      this.retained.health = workerSessionHealthForOutcome(outcome, cancelled);
+      this.retained.contextUsagePercent = await workerSessionContextUsagePercent(this.retained.resource.session);
+      this.retained.previousTask = options.task;
+      this.retained.previousAttempt = options.attempt;
+      this.retained.previousAssignmentIdentity = identity;
+      this.retained.reportDiagnostic = report;
+
+      if (active.tainted) {
+        if (!active.rotationReported) {
+          this.reportTaintedRotation(active, "assignment_cancelled");
+        }
+        await this.disposeRetainedResource(this.retained.resource);
+        outcome.sessionDiagnostics = [...(outcome.sessionDiagnostics ?? []), ...diagnostics];
+        return outcome;
+      }
+
+      const retry = classifyWorkerSessionRetry({
+        done: outcome.done,
+        reportedStatus: outcome.reportedStatus,
+        completeTaskResult: hasCompleteTaskResult(outcome.assistantText),
+        timedOut: outcome.timedOut,
+        aborted: outcome.aborted,
+        cancelled,
+        error: outcome.error,
+      });
+      this.retained.reuseScope = retry.mayContinueInSession ? "partial_continuation" : "sequential_task";
+
+      const postAssignmentDecision = decideWorkerSessionReuse({
+        config: {
+          enabled: this.runtime.workerSessionReuse,
+          contextThresholdPercent: this.runtime.workerSessionReuseContextThresholdPercent,
+        },
+        candidate: {
+          health: this.retained.health,
+          compatibility: this.retained.compatibility,
+          contextUsagePercent: this.retained.contextUsagePercent,
+          assignmentState: "idle",
+          disposed: this.retained.resource.disposed,
+        },
+        requestedCompatibility: compatibility,
+      });
+      // Completed tasks may flow into the next sequential TODO. A retry may
+      // remain only when it is an explicitly safe partial continuation and all
+      // normal health/compatibility/context checks still pass.
+      const rotateForRetry = !outcome.done && !retry.mayContinueInSession;
+      if (!postAssignmentDecision.reusable || rotateForRetry) {
+        if (!active.rotationReported) {
+          active.rotationReported = true;
+          report({
+            event: "session_rotated",
+            reasonCode: postAssignmentDecision.reusable ? retry.reasonCode : postAssignmentDecision.reasonCode,
+            ...diagnosticContext(this.retained),
+          });
+        }
+        await this.disposeRetained();
+      } else {
+        report({
+          event: "session_retained",
+          reasonCode: postAssignmentDecision.reasonCode,
+          ...diagnosticContext(this.retained),
+        });
+      }
+    }
+    outcome.sessionDiagnostics = [...(outcome.sessionDiagnostics ?? []), ...diagnostics];
+    return outcome;
+  }
+
+  /**
+   * Taint and abort only the matching obsolete assignment. Late cancellation
+   * from an older steering generation cannot affect a replacement assignment.
+   */
+  async invalidateAssignment(identity: WorkerAssignmentIdentity): Promise<boolean> {
+    const active = this.active;
+    if (active && sameWorkerAssignment(active.identity, identity)) {
+      this.taintActiveAssignment(active, "steering_revision_obsolete");
+      if (!active.controller.signal.aborted) {
+        active.controller.abort(new Error(`worker assignment ${identity.assignmentId} became obsolete`));
+      }
+      return true;
+    }
+
+    if (this.retained && sameWorkerAssignment(this.retained.previousAssignmentIdentity, identity)) {
+      const retained = this.retained;
+      retained.health = "cancelled";
+      retained.reportDiagnostic({
+        event: "session_rotated",
+        reasonCode: "steering_revision_obsolete",
+        ...this.diagnosticContext(retained),
+      });
+      await this.disposeRetained();
+      return true;
+    }
+    return false;
+  }
+
+  /** Abort active work, wait for its ownership path, then dispose retained state once. */
+  dispose(): Promise<void> {
+    if (!this.disposePromise) {
+      this.closed = true;
+      this.disposePromise = this.disposeAfterActiveAssignment();
+    }
+    return this.disposePromise;
+  }
+
+  private async disposeAfterActiveAssignment(): Promise<void> {
+    const active = this.active;
+    if (active) {
+      this.taintActiveAssignment(active, "coordinator_shutdown");
+      if (!active.controller.signal.aborted) {
+        active.controller.abort(new Error("worker session owner disposed"));
+      }
+      await active.completion;
+    }
+    await this.disposeRetained();
+  }
+
+  private assignmentMatchesRetainedScope(options: RunWorkerTaskOptions, retained: RetainedWorkerState): boolean {
+    if (retained.reuseScope === "sequential_task") {
+      return true;
+    }
+    return (
+      options.task.taskId === retained.previousTask.taskId &&
+      options.task.title === retained.previousTask.title &&
+      options.attempt === retained.previousAttempt + 1
+    );
+  }
+
+  private taintActiveAssignment(active: ActiveWorkerSessionAssignment, reasonCode: string): void {
+    active.tainted = true;
+    const retained = this.retained;
+    if (retained && retained.resource === active.resource) {
+      retained.health = "cancelled";
+    }
+    this.reportTaintedRotation(active, reasonCode);
+  }
+
+  private reportTaintedRotation(active: ActiveWorkerSessionAssignment, reasonCode: string): void {
+    if (active.rotationReported) return;
+    active.rotationReported = true;
+    const retained = this.retained;
+    active.reportDiagnostic?.({
+      event: "session_rotated",
+      reasonCode,
+      ...(retained ? this.diagnosticContext(retained) : {}),
+    });
+  }
+
+  private diagnosticContext(retained: RetainedWorkerState): {
+    contextUsagePercent?: number;
+    contextThresholdPercent: number;
+    previousTaskId: string;
+  } {
+    return {
+      ...(retained.contextUsagePercent !== undefined ? { contextUsagePercent: retained.contextUsagePercent } : {}),
+      contextThresholdPercent: this.runtime.workerSessionReuseContextThresholdPercent,
+      previousTaskId: retained.previousTask.taskId,
+    };
+  }
+
+  private defaultIdentity(options: RunWorkerTaskOptions): WorkerAssignmentIdentity {
+    const sequence = ++this.assignmentSequence;
+    return {
+      assignmentId: `${options.task.taskId}:${options.attempt}:${sequence}`,
+      taskIdentity: `${options.task.taskId}:${options.task.title}`,
+      steeringGeneration: 0,
+      planAuthorityToken: "direct-owner",
+    };
+  }
+
+  private compatibilityFor(options: RunWorkerTaskOptions): WorkerSessionCompatibilityFingerprint {
+    return createWorkerSessionCompatibilityFingerprint({
+      coordinatorRunId: this.runtime.runId,
+      repositoryRoot: this.runtime.cwd,
+      worktreeRoot: options.cwd,
+      modelName: options.modelName,
+      model: options.model,
+      tools: options.tools ?? DEFAULT_WORKER_TOOLS,
+      thinkingLevel: options.thinkingLevel,
+      agentDir: options.agentDir,
+      modelRuntime: options.modelRuntime,
+      authStorage: options.authStorage,
+      modelRegistry: options.modelRegistry,
+      settingsManager: options.settingsManager,
+      resourceLoader: options.resourceLoader,
+      sessionFactory: options.sessionFactory ?? createIsolatedWorkerSession,
+    });
+  }
+
+  private async disposeRetained(): Promise<void> {
+    const retained = this.retained;
+    if (!retained) {
+      return;
+    }
+    await this.disposeRetainedResource(retained.resource);
+  }
+
+  private async disposeRetainedResource(resource: WorkerSessionResource): Promise<void> {
+    if (this.retained?.resource === resource) {
+      this.retained = undefined;
+    }
+    try {
+      await disposeWorkerSessionResource(resource);
+    } catch {
+      // Session disposal is best effort; resource ownership is still closed exactly once.
+    }
+  }
+}
+
+function sameWorkerAssignment(left: WorkerAssignmentIdentity, right: WorkerAssignmentIdentity): boolean {
+  return (
+    left.assignmentId === right.assignmentId &&
+    left.taskIdentity === right.taskIdentity &&
+    left.steeringGeneration === right.steeringGeneration &&
+    left.planAuthorityToken === right.planAuthorityToken
+  );
+}
+
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const available = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (available.length === 0) return undefined;
+  if (available.length === 1) return available[0];
+  return AbortSignal.any(available);
+}
+
+export function workerSessionHealthForOutcome(
+  outcome: Pick<SessionOutcome, "timedOut" | "aborted" | "error" | "assistantText">,
+  cancelled = false,
+): WorkerSessionHealth {
+  if (outcome.timedOut) return "timed_out";
+  if (cancelled) return "cancelled";
+  if (outcome.aborted) return "aborted";
+  if (outcome.error) return "unrecoverable_error";
+  if (!hasCompleteTaskResult(outcome.assistantText)) return "invalid_state";
+  return "healthy";
+}
+
 export async function runCoordinator(options: RunCoordinatorOptions): Promise<CoordinatorResult> {
   const runtime = buildRuntimeOptions(options);
+  const workerSessionOwner = runtime.useRetainedWorkerLifecycle
+    ? new CoordinatorWorkerSessionOwner(runtime)
+    : undefined;
   const inputText = coordinatorInputText(options);
   const attempts: TaskAttemptSummary[] = [];
   const outcomes: SessionOutcome[] = [];
@@ -269,6 +763,12 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   let activeTask: Task | undefined;
   let activeTaskReference: PlanTaskReference | undefined;
   let activeAttempt: number | undefined;
+  let activeWorkerAssignment:
+    | { identity: WorkerAssignmentIdentity; controller: AbortController; obsolete: boolean }
+    | undefined;
+  let steeringGeneration = 0;
+  let workerExecutionSequence = 0;
+  let removeSteeringProcessor: (() => void) | undefined;
   const protectedDirtyPathsByTask = new Map<string, Set<string>>();
 
   try {
@@ -287,7 +787,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     });
 
     let failure: string | undefined;
-    runtime.steeringQueue?.setProcessor(async (message) => {
+    removeSteeringProcessor = runtime.steeringQueue?.setProcessor(async (message) => {
       const baseAtRequest = planStore.snapshot();
       const activeTaskAtRequest = activeTaskReference
         ? resolvePlanTaskReference(
@@ -320,6 +820,25 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         // boundary, so this accepted revision continues the same run.
         latestTodoMarkdown = appliedRevision.todoMarkdown;
         latestTasks = appliedRevision.reconciliation.activeTasks.map((item) => item.task);
+        steeringGeneration += 1;
+
+        // Once replacement/removal is authoritative, make the exact old
+        // invocation obsolete before aborting it. Event callbacks consult this
+        // identity, so a late old result cannot repaint replacement progress.
+        const assignmentAtAcceptance = activeWorkerAssignment;
+        const activeStillValid = activeTaskReference
+          ? Boolean(resolvePlanTaskReference(latestTasks, activeTaskReference, planStore.snapshot().authorityToken))
+          : true;
+        if (assignmentAtAcceptance && !activeStillValid) {
+          assignmentAtAcceptance.obsolete = true;
+          if (!assignmentAtAcceptance.controller.signal.aborted) {
+            assignmentAtAcceptance.controller.abort(
+              new Error(`steering revision ${message.sequence} replaced the active assignment`),
+            );
+          }
+          await workerSessionOwner?.invalidateAssignment(assignmentAtAcceptance.identity);
+        }
+
         emitProgress(
           runtime,
           `Accepted steering revision ${message.sequence} with ${appliedRevision.reconciliation.activeTasks.length} task(s).`,
@@ -365,6 +884,23 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       const initialActivity =
         nextTask.statusItems.find((item) => !item.done)?.text ?? `Starting TODO ${nextTask.taskId}`;
       const worker = workerKey(nextTask.taskId, attempt);
+      // Task IDs and attempt numbers may be reused after an in-flight task is
+      // replaced by steering. Accounting needs an invocation identity so the
+      // obsolete attempt's finalized spend cannot be overwritten.
+      const accountingWorker = `${worker}#${++workerExecutionSequence}`;
+      const assignmentIdentity: WorkerAssignmentIdentity = {
+        assignmentId: accountingWorker,
+        taskIdentity: nextTask.stableId ?? taskSemanticFingerprint(nextTask),
+        steeringGeneration,
+        planAuthorityToken: schedulingSnapshot.authorityToken,
+      };
+      const assignmentController = new AbortController();
+      const assignmentState = { identity: assignmentIdentity, controller: assignmentController, obsolete: false };
+      const taskPlanReference = planTaskReference(nextTask, schedulingSnapshot.authorityToken);
+      activeWorkerAssignment = assignmentState;
+      activeTask = nextTask;
+      activeAttempt = attempt;
+      activeTaskReference = taskPlanReference;
       runtime.workerActivityByWorker.set(worker, initialActivity);
       runtime.workerTextByWorker.delete(worker);
       runtime.workerTextPublishedLengthByWorker.delete(worker);
@@ -393,11 +929,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           : new Set<string>();
         protectedDirtyPathsByTask.set(executionIdentity, preExistingDirtyPaths);
       }
-      activeTask = nextTask;
-      activeAttempt = attempt;
-      const taskPlanReference = planTaskReference(nextTask, schedulingSnapshot.authorityToken);
-      activeTaskReference = taskPlanReference;
-      const outcome = await runtime.workerRunner({
+      const workerOptions: RunWorkerTaskOptions = {
         cwd: runtime.cwd,
         todoPath: runtime.todoPath,
         task: nextTask,
@@ -415,12 +947,40 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         model: runtime.workerModel,
         modelName: runtime.workerModelName,
         thinkingLevel: runtime.taskThinking,
-        abortSignal: runtime.abortSignal,
+        abortSignal: combineAbortSignals(runtime.abortSignal, assignmentController.signal),
         sessionFactory: runtime.workerSessionFactory,
         now: runtime.now,
-        onEvent: (event) => emitWorkerEventProgress(runtime, tasksBeforeAttempt, nextTask, attempts, attempt, event),
-      });
-      finalizeWorkerCost(runtime.workerCostState, outcome);
+        onEvent: (event) => {
+          if (activeWorkerAssignment === assignmentState && !assignmentState.obsolete) {
+            emitWorkerEventProgress(runtime, tasksBeforeAttempt, nextTask, attempts, attempt, event, accountingWorker);
+          }
+        },
+        onSessionDiagnostic: (diagnostic) => {
+          if (activeWorkerAssignment === assignmentState && !assignmentState.obsolete) {
+            emitWorkerSessionProgress(runtime, tasksBeforeAttempt, nextTask, attempts, attempt, diagnostic);
+          } else {
+            // Lifecycle accounting remains accurate, but obsolete diagnostics
+            // must not mutate the replacement task's visible progress.
+            recordWorkerSessionMetric(runtime.workerSessionMetrics, diagnostic);
+          }
+        },
+      };
+      let outcome: SessionOutcome;
+      try {
+        outcome = workerSessionOwner
+          ? await workerSessionOwner.run(workerOptions, assignmentIdentity)
+          : await runtime.workerRunner(workerOptions);
+      } catch (error) {
+        if (!assignmentState.obsolete) {
+          throw error;
+        }
+        // A cancellation-aware custom runner may reject instead of returning
+        // an aborted outcome. Preserve historical evidence, but never let that
+        // obsolete rejection terminate or update the replacement assignment.
+        outcome = buildWorkerSessionCreationFailureOutcome(workerOptions, error);
+        outcome.aborted = true;
+      }
+      finalizeWorkerCost(runtime.workerCostState, accountingWorker, outcome);
 
       // A revision may have been accepted while the worker was running. Let all
       // already-received guidance settle, then resolve this exact task identity
@@ -465,6 +1025,9 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       activeTask = undefined;
       activeTaskReference = undefined;
       activeAttempt = undefined;
+      if (activeWorkerAssignment === assignmentState) {
+        activeWorkerAssignment = undefined;
+      }
 
       let taskCommitHash: string | undefined;
       let taskCommitError: string | undefined;
@@ -587,6 +1150,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       attempts,
       taskProgress,
       workerCostTotal: runtime.workerCostState.total,
+      workerUsageTotal: aggregateWorkerUsage(outcomes),
+      workerSessionMetrics: snapshotWorkerSessionMetrics(runtime.workerSessionMetrics),
       commit: options.commit,
       goal: runtime.goal,
       error: failure,
@@ -668,6 +1233,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       attempts,
       taskProgress,
       workerCostTotal: runtime.workerCostState.total,
+      workerUsageTotal: aggregateWorkerUsage(outcomes),
+      workerSessionMetrics: snapshotWorkerSessionMetrics(runtime.workerSessionMetrics),
       commit: options.commit,
       goal: runtime.goal,
       error: resultError,
@@ -680,6 +1247,9 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       taskProgress,
     });
     return result;
+  } finally {
+    removeSteeringProcessor?.();
+    await workerSessionOwner?.dispose();
   }
 }
 
@@ -1077,6 +1647,11 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const workerModelName = options.workerModelName ?? parsedWorkerConfig.modelName;
   const workerModel = workerModelName ? undefined : options.workerModel;
   const goal = normalizeOptionalText(options.goal);
+  const workerSessionReuseConfig = resolveWorkerSessionReuseConfig({
+    enabled: options.workerSessionReuse ?? parsedWorkerConfig.workerSessionReuseEnabled,
+    contextThresholdPercent:
+      options.workerSessionReuseContextThresholdPercent ?? parsedWorkerConfig.workerSessionReuseContextThresholdPercent,
+  });
 
   return {
     cwd,
@@ -1098,7 +1673,10 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     goal,
     taskThinking: options.taskThinking ?? DEFAULT_COORDINATOR_OPTIONS.taskThinking,
     todoThinking: options.todoThinking ?? DEFAULT_COORDINATOR_OPTIONS.todoThinking,
+    workerSessionReuse: workerSessionReuseConfig.enabled,
+    workerSessionReuseContextThresholdPercent: workerSessionReuseConfig.contextThresholdPercent,
     workerRunner: options.workerRunner ?? runWorkerTask,
+    useRetainedWorkerLifecycle: options.workerRunner === undefined,
     todoPlanner: options.todoPlanner ?? runTodoPlanner,
     abortSignal: options.abortSignal,
     workerSessionFactory: options.workerSessionFactory,
@@ -1110,6 +1688,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerTextByWorker: new Map(),
     workerTextPublishedLengthByWorker: new Map(),
     plannerDiagnostics: [],
+    workerSessionMetrics: createWorkerSessionMetrics(),
     steeringQueue: options.steeringQueue,
     onPlanRevisionAccepted: options.onPlanRevisionAccepted,
   };
@@ -1156,6 +1735,41 @@ function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDia
   });
 }
 
+function aggregateWorkerUsage(outcomes: readonly SessionOutcome[]): WorkerUsageTotals | undefined {
+  const usage = outcomes.flatMap((outcome) => (outcome.workerUsage ? [outcome.workerUsage] : []));
+  if (usage.length === 0) {
+    return undefined;
+  }
+  return usage.reduce<WorkerUsageTotals>(
+    (total, item) => ({
+      input: total.input + item.input,
+      output: total.output + item.output,
+      cacheRead: total.cacheRead + item.cacheRead,
+      cacheWrite: total.cacheWrite + item.cacheWrite,
+      total: total.total + item.total,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  );
+}
+
+function createWorkerSessionMetrics(): WorkerSessionMetrics {
+  return { starts: 0, reuses: 0, rotations: 0, retained: 0, rotationReasons: {} };
+}
+
+function snapshotWorkerSessionMetrics(metrics: WorkerSessionMetrics): WorkerSessionMetrics {
+  return { ...metrics, rotationReasons: { ...metrics.rotationReasons } };
+}
+
+function recordWorkerSessionMetric(metrics: WorkerSessionMetrics, diagnostic: WorkerSessionDiagnostic): void {
+  if (diagnostic.event === "session_started") metrics.starts += 1;
+  if (diagnostic.event === "session_reused") metrics.reuses += 1;
+  if (diagnostic.event === "session_retained") metrics.retained += 1;
+  if (diagnostic.event === "session_rotated") {
+    metrics.rotations += 1;
+    metrics.rotationReasons[diagnostic.reasonCode] = (metrics.rotationReasons[diagnostic.reasonCode] ?? 0) + 1;
+  }
+}
+
 function createWorkerCostState(): WorkerCostState {
   return {
     total: 0,
@@ -1192,9 +1806,9 @@ function recordLiveWorkerCost(
 
 function finalizeWorkerCost(
   state: WorkerCostState,
-  outcome: Pick<SessionOutcome, "task" | "attempt" | "workerCostTotal">,
+  worker: string,
+  outcome: Pick<SessionOutcome, "workerCostTotal">,
 ): void {
-  const worker = workerKey(outcome.task.taskId, outcome.attempt);
   state.finalizedByWorker.set(worker, finiteNonNegativeNumber(outcome.workerCostTotal) ?? 0);
   state.liveByWorker.delete(worker);
   for (const messageKey of state.liveByMessage.keys()) {
@@ -1263,6 +1877,43 @@ function subtaskProgress(
   });
 }
 
+function emitWorkerSessionProgress(
+  runtime: RuntimeOptions,
+  tasks: readonly Task[],
+  task: Pick<Task, "taskId" | "title" | "statusItems">,
+  attempts: readonly TaskAttemptSummary[],
+  attempt: number,
+  diagnostic: WorkerSessionDiagnostic,
+): void {
+  recordWorkerSessionMetric(runtime.workerSessionMetrics, diagnostic);
+  const contextText =
+    diagnostic.contextUsagePercent === undefined
+      ? ""
+      : ` at ${diagnostic.contextUsagePercent.toFixed(1)}% context usage`;
+  const action =
+    diagnostic.event === "session_started"
+      ? "started"
+      : diagnostic.event === "session_reused"
+        ? "reused"
+        : diagnostic.event === "session_rotated"
+          ? "rotated"
+          : "retained";
+  emitProgress(runtime, `Worker session ${action}${contextText} (${diagnostic.reasonCode}).`, {
+    phase: "worker_session",
+    taskId: task.taskId,
+    title: task.title,
+    attempt,
+    status: "in_progress",
+    activeStatus: `Worker session ${action}`,
+    workerSessionEvent: diagnostic.event,
+    workerSessionReason: diagnostic.reasonCode,
+    workerSessionContextUsagePercent: diagnostic.contextUsagePercent,
+    workerSessionContextThresholdPercent: diagnostic.contextThresholdPercent,
+    ...currentTaskProgress(task, "in_progress"),
+    taskProgress: buildTaskProgressModel({ tasks, attempts, currentTaskId: task.taskId }),
+  });
+}
+
 function emitWorkerEventProgress(
   runtime: RuntimeOptions,
   tasks: readonly Task[],
@@ -1278,6 +1929,7 @@ function emitWorkerEventProgress(
     usageCostTotal?: number;
     usageCostKey?: string;
   },
+  accountingWorker = workerKey(task.taskId, attempt),
 ): void {
   const worker = workerKey(task.taskId, attempt);
   let activeStatus = runtime.workerActivityByWorker.get(worker);
@@ -1318,7 +1970,7 @@ function emitWorkerEventProgress(
   }
 
   const costChanged =
-    event.usageCostTotal !== undefined && recordLiveWorkerCost(runtime.workerCostState, worker, event);
+    event.usageCostTotal !== undefined && recordLiveWorkerCost(runtime.workerCostState, accountingWorker, event);
 
   if (event.type === "message_end" && event.activity) {
     emitProgress(runtime, event.activity, {
@@ -1628,6 +2280,25 @@ async function appendTaskResult(
   }
   if (outcome.contextObservations.length > 0) {
     lines.push("", "Context observations:", ...outcome.contextObservations.map((item) => `- ${item}`));
+  }
+  if (outcome.workerCostSource || outcome.workerCostTotal > 0) {
+    lines.push(`Worker cost: ${outcome.workerCostTotal} (${outcome.workerCostSource ?? "unavailable"})`);
+  }
+  if (outcome.workerUsage) {
+    lines.push(
+      `Worker token usage: input=${outcome.workerUsage.input}, output=${outcome.workerUsage.output}, cacheRead=${outcome.workerUsage.cacheRead}, cacheWrite=${outcome.workerUsage.cacheWrite}, total=${outcome.workerUsage.total}`,
+    );
+  }
+  if (outcome.sessionDiagnostics?.length) {
+    lines.push(
+      "",
+      "Worker session diagnostics:",
+      ...outcome.sessionDiagnostics.map((item) => {
+        const context =
+          item.contextUsagePercent === undefined ? "" : ` context=${item.contextUsagePercent.toFixed(1)}%`;
+        return `- event=${item.event} reason=${item.reasonCode}${context}`;
+      }),
+    );
   }
   if (outcome.compactionEvents.length > 0) {
     lines.push("", "Compaction events:", ...outcome.compactionEvents.map((item) => `- ${item}`));

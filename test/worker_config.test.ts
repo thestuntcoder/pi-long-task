@@ -29,3 +29,16 @@ assert.deepEqual(
 );
 
 assert.deepEqual(parseWorkerRuntimeConfig("Implement the feature normally."), {});
+
+assert.deepEqual(
+  parseWorkerRuntimeConfig(`Worker session reuse: disabled
+Worker session reuse context threshold: 64%`),
+  {
+    workerSessionReuseEnabled: false,
+    workerSessionReuseContextThresholdPercent: 64,
+  },
+);
+
+assert.deepEqual(parseWorkerRuntimeConfig("Use session reuse context threshold: 0%"), {});
+assert.deepEqual(parseWorkerRuntimeConfig("Use session reuse context threshold: 101%"), {});
+assert.deepEqual(parseWorkerRuntimeConfig("Worker session reuse is on."), { workerSessionReuseEnabled: true });

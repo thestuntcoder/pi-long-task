@@ -116,6 +116,18 @@ Only use \`status: done\` if the assigned task is fully complete and verified as
 
 export const buildAssignedTaskPrompt = buildTaskPrompt;
 
+export function buildReusedAssignmentPrompt(
+  options: WorkerTaskPromptOptions,
+  previousTask: Pick<Task, "taskId" | "title">,
+): string {
+  return `Pi Long Task assignment boundary:
+The prior assignment ${taskLabel(previousTask)} has ended.
+A new, independent assignment has begun: ${taskLabel(options.task)}.
+Treat every instruction and TASK_RESULT below as belonging only to this new assignment. Do not repeat or reuse the prior assignment's TASK_RESULT.
+
+${buildTaskPrompt(options)}`;
+}
+
 export function buildTimeLimitMessage(seconds: number): string {
   return `Pi Long Task notice: this worker session has reached its ${seconds.toFixed(0)}s time budget.
 Stop after the current safe point. Do not start more implementation work.
@@ -244,6 +256,18 @@ export interface WorkerSessionFactoryResult {
   diagnostics?: string[];
 }
 
+/** Coordinator-owned session allocation. Disposal is idempotent and owned by disposeWorkerSessionResource(). */
+export interface WorkerSessionResource extends WorkerSessionFactoryResult {
+  disposed: boolean;
+  /** Last readable cumulative statistics, retained only for task-boundary delta accounting. */
+  accountingBaseline?: WorkerSessionStatsSnapshot;
+  completedAssignments?: number;
+}
+
+export interface ReusedWorkerAssignment {
+  previousTask: Pick<Task, "taskId" | "title">;
+}
+
 export interface CreateWorkerSessionOptions {
   cwd: string;
   agentDir?: string;
@@ -268,6 +292,7 @@ export interface RunWorkerTaskOptions extends WorkerTaskPromptOptions, CreateWor
   abortSignal?: AbortSignal;
   sessionFactory?: WorkerSessionFactory;
   onEvent?: (event: CapturedWorkerEvent) => void;
+  onSessionDiagnostic?: (diagnostic: WorkerSessionDiagnostic) => void;
   now?: () => Date;
 }
 
@@ -280,6 +305,29 @@ export interface CapturedWorkerEvent {
   note?: string;
   usageCostTotal?: number;
   usageCostKey?: string;
+}
+
+export interface WorkerUsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+}
+
+export interface WorkerSessionStatsSnapshot {
+  cost?: number;
+  tokens?: WorkerUsageTotals;
+}
+
+export type WorkerSessionLifecycleEvent = "session_started" | "session_reused" | "session_rotated" | "session_retained";
+
+export interface WorkerSessionDiagnostic {
+  event: WorkerSessionLifecycleEvent;
+  reasonCode: string;
+  contextUsagePercent?: number;
+  contextThresholdPercent?: number;
+  previousTaskId?: string;
 }
 
 export interface SessionOutcome {
@@ -297,6 +345,10 @@ export interface SessionOutcome {
   events: CapturedWorkerEvent[];
   workerCostTotal: number;
   workerCostSource?: string;
+  /** Task/attempt-scoped token deltas when cumulative session statistics are available. */
+  workerUsage?: WorkerUsageTotals;
+  /** Additive lifecycle evidence; omitted by legacy/custom worker runners. */
+  sessionDiagnostics?: WorkerSessionDiagnostic[];
   shutdownRequested: boolean;
   timedOut: boolean;
   aborted: boolean;
@@ -424,7 +476,29 @@ export async function createIsolatedWorkerSession(
   };
 }
 
-export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<SessionOutcome> {
+export async function createWorkerSessionResource(
+  options: CreateWorkerSessionOptions,
+  sessionFactory: WorkerSessionFactory = createIsolatedWorkerSession,
+): Promise<WorkerSessionResource> {
+  const result = await sessionFactory(options);
+  return { ...result, disposed: false, completedAssignments: 0 };
+}
+
+/** Dispose an allocated worker session at most once, regardless of competing ownership paths. */
+export async function disposeWorkerSessionResource(resource: WorkerSessionResource): Promise<void> {
+  if (resource.disposed) {
+    return;
+  }
+  resource.disposed = true;
+  await Promise.resolve(resource.session.dispose?.());
+}
+
+/** Execute exactly one assignment in an already-created session without disposing that session. */
+export async function runWorkerTaskAssignment(
+  options: RunWorkerTaskOptions,
+  resource: WorkerSessionResource,
+  reusedAssignment?: ReusedWorkerAssignment,
+): Promise<SessionOutcome> {
   const now = options.now ?? (() => new Date());
   const startedAt = now().toISOString();
   const contextObservations: string[] = [];
@@ -442,14 +516,19 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
   let turnCount = 0;
   let messageUsageCostTotal = 0;
   let hasMessageUsageCost = false;
-  let sessionStatsCostTotal: number | undefined;
+  let sessionStatsStart: WorkerSessionStatsSnapshot | undefined;
+  let sessionStatsEnd: WorkerSessionStatsSnapshot | undefined;
+  let accountingBaseline: WorkerSessionStatsSnapshot | undefined;
+  const wasFirstAssignment = (resource.completedAssignments ?? 0) === 0;
   let resolvePromptWait: (() => void) | undefined;
 
-  const prompt = buildTaskPrompt(options);
+  const prompt = reusedAssignment
+    ? buildReusedAssignmentPrompt(options, reusedAssignment.previousTask)
+    : buildTaskPrompt(options);
   const taskTimeoutSeconds = options.taskTimeoutSeconds ?? DEFAULT_TASK_TIMEOUT_SECONDS;
   const gracefulShutdownSeconds = options.gracefulShutdownSeconds ?? DEFAULT_GRACEFUL_SHUTDOWN_SECONDS;
-  const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
-  let session: WorkerSessionLike | undefined;
+  const session = resource.session;
+  const invocationMessageStart = Array.isArray(session.messages) ? session.messages.length : 0;
   let unsubscribe: (() => void) | undefined;
   const timers = new Set<ReturnType<typeof setTimeout>>();
 
@@ -578,14 +657,14 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
       throw new Error("worker session aborted before start");
     }
 
-    const factoryResult = await sessionFactory(options);
-    session = factoryResult.session;
+    sessionStatsStart = await workerSessionStatsSnapshot(session);
+    accountingBaseline = sessionStatsStart ?? resource.accountingBaseline;
     sessionFile = session.sessionFile;
     sessionId = session.sessionId;
-    if (factoryResult.modelFallbackMessage) {
-      contextObservations.push(`model fallback: ${factoryResult.modelFallbackMessage}`);
+    if (resource.modelFallbackMessage) {
+      contextObservations.push(`model fallback: ${resource.modelFallbackMessage}`);
     }
-    for (const diagnostic of factoryResult.diagnostics ?? []) {
+    for (const diagnostic of resource.diagnostics ?? []) {
       contextObservations.push(diagnostic);
     }
 
@@ -684,14 +763,14 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     }
 
     await waitForPrompt(prompt);
-    assistantText = latestAssistantText(session, assistantText);
+    assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
 
     if (!hasCompleteTaskResult(assistantText) && !error && !aborted && !timedOut && !options.abortSignal?.aborted) {
       contextObservations.push(
         "missing TASK_RESULT status after initial prompt, or required fields were incomplete; requested required block once",
       );
       await waitForPrompt(buildMissingTaskResultMessage());
-      assistantText = latestAssistantText(session, assistantText);
+      assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
     }
   } catch (exc) {
     error = error ?? errorMessage(exc);
@@ -700,17 +779,16 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     clearTimers();
     options.abortSignal?.removeEventListener("abort", abortListener);
     unsubscribe?.();
-    if (session) {
-      assistantText = latestAssistantText(session, assistantText);
-      sessionFile = session.sessionFile ?? sessionFile;
-      sessionId = session.sessionId ?? sessionId;
-      sessionStatsCostTotal = await workerUsageCostFromSessionStats(session);
-      try {
-        await Promise.resolve(session.dispose?.());
-      } catch (exc) {
-        compactionEvents.push(`session dispose failed: ${errorMessage(exc)}`);
-      }
+    assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
+    sessionFile = session.sessionFile ?? sessionFile;
+    sessionId = session.sessionId ?? sessionId;
+    sessionStatsEnd = await workerSessionStatsSnapshot(session);
+    if (sessionStatsEnd) {
+      resource.accountingBaseline = sessionStatsEnd;
+    } else if (sessionStatsStart) {
+      resource.accountingBaseline = sessionStatsStart;
     }
+    resource.completedAssignments = (resource.completedAssignments ?? 0) + 1;
   }
 
   if ((error || aborted || timedOut) && !hasTaskResult(assistantText)) {
@@ -719,9 +797,11 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
 
   const parsedResult = parseCompleteTaskResult(assistantText);
   const reportedStatus = parsedResult?.status ?? parseReportedStatus(assistantText);
+  const cancelled = Boolean(options.abortSignal?.aborted);
+  const statsDelta = workerSessionStatsDelta(accountingBaseline, sessionStatsEnd, wasFirstAssignment);
   const capturedWorkerCost = selectWorkerCostTotal({
     messageCostTotal: hasMessageUsageCost ? messageUsageCostTotal : undefined,
-    statsCostTotal: sessionStatsCostTotal,
+    statsCostTotal: statsDelta?.cost,
   });
   return {
     task: options.task,
@@ -729,7 +809,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     startedAt,
     endedAt: now().toISOString(),
     reportedStatus,
-    done: Boolean(parsedResult && isDoneStatus(reportedStatus) && !error && !aborted && !timedOut),
+    done: Boolean(parsedResult && isDoneStatus(reportedStatus) && !error && !aborted && !timedOut && !cancelled),
     assistantText,
     sessionFile,
     sessionId,
@@ -738,10 +818,60 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
     events,
     workerCostTotal: capturedWorkerCost.total,
     workerCostSource: capturedWorkerCost.source,
+    workerUsage: statsDelta?.tokens,
     shutdownRequested,
     timedOut,
-    aborted: aborted || Boolean(options.abortSignal?.aborted),
+    aborted: aborted || cancelled,
     error,
+  };
+}
+
+/** Backward-compatible isolated lifecycle: create, execute one assignment, and dispose. */
+export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<SessionOutcome> {
+  let resource: WorkerSessionResource | undefined;
+  try {
+    resource = await createWorkerSessionResource(options, options.sessionFactory ?? createIsolatedWorkerSession);
+    return await runWorkerTaskAssignment(options, resource);
+  } catch (error) {
+    if (resource) {
+      throw error;
+    }
+    return buildWorkerSessionCreationFailureOutcome(options, error);
+  } finally {
+    if (resource) {
+      try {
+        await disposeWorkerSessionResource(resource);
+      } catch {
+        // Preserve the historical best-effort worker disposal behavior.
+      }
+    }
+  }
+}
+
+export function buildWorkerSessionCreationFailureOutcome(
+  options: RunWorkerTaskOptions,
+  error: unknown,
+): SessionOutcome {
+  const now = options.now ?? (() => new Date());
+  const startedAt = now().toISOString();
+  const message = errorMessage(error);
+  const assistantText = buildLongTaskFailureTaskResult(message);
+  return {
+    task: options.task,
+    attempt: options.attempt,
+    startedAt,
+    endedAt: now().toISOString(),
+    reportedStatus: parseReportedStatus(assistantText),
+    done: false,
+    assistantText,
+    contextObservations: [],
+    compactionEvents: [],
+    events: [],
+    workerCostTotal: 0,
+    shutdownRequested: false,
+    timedOut: false,
+    aborted: Boolean(options.abortSignal?.aborted),
+    error: message,
   };
 }
 
@@ -1015,16 +1145,90 @@ export function workerUsageCostFromStats(stats: unknown): number | undefined {
   return usageCostTotal(stats.usage) ?? usageCostTotal(stats);
 }
 
-async function workerUsageCostFromSessionStats(session: WorkerSessionLike): Promise<number | undefined> {
+async function workerSessionStatsSnapshot(session: WorkerSessionLike): Promise<WorkerSessionStatsSnapshot | undefined> {
   if (!session.getSessionStats) {
     return undefined;
   }
 
   try {
-    return workerUsageCostFromStats(await session.getSessionStats());
+    const stats = await session.getSessionStats();
+    const cost = workerUsageCostFromStats(stats);
+    const tokens = workerUsageTokensFromStats(stats);
+    return cost === undefined && !tokens ? undefined : { cost, tokens };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Convert cumulative session counters into one assignment's nonnegative delta.
+ * A lower ending counter means the SDK reset that counter, so the ending value
+ * is the entire post-reset contribution. Without any baseline, cumulative
+ * values are safe only for the resource's first assignment.
+ */
+export function workerSessionStatsDelta(
+  baseline: WorkerSessionStatsSnapshot | undefined,
+  ending: WorkerSessionStatsSnapshot | undefined,
+  firstAssignment: boolean,
+): WorkerSessionStatsSnapshot | undefined {
+  if (!ending) {
+    return undefined;
+  }
+  if (!baseline && !firstAssignment) {
+    return undefined;
+  }
+
+  const cost = cumulativeCounterDelta(baseline?.cost, ending.cost, firstAssignment);
+  const tokens = ending.tokens
+    ? {
+        input: cumulativeCounterDelta(baseline?.tokens?.input, ending.tokens.input, firstAssignment) ?? 0,
+        output: cumulativeCounterDelta(baseline?.tokens?.output, ending.tokens.output, firstAssignment) ?? 0,
+        cacheRead: cumulativeCounterDelta(baseline?.tokens?.cacheRead, ending.tokens.cacheRead, firstAssignment) ?? 0,
+        cacheWrite:
+          cumulativeCounterDelta(baseline?.tokens?.cacheWrite, ending.tokens.cacheWrite, firstAssignment) ?? 0,
+        total: cumulativeCounterDelta(baseline?.tokens?.total, ending.tokens.total, firstAssignment) ?? 0,
+      }
+    : undefined;
+  return cost === undefined && !tokens ? undefined : { cost, tokens };
+}
+
+function workerUsageTokensFromStats(stats: unknown): WorkerUsageTotals | undefined {
+  if (!isRecord(stats)) {
+    return undefined;
+  }
+  const tokens = isRecord(stats.tokens) ? stats.tokens : isRecord(stats.usage) ? stats.usage : undefined;
+  if (!tokens) {
+    return undefined;
+  }
+  const input = finiteNonNegativeNumber(tokens.input);
+  const output = finiteNonNegativeNumber(tokens.output);
+  const cacheRead = finiteNonNegativeNumber(tokens.cacheRead ?? tokens.cache_read);
+  const cacheWrite = finiteNonNegativeNumber(tokens.cacheWrite ?? tokens.cache_write);
+  const total = finiteNonNegativeNumber(tokens.total);
+  if ([input, output, cacheRead, cacheWrite, total].every((value) => value === undefined)) {
+    return undefined;
+  }
+  return {
+    input: input ?? 0,
+    output: output ?? 0,
+    cacheRead: cacheRead ?? 0,
+    cacheWrite: cacheWrite ?? 0,
+    total: total ?? (input ?? 0) + (output ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0),
+  };
+}
+
+function cumulativeCounterDelta(
+  baseline: number | undefined,
+  ending: number | undefined,
+  allowUnbased: boolean,
+): number | undefined {
+  if (ending === undefined) {
+    return undefined;
+  }
+  if (baseline === undefined) {
+    return allowUnbased ? ending : undefined;
+  }
+  return ending >= baseline ? ending - baseline : ending;
 }
 
 function usageCostTotal(usage: unknown): number | undefined {
@@ -1072,6 +1276,19 @@ function captureContextUsage(
 
 function contextUsageFromStats(stats: unknown): unknown {
   return isRecord(stats) ? stats.contextUsage : undefined;
+}
+
+export async function workerSessionContextUsagePercent(session: WorkerSessionLike): Promise<number | undefined> {
+  try {
+    const direct = session.getContextUsage?.();
+    if (direct !== undefined) {
+      return contextPercent(direct);
+    }
+    const stats = session.getSessionStats ? await session.getSessionStats() : undefined;
+    return contextPercent(contextUsageFromStats(stats));
+  } catch {
+    return undefined;
+  }
 }
 
 function contextPercent(usage: unknown): number | undefined {
@@ -1128,13 +1345,24 @@ function formatCompactionEndEvent(event: Record<string, unknown>): string {
   return `compaction_end reason=${reason} aborted=${aborted} error=${String(event.errorMessage ?? "unknown")}`;
 }
 
-function latestAssistantText(session: WorkerSessionLike, fallback: string): string {
-  const direct = session.getLastAssistantText?.();
-  if (direct) {
-    return direct;
+function latestInvocationAssistantText(
+  session: WorkerSessionLike,
+  fallback: string,
+  messageStart: number,
+  allowDirectFallback: boolean,
+): string {
+  const invocationMessages = Array.isArray(session.messages) ? session.messages.slice(messageStart) : undefined;
+  const fromInvocation = lastAssistantTextFromMessages(invocationMessages);
+  if (fromInvocation) {
+    return fromInvocation;
   }
-  const fromMessages = lastAssistantTextFromMessages(session.messages);
-  return fromMessages || fallback;
+  if (allowDirectFallback) {
+    const direct = session.getLastAssistantText?.();
+    if (direct) {
+      return direct;
+    }
+  }
+  return fallback;
 }
 
 function buildLongTaskFailureTaskResult(reason: string): string {

@@ -173,7 +173,13 @@ try {
         replacementQueue.enqueue("Change the active API task from REST to GraphQL.", "interactive");
         await accepted;
       }
-      return outcomeFor(options);
+      const outcome = outcomeFor(options);
+      return {
+        ...outcome,
+        // The obsolete REST invocation and its GraphQL replacement both use
+        // TODO 1 / attempt 1; accounting must retain both costs.
+        workerCostTotal: status === "rest" ? (options.task.taskId === "1" ? 2 : 4) : 3,
+      };
     },
     onProgress: (update) => replacementUpdates.push(update),
   });
@@ -188,6 +194,11 @@ try {
   assert.equal(replacementRun.attemptedTasks, 3);
   assert.equal(replacementRun.attempts[0]?.obsolete, true);
   assert.equal(replacementRun.attempts[1]?.obsolete, false);
+  assert.deepEqual(
+    replacementRun.outcomes.map((outcome) => outcome.workerCostTotal),
+    [2, 3, 4],
+  );
+  assert.equal(replacementRun.workerCostTotal, 9);
   assert.equal(replacementUpdates.filter((update) => update.phase === "task_obsolete").length, 1);
   assert.equal(
     replacementUpdates.filter((update) => update.phase === "task_done" && update.title === "Build API").length,

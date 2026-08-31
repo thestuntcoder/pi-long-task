@@ -3,7 +3,11 @@ export interface ParsedWorkerRuntimeConfig {
   maxAttemptsPerTask?: number;
   taskTimeoutMs?: number;
   maxBashTimeoutMs?: number;
+  workerSessionReuseEnabled?: boolean;
+  workerSessionReuseContextThresholdPercent?: number;
 }
+
+type MutableWorkerRuntimeConfig = ParsedWorkerRuntimeConfig & { provider?: string; model?: string };
 
 const MODEL_TOKEN_RE = /[A-Za-z0-9][A-Za-z0-9._~:+/@-]*/;
 const STOP_WORDS = new Set([
@@ -28,7 +32,7 @@ const STOP_WORDS = new Set([
 ]);
 
 export function parseWorkerRuntimeConfig(text: string): ParsedWorkerRuntimeConfig {
-  const state: ParsedWorkerRuntimeConfig & { provider?: string; model?: string } = {};
+  const state: MutableWorkerRuntimeConfig = {};
 
   parseLineDirectives(text, state);
   parseNaturalLanguageDirectives(text, state);
@@ -39,13 +43,16 @@ export function parseWorkerRuntimeConfig(text: string): ParsedWorkerRuntimeConfi
     ...(state.maxAttemptsPerTask !== undefined ? { maxAttemptsPerTask: state.maxAttemptsPerTask } : {}),
     ...(state.taskTimeoutMs !== undefined ? { taskTimeoutMs: state.taskTimeoutMs } : {}),
     ...(state.maxBashTimeoutMs !== undefined ? { maxBashTimeoutMs: state.maxBashTimeoutMs } : {}),
+    ...(state.workerSessionReuseEnabled !== undefined
+      ? { workerSessionReuseEnabled: state.workerSessionReuseEnabled }
+      : {}),
+    ...(state.workerSessionReuseContextThresholdPercent !== undefined
+      ? { workerSessionReuseContextThresholdPercent: state.workerSessionReuseContextThresholdPercent }
+      : {}),
   };
 }
 
-function parseLineDirectives(
-  text: string,
-  state: ParsedWorkerRuntimeConfig & { provider?: string; model?: string },
-): void {
+function parseLineDirectives(text: string, state: MutableWorkerRuntimeConfig): void {
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/^\s{0,3}>+\s?/, "").trim();
     const match = line.match(
@@ -64,10 +71,7 @@ function parseLineDirectives(
   }
 }
 
-function parseNaturalLanguageDirectives(
-  text: string,
-  state: ParsedWorkerRuntimeConfig & { provider?: string; model?: string },
-): void {
+function parseNaturalLanguageDirectives(text: string, state: MutableWorkerRuntimeConfig): void {
   captureTokens(
     text,
     /\bworker\s+(?:model|provider\/model)\s*(?:is|=|:|to|as)?\s*[`'"]?([A-Za-z0-9][A-Za-z0-9._~:+/@-]*)/gi,
@@ -139,13 +143,38 @@ function parseNaturalLanguageDirectives(
       state.maxBashTimeoutMs = value;
     },
   );
+
+  for (const match of text.matchAll(
+    /\b(?:worker\s+)?session\s+reuse(?:\s+is|\s*=|\s*:|\s+to)?\s+(enabled|disabled|on|off|true|false)\b/gi,
+  )) {
+    const enabled = booleanSetting(match[1] ?? "");
+    if (enabled !== undefined) state.workerSessionReuseEnabled = enabled;
+  }
+  for (const match of text.matchAll(
+    /\b(?:worker\s+)?(?:session\s+)?reuse\s+context(?:\s+usage)?\s+threshold\s*(?:is|=|:|to|of)?\s*(\d+(?:\.\d+)?)\s*%/gi,
+  )) {
+    const threshold = percentageFromText(match[1] ?? "");
+    if (threshold !== undefined) state.workerSessionReuseContextThresholdPercent = threshold;
+  }
 }
 
-function applyDirective(
-  key: string,
-  value: string,
-  state: ParsedWorkerRuntimeConfig & { provider?: string; model?: string },
-): void {
+function applyDirective(key: string, value: string, state: MutableWorkerRuntimeConfig): void {
+  if (/\breuse\b/.test(key) && /\b(?:threshold|context)\b/.test(key)) {
+    const threshold = percentageFromText(value);
+    if (threshold !== undefined) {
+      state.workerSessionReuseContextThresholdPercent = threshold;
+    }
+    return;
+  }
+
+  if (/\breuse\b/.test(key)) {
+    const enabled = booleanSetting(value);
+    if (enabled !== undefined) {
+      state.workerSessionReuseEnabled = enabled;
+    }
+    return;
+  }
+
   if (/\bprovider\b/.test(key)) {
     const token = modelToken(value);
     if (token) {
@@ -248,6 +277,26 @@ function positiveIntegerFromText(value: string): number | undefined {
   }
   const parsed = Number.parseInt(match[0], 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function percentageFromText(value: string): number | undefined {
+  const match = /\d+(?:\.\d+)?/.exec(value);
+  if (!match) {
+    return undefined;
+  }
+  const parsed = Number.parseFloat(match[0]);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 100 ? parsed : undefined;
+}
+
+function booleanSetting(value: string): boolean | undefined {
+  const normalized = trimDirectiveValue(value).toLowerCase().split(/\s+/)[0];
+  if (normalized === "enabled" || normalized === "on" || normalized === "true" || normalized === "yes") {
+    return true;
+  }
+  if (normalized === "disabled" || normalized === "off" || normalized === "false" || normalized === "no") {
+    return false;
+  }
+  return undefined;
 }
 
 function durationMsFromText(value: string, options: { allowBareSeconds: boolean }): number | undefined {

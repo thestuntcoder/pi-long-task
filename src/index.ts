@@ -573,6 +573,8 @@ function sidebarUpdateStateDetails(update: CoordinatorProgressUpdate): {
       return { icon: "✓", label: "Plan ready", color: "success" };
     case "task_start":
       return { icon: "▢", label: "Running task", color: "accent" };
+    case "worker_session":
+      return { icon: "↻", label: "Worker session", color: "accent" };
     case "worker_tool":
       return { icon: "+", label: "Worker tool", color: "warning" };
     case "task_done":

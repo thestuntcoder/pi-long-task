@@ -268,7 +268,7 @@ class FakeWorkerSession {
   }
 
   getSessionStats(): unknown {
-    return this.statsCost === undefined ? undefined : { cost: this.statsCost };
+    return this.statsCost === undefined ? undefined : { cost: this.prompts.length > 0 ? this.statsCost : 0 };
   }
 
   dispose(): void {}
