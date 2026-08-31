@@ -2,6 +2,18 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## Unreleased
+
+### Added
+
+- Adaptively reuse healthy, compatible worker sessions for related sequential TODOs, with explicit assignment boundaries and a conservative 62.5% default context threshold.
+- Expose worker-session start, reuse, retention, rotation, context-usage, and reason diagnostics through progress updates, task artifacts, and coordinator metrics.
+
+### Changed
+
+- Attribute cumulative reused-session cost and token statistics as task/attempt-level deltas across reuse, retries, counter resets, and rotations.
+- Rotate to fresh sessions after unsafe outcomes, incompatible configuration, unavailable or excessive context usage, and independent retries; reuse may be disabled to retain isolated assignment behavior.
+
 ## 0.4.0 - 2026-08-31
 
 ### Added

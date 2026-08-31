@@ -4,11 +4,11 @@
 [![Node.js >= 22.19](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Pi Long Task** is a long-running task runner and subagent orchestrator for the [Pi coding agent](https://github.com/earendil-works/pi). It is a Pi extension that breaks large coding requests into tracked TODOs, executes them in isolated AI worker sessions, registers a real Pi TUI progress sidebar while a run is active, and optionally commits completed work.
+**Pi Long Task** is a long-running task runner and subagent orchestrator for the [Pi coding agent](https://github.com/earendil-works/pi). It is a Pi extension that breaks large coding requests into tracked TODOs, executes them in bounded AI worker sessions, registers a real Pi TUI progress sidebar while a run is active, and optionally commits completed work.
 
 If you are looking for a way to run long-running, multi-step, autonomous coding tasks with Pi — refactors, test coverage pushes, full feature builds, or entire product goals — this extension handles the planning, delegation, progress tracking, retries, and safe git commits for you.
 
-Use it when a coding request is bigger than one focused interaction. Pi Long Task creates or cleans up the TODO plan, hands each TODO to a fresh worker session, tracks every attempt, and keeps the run artifacts so you can inspect what happened later.
+Use it when a coding request is bigger than one focused interaction. Pi Long Task creates or cleans up the TODO plan, gives every TODO a task-scoped assignment, adaptively reuses a healthy compatible worker session when safe, tracks every attempt, and keeps the run artifacts so you can inspect what happened later.
 
 ## Why use it
 
@@ -25,7 +25,7 @@ When you ask Pi to run a long task, Pi Long Task:
 
 1. Recognizes natural-language requests like "run a long task with commits" and routes them to `pi_long_task`.
 2. Creates or cleans up a TODO plan from your request, optionally guided by a high-level `goal`. Natural-language planning uses a bounded planner session; if generated TODO markdown is invalid, Pi Long Task asks the planner to repair it once before failing the run.
-3. Works through each unfinished TODO task in order using isolated worker sessions.
+3. Works through each unfinished TODO task in order, reusing a healthy compatible worker session when its context remains safely below the configured limit and rotating otherwise.
 4. Registers a Pi TUI sidebar/widget when UI support is available and updates it with the current task, inferred subtask progress, and full task timeline while the run is active.
 5. Retries unfinished tasks up to the configured attempt limit.
 6. Records progress, planner diagnostics, task artifacts, and final results under `tmp/pi-long-task/<run-id>/`.
@@ -200,7 +200,7 @@ Use `with commits` or `commit true` only when you want Pi Long Task to create el
 
 ### 3. Monitor progress and completion
 
-During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs one isolated worker session per unfinished TODO in order, and retries unfinished tasks up to the configured attempt limit. Checked progress in pasted TODO markdown is preserved, so completed tasks are skipped when that artifact is supplied again. A task is marked complete only after the worker returns every required `TASK_RESULT` field without a session error, timeout, or cancellation, and the attempt evidence is appended before the TODO completion marker. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
+During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs unfinished TODOs in order with adaptive worker-session reuse, and retries unfinished tasks up to the configured attempt limit. Every assignment remains task-scoped even when its SDK session is reused. Checked progress in pasted TODO markdown is preserved, so completed tasks are skipped when that artifact is supplied again. A task is marked complete only after the worker returns every required `TASK_RESULT` field without a session error, timeout, or cancellation, and the attempt evidence is appended before the TODO completion marker. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
 
 ### Steer a run in progress
 
@@ -251,14 +251,60 @@ The actual sidebar is a Pi TUI overlay anchored on the right when the terminal i
 Pi Long Task coordinates a long request from planning through task completion:
 
 1. **Plan the work:** it creates a TODO plan from your request, or normalizes pasted TODO markdown so each item can be tracked consistently.
-2. **Run isolated workers:** each TODO is assigned to its own fresh worker session with the relevant task text, global instructions, attempt history, and commit setting.
+2. **Run bounded workers:** each TODO receives a new task-scoped assignment with the relevant task text, global instructions, attempt history, and commit setting. A healthy compatible SDK worker session may carry sequential assignments; each reused prompt includes an explicit assignment boundary.
 3. **Stream progress back:** the active worker's activity streams into the main Pi thread as partial tool results, so you can follow commands, edits, verification, and the final `TASK_RESULT` as they happen.
 4. **Update the Pi TUI sidebar:** when Pi provides UI support, the extension uses Pi's TUI UI APIs to maintain a real sidebar/widget that lists the full run timeline, including completed, active, upcoming, failed, or blocked tasks and inferred subtask progress from each task's `**Status:**` checklist.
 5. **Write run artifacts:** the coordinator writes the generated/normalized `TODO.md`, `TASK_RESULT.md`, attempt summaries, and final run details to `tmp/pi-long-task/<run-id>/`.
 6. **Commit only when enabled:** if `commit` is `true`, Pi Long Task may create a commit after each completed task using only eligible task changes. If commits are disabled, no commits are created; even when enabled, commits can be skipped when there are no eligible changes or the task outcome is not commit-worthy.
 
+### Adaptive worker-session reuse
+
+Reuse is enabled by default. Related sequential TODOs in the same coordinator run and worktree may share one idle Pi `AgentSession`, which avoids repeated startup and repository exploration. Reuse does not merge task semantics: every TODO still gets its complete current assignment, an explicit boundary from the previous assignment, its own result extraction, attempts, progress, and `TASK_RESULT` outcome.
+
+The default context-usage threshold is **62.5%**. A session is retained only while Pi reports valid context usage below that threshold. It is rotated at or above the threshold, or conservatively when context usage is missing or invalid. Rotation also occurs after timeout, abort, cancellation, unrecoverable or invalid session state, an obsolete assignment caused by steering, or a compatibility change in the coordinator run, repository/worktree, provider/model, worker options, or session configuration. All retained sessions are disposed when rotated or when the coordinator ends.
+
+You can put runtime directives in `inputText` (including pasted TODO global instructions):
+
+```text
+Worker session reuse: enabled
+Worker session reuse context threshold: 60%
+```
+
+The threshold accepts a percentage greater than `0` and at most `100`. An absent or invalid value uses the safe `62.5%` default. To restore the previous one-session-per-assignment behavior:
+
+```text
+Worker session reuse: disabled
+```
+
+Programmatic callers of `runCoordinator()` can use the corresponding options:
+
+```ts
+await runCoordinator({
+  commit: false,
+  inputText: "implement the TODO plan",
+  workerSessionReuse: true,
+  workerSessionReuseContextThresholdPercent: 60,
+});
+```
+
+Explicit, complete `status: partial` results may continue in the same healthy, compatible, below-threshold session on the next attempt. All independent retries—including timeout, abort, cancellation, errors, invalid/incomplete results, and non-partial failures—start fresh. Existing retry limits and delays are unchanged. Setting `workerSessionReuse: false` (or the disabling directive) always isolates assignments.
+
+### Reuse diagnostics and accounting
+
+Programmatic progress callbacks receive lifecycle updates with `phase: "worker_session"`. The additive fields are:
+
+- `workerSessionEvent`: `session_started`, `session_reused`, `session_retained`, or `session_rotated`
+- `workerSessionReason`: a stable diagnostic reason such as `fresh_session`, `reuse_eligible`, `context_threshold_reached`, `health_timed_out`, `model_mismatch`, or `reuse_disabled`
+- `workerSessionContextUsagePercent`: the observed context percentage when available
+- `workerSessionContextThresholdPercent`: the configured rotation threshold
+
+Each coordinator outcome may also include `sessionDiagnostics` entries with `event`, `reasonCode`, optional `contextUsagePercent`, optional `contextThresholdPercent`, and optional `previousTaskId`. These diagnostics are appended to the run's `TASK_RESULT.md`. The programmatic `CoordinatorResult.workerSessionMetrics` summarizes `starts`, `reuses`, `rotations`, `retained`, and counts by `rotationReasons` without removing or changing existing result fields.
+
+Pi session statistics can be cumulative across reused assignments. `outcomes[].workerCostTotal` and `outcomes[].workerUsage` are therefore calculated as nonnegative **task/attempt-level deltas** between assignment boundaries, not as the cumulative session totals. `CoordinatorResult.workerCostTotal` and `workerUsageTotal` aggregate those deltas exactly once across reuse, retries, and rotation; a statistics reset starts a new baseline. This keeps sidebar spend and the cost added to the parent Pi message task-accurate even when one session performs several TODOs.
+
 ## Feature reference
 
+- **Adaptive worker-session reuse:** reuse healthy compatible sessions below the 62.5% default context threshold, while preserving task boundaries and rotating conservatively.
 - **Real Pi TUI sidebar:** in TUI sessions, every TODO appears in a registered sidebar/widget with past, current, and future statuses so you can distinguish completed, active, upcoming, failed, blocked, and remaining work at a glance.
 - **Main-thread worker activity:** the active worker still streams commands, edits, verification, and its per-task `TASK_RESULT` back into the main Pi conversation; the sidebar does not replace tool-result rendering.
 - **Cost visibility:** worker spend is included in Pi Long Task progress and is added to the main Pi `$ spent` total when cost data is available.
@@ -347,7 +393,7 @@ For vague goals, the loop runs as:
 2. classify the goal as vague and run discovery
 3. persist `GOAL_SPEC.json`
 4. generate implementation TODO markdown from the persisted specification
-5. run that generated TODO as a normal long task in an isolated worker session
+5. run that generated TODO as a normal task-scoped long-task coordinator run
 6. run a separate reviewer session that decides `complete`, `incomplete`, `blocked`, or `failed` against the persisted specification
 7. if the reviewer says `incomplete`, generate another TODO using previous review context plus the same persisted specification and repeat
 
@@ -481,7 +527,7 @@ That smoke test creates disposable git repos and verifies both `commit: false` a
 
 ## Limitations and expectations
 
-- Tasks run sequentially, one TODO at a time; Pi Long Task prioritizes isolation, progress tracking, and safe handoff over parallel execution.
+- Tasks run sequentially, one TODO at a time; Pi Long Task prioritizes task isolation, progress tracking, and safe handoff over parallel execution. Adaptive reuse may share the underlying SDK session only while policy checks remain safe.
 - Natural-language TODO planning has a bounded time budget (five minutes by default, with a short graceful-shutdown request). If planning times out or is aborted before a valid plan exists, the run fails before worker tasks start and records planner diagnostics in `TASK_RESULT.md`.
 - If the planner returns invalid TODO markdown, Pi Long Task makes one repair attempt. A second invalid response fails planning with diagnostics instead of guessing at a plan.
 - Real runs require usable Pi model credentials, such as a working Pi login or API key for the selected model.
@@ -490,7 +536,7 @@ That smoke test creates disposable git repos and verifies both `commit: false` a
 
 ## Keywords
 
-Pi extension, Pi package, Pi coding agent, AI coding agent, AI coding assistant, LLM agent, agentic coding, subagent orchestration, long-running tasks, task runner, task orchestration, TODO planner, autonomous coding, background coding agent, isolated worker sessions, multi-step coding tasks.
+Pi extension, Pi package, Pi coding agent, AI coding agent, AI coding assistant, LLM agent, agentic coding, subagent orchestration, long-running tasks, task runner, task orchestration, TODO planner, autonomous coding, background coding agent, adaptive worker sessions, multi-step coding tasks.
 
 ## License
 
