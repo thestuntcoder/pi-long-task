@@ -5,6 +5,7 @@ import { truncateToWidth, type Component, type OverlayHandle, type TUI } from "@
 import { runCoordinator, type CoordinatorProgressUpdate, type CoordinatorResult } from "./coordinator.ts";
 import { runGoalLoop, type GoalLoopProgressUpdate, type GoalLoopRunResult } from "./goal_orchestrator.ts";
 import { longTaskInputTransform } from "./input_router.ts";
+import { ActiveLongTaskSteeringRouter, SerializedSteeringQueue, type SteeringInput } from "./steering.ts";
 import {
   formatGoalLoopResultMessage,
   goalTaskDetailsFromResult,
@@ -580,6 +581,8 @@ function sidebarUpdateStateDetails(update: CoordinatorProgressUpdate): {
       return { icon: "!", label: "Task blocked", color: "warning" };
     case "task_failed":
       return { icon: "×", label: "Task failed", color: "error" };
+    case "task_obsolete":
+      return { icon: "↻", label: "Task replaced", color: "warning" };
     case "complete":
       return { icon: "✓", label: "Complete", color: "success" };
   }
@@ -727,8 +730,40 @@ function formatCost(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
+interface SteeringInputContext {
+  ui: {
+    notify(message: string, level?: "info" | "warning" | "error"): void;
+  };
+}
+
+export function handleLongTaskInput(
+  event: SteeringInput,
+  ctx: SteeringInputContext,
+  steeringRouter: ActiveLongTaskSteeringRouter,
+): { action: "continue" } | { action: "transform"; text: string } | { action: "handled" } {
+  if (event.source === "extension") {
+    return { action: "continue" };
+  }
+
+  const steering = steeringRouter.route(event);
+  if (steering.routed) {
+    ctx.ui.notify(
+      `Guidance received and queued for incorporation into the active Pi Long Task (#${steering.message.sequence}).`,
+      "info",
+    );
+    return { action: "handled" };
+  }
+
+  const transformed = longTaskInputTransform(event.text);
+  if (!transformed) {
+    return { action: "continue" };
+  }
+  return { action: "transform", text: transformed };
+}
+
 export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
   const workerCostAccumulator = createWorkerCostAccumulator();
+  const steeringRouter = new ActiveLongTaskSteeringRouter();
 
   pi.on("message_end", (event) => {
     if (event.message.role !== "assistant") {
@@ -739,18 +774,7 @@ export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
     return message ? { message } : undefined;
   });
 
-  pi.on("input", (event) => {
-    if (event.source === "extension") {
-      return { action: "continue" as const };
-    }
-
-    const transformed = longTaskInputTransform(event.text);
-    if (!transformed) {
-      return { action: "continue" as const };
-    }
-
-    return { action: "transform" as const, text: transformed };
-  });
+  pi.on("input", (event, ctx) => handleLongTaskInput(event, ctx, steeringRouter));
 
   pi.registerTool({
     name: "pi_long_task",
@@ -760,8 +784,10 @@ export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
     parameters: PiLongTaskParams,
     renderCall: renderLongTaskToolCall,
     renderResult: renderLongTaskToolResult,
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const sidebar = createLongTaskSidebarController(ctx);
+      const steeringQueue = new SerializedSteeringQueue({ queueId: toolCallId });
+      const deactivateSteering = steeringRouter.activate(steeringQueue);
       const publishProgress = (update: CoordinatorProgressUpdate) => {
         sidebar?.update(update);
         onUpdate?.({
@@ -782,6 +808,7 @@ export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
           workerModel: ctx?.model,
           abortSignal: signal,
           onProgress: publishProgress,
+          steeringQueue,
         });
         workerCostAccumulator.add(result.workerCostTotal);
 
@@ -795,6 +822,8 @@ export default function registerPiLongTaskExtension(pi: ExtensionAPI) {
           details: toolDetails(result),
         };
       } finally {
+        deactivateSteering();
+        steeringQueue.close();
         sidebar?.close();
       }
     },

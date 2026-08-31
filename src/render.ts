@@ -462,6 +462,8 @@ function progressPhaseLabel(phase: string): string {
       return "Failed";
     case "task_blocked":
       return "Blocked";
+    case "task_obsolete":
+      return "Revised";
     case "complete":
       return "Complete";
     default:

@@ -6,6 +6,8 @@ export interface TaskStatusItem {
 export interface Task {
   taskId: string;
   title: string;
+  /** Optional identity persisted in a task section as `<!-- pi-long-task-id: value -->`. */
+  stableId?: string;
   section: string;
   startLine: number;
   endLine: number;
@@ -27,6 +29,7 @@ const CHECKBOX_RE = /^(\s*-\s+\[)([ xX])(\].*)$/;
 const GLOBAL_PROGRESS_HEADING_RE = /^##\s+Progress\s*$/i;
 const FIELD_HEADING_RE = /^\*\*[^*\r\n]+:\*\*\s*$/;
 const FENCE_LINE_RE = /^\s*(`{3,}|~{3,})/;
+const STABLE_ID_RE = /^\s*<!--\s*pi-long-task-id:\s*([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\s*-->\s*$/i;
 
 function progressRegexForTask(taskId: string): RegExp {
   return new RegExp(`^(\\s*-\\s+\\[)([ xX])(\\]\\s+TODO\\s+${escapeRegExp(taskId)}\\b.*)$`);
@@ -85,6 +88,30 @@ function parseTaskHeadings(lines: string[]): TaskHeading[] {
   });
 
   return headings;
+}
+
+function findStableId(lines: string[], startIdx: number, endIdx: number): string | undefined {
+  let fence: string | undefined;
+  for (let idx = startIdx; idx < endIdx; idx += 1) {
+    const stripped = stripLineBreaks(lines[idx]);
+    const fenceMatch = FENCE_LINE_RE.exec(stripped);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!fence) {
+        fence = marker;
+      } else if (marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (!fence) {
+      const match = STABLE_ID_RE.exec(stripped);
+      if (match) {
+        return match[1];
+      }
+    }
+  }
+  return undefined;
 }
 
 function findProgressDone(lines: string[], taskId: string): boolean | undefined {
@@ -146,9 +173,10 @@ function findStatusItems(lines: string[], startIdx: number, endIdx: number): Tas
   return items;
 }
 
-function markStatusBlockDone(lines: string[], startIdx: number, endIdx: number): void {
+function setStatusBlockDone(lines: string[], startIdx: number, endIdx: number, done: boolean): void {
   let inStatus = false;
   let seenCheckbox = false;
+  const marker = done ? "x" : " ";
 
   for (let idx = startIdx; idx < endIdx; idx += 1) {
     const stripped = lines[idx].trim();
@@ -166,8 +194,8 @@ function markStatusBlockDone(lines: string[], startIdx: number, endIdx: number):
     const checkbox = CHECKBOX_RE.exec(raw);
     if (checkbox) {
       seenCheckbox = true;
-      if (checkbox[2].toLowerCase() !== "x") {
-        lines[idx] = `${checkbox[1]}x${checkbox[3]}${newline}`;
+      if ((checkbox[2].toLowerCase() === "x") !== done) {
+        lines[idx] = `${checkbox[1]}${marker}${checkbox[3]}${newline}`;
       }
       continue;
     }
@@ -201,6 +229,7 @@ export function parseTasks(markdown: string): Task[] {
     const task: Task = {
       taskId: heading.taskId,
       title: heading.title,
+      stableId: findStableId(lines, heading.startIdx, endIdx),
       section,
       startLine: heading.startIdx + 1,
       endLine: endIdx,
@@ -219,16 +248,17 @@ export function incompleteTasks(markdown: string): Task[] {
   return parseTasks(markdown).filter((task) => !task.done);
 }
 
-export function markTaskDone(markdown: string, taskId: string): string {
+function setTaskDone(markdown: string, taskId: string, done: boolean): string {
   const lines = splitLinesKeepEnds(markdown);
   const progressRegex = progressRegexForTask(taskId);
+  const marker = done ? "x" : " ";
 
   lines.forEach((line, idx) => {
     const raw = stripLineBreaks(line);
     const newline = line.endsWith("\n") ? "\n" : "";
     const match = progressRegex.exec(raw);
-    if (match && match[2].toLowerCase() !== "x") {
-      lines[idx] = `${match[1]}x${match[3]}${newline}`;
+    if (match && (match[2].toLowerCase() === "x") !== done) {
+      lines[idx] = `${match[1]}${marker}${match[3]}${newline}`;
     }
   });
 
@@ -236,10 +266,19 @@ export function markTaskDone(markdown: string, taskId: string): string {
   const headingPos = headings.findIndex((heading) => heading.taskId === taskId);
   if (headingPos >= 0) {
     const endIdx = headingPos + 1 < headings.length ? headings[headingPos + 1].startIdx : lines.length;
-    markStatusBlockDone(lines, headings[headingPos].startIdx, endIdx);
+    setStatusBlockDone(lines, headings[headingPos].startIdx, endIdx, done);
   }
 
   return lines.join("");
+}
+
+export function markTaskDone(markdown: string, taskId: string): string {
+  return setTaskDone(markdown, taskId, true);
+}
+
+/** Clears planner-supplied completion for work whose coordinator-owned state is not complete. */
+export function markTaskPending(markdown: string, taskId: string): string {
+  return setTaskDone(markdown, taskId, false);
 }
 
 export function todoGlobalInstructions(markdown: string, limit = 6000): string {

@@ -12,6 +12,21 @@ import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfte
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { extractResultSummary } from "./result_writer.ts";
 import { runGuardedSessionPrompt } from "./session_guard.ts";
+import {
+  generatePlanRevision,
+  PlanRevisionGenerationError,
+  type GeneratedPlanRevision,
+  type PlanRevisionRequest,
+  type PlanRevisionRelevantResult,
+} from "./plan_revision_generation.ts";
+import { taskSemanticFingerprint, type PlanTaskState } from "./plan_revision.ts";
+import {
+  PersistentTodoPlanStore,
+  planTaskReference,
+  resolvePlanTaskReference,
+  type PlanTaskReference,
+} from "./plan_store.ts";
+import type { SerializedSteeringQueue, SteeringMessage } from "./steering.ts";
 import { parseWorkerRuntimeConfig } from "./worker_config.ts";
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
@@ -23,7 +38,7 @@ import {
   todoMarkdownFromString,
   validateTodoMarkdown,
 } from "./todo_generator.ts";
-import { markTaskDone, parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
+import { parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
 import {
   createIsolatedWorkerSession,
   runWorkerTask,
@@ -54,6 +69,7 @@ export type CoordinatorProgressPhase =
   | "task_done"
   | "task_blocked"
   | "task_failed"
+  | "task_obsolete"
   | "complete";
 
 export type PlannerDiagnosticKind = "timeout" | "abort" | "invalid_output" | "repair_attempt" | "failure";
@@ -132,6 +148,10 @@ export interface RunCoordinatorOptions extends PiLongTaskInput {
   todoThinking?: string;
   now?: () => Date;
   onProgress?: CoordinatorProgressHandler;
+  /** Run-scoped FIFO populated by the extension input handler during active execution. */
+  steeringQueue?: SerializedSteeringQueue;
+  /** Runs after rebase/validation and immediately before the revision is atomically persisted. */
+  onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
 }
 
 export interface TodoPlannerOptions {
@@ -146,11 +166,17 @@ export interface TodoPlannerOptions {
   sessionFactory?: WorkerSessionFactory;
   onDiagnostic?: PlannerDiagnosticHandler;
   goal?: string;
+  /** Exact prompt for revision planners; bypasses the initial TODO-creation wrapper. */
+  plannerPrompt?: string;
+  /** Structured revision context supplied alongside plannerPrompt. */
+  planRevision?: Readonly<PlanRevisionRequest>;
 }
 
 export interface TaskAttemptSummary {
   taskId: string;
   title: string;
+  taskStableId?: string;
+  taskFingerprint?: string;
   attempt: number;
   reportedStatus: string;
   done: boolean;
@@ -158,6 +184,10 @@ export interface TaskAttemptSummary {
   commitHash?: string;
   commitError?: string;
   commitSkipped?: string;
+  /** The worker finished after an accepted revision replaced or removed its task. */
+  obsolete?: boolean;
+  /** Retry continuity retained across task renumbering and accepted revisions. */
+  resultText?: string;
 }
 
 export interface CoordinatorResult {
@@ -220,6 +250,8 @@ interface RuntimeOptions {
   workerTextByWorker: Map<string, string>;
   workerTextPublishedLengthByWorker: Map<string, number>;
   plannerDiagnostics: PlannerDiagnostic[];
+  steeringQueue?: SerializedSteeringQueue;
+  onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
 }
 
 export async function runCoordinator(options: RunCoordinatorOptions): Promise<CoordinatorResult> {
@@ -235,6 +267,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   let latestTodoMarkdown: string | undefined;
   let latestTasks: Task[] = [];
   let activeTask: Task | undefined;
+  let activeTaskReference: PlanTaskReference | undefined;
   let activeAttempt: number | undefined;
   const protectedDirtyPathsByTask = new Map<string, Set<string>>();
 
@@ -244,7 +277,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     validateTodoMarkdown(todoMarkdown);
     planningComplete = true;
     latestTodoMarkdown = todoMarkdown;
-    await writeFile(runtime.todoPath, todoMarkdown, "utf8");
+    const planStore = await PersistentTodoPlanStore.create(runtime.todoPath, todoMarkdown);
     const initialTasks = parseTasks(todoMarkdown);
     latestTasks = initialTasks;
     emitProgress(runtime, `Created TODO plan with ${initialTasks.length} task(s).`, {
@@ -253,10 +286,73 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       taskProgress: buildTaskProgressModel({ tasks: initialTasks }),
     });
 
-    const previousAttempts = new Map<string, string[]>();
     let failure: string | undefined;
+    runtime.steeringQueue?.setProcessor(async (message) => {
+      const baseAtRequest = planStore.snapshot();
+      const activeTaskAtRequest = activeTaskReference
+        ? resolvePlanTaskReference(
+            parseTasks(baseAtRequest.markdown),
+            activeTaskReference,
+            baseAtRequest.authorityToken,
+          )
+        : undefined;
+      try {
+        const revision = await generateSteeringPlanRevision({
+          message,
+          currentTodoMarkdown: baseAtRequest.markdown,
+          attempts,
+          outcomes,
+          commits,
+          activeTask: activeTaskAtRequest,
+          activeAttempt,
+          runtime,
+        });
+        const currentTasks = parseTasks(planStore.snapshot().markdown);
+        const appliedRevision = await planStore.applyRevision(revision, {
+          expectedAuthorityToken: baseAtRequest.authorityToken,
+          taskStates: coordinatorPlanTaskStates(currentTasks, attempts, activeTaskAtRequest),
+          runningTask: activeTaskReference,
+          // The callback remains part of acceptance: a rejection occurs before
+          // the atomic replacement and therefore leaves the prior plan active.
+          beforeCommit: runtime.onPlanRevisionAccepted,
+        });
+        // The store snapshot is the scheduler's authority at every task
+        // boundary, so this accepted revision continues the same run.
+        latestTodoMarkdown = appliedRevision.todoMarkdown;
+        latestTasks = appliedRevision.reconciliation.activeTasks.map((item) => item.task);
+        emitProgress(
+          runtime,
+          `Accepted steering revision ${message.sequence} with ${appliedRevision.reconciliation.activeTasks.length} task(s).`,
+          {
+            phase: "planned",
+            status: "revised",
+            totalTasks: appliedRevision.reconciliation.activeTasks.length,
+            taskProgress: revisionTaskProgress(appliedRevision),
+          },
+        );
+      } catch (error) {
+        const currentSnapshot = planStore.snapshot();
+        const messageText =
+          error instanceof PlanRevisionGenerationError
+            ? `${error.message} The prior plan remains active and this guidance can be retried.`
+            : `Plan revision failed. The prior plan remains active: ${errorMessage(error)}`;
+        emitProgress(runtime, messageText, {
+          phase: "planning",
+          status: "revision_failed",
+          isError: true,
+          totalTasks: parseTasks(currentSnapshot.markdown).length,
+          taskProgress: buildTaskProgressModel({ tasks: parseTasks(currentSnapshot.markdown) }),
+        });
+        throw error;
+      }
+    });
 
     while (!runtime.abortSignal?.aborted) {
+      // Guidance received before this boundary must settle before selecting
+      // more work. Failed revisions leave the prior snapshot usable.
+      await runtime.steeringQueue?.waitForIdle();
+      const schedulingSnapshot = planStore.snapshot();
+      todoMarkdown = schedulingSnapshot.markdown;
       const tasksBeforeAttempt = parseTasks(todoMarkdown);
       latestTasks = tasksBeforeAttempt;
       const nextTask = tasksBeforeAttempt.find((task) => !task.done);
@@ -264,7 +360,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         break;
       }
 
-      const attempt = (previousAttempts.get(nextTask.taskId)?.length ?? 0) + 1;
+      const priorTaskAttempts = attemptsForTask(tasksBeforeAttempt, attempts, nextTask);
+      const attempt = priorTaskAttempts.length + 1;
       const initialActivity =
         nextTask.statusItems.find((item) => !item.done)?.text ?? `Starting TODO ${nextTask.taskId}`;
       const worker = workerKey(nextTask.taskId, attempt);
@@ -288,22 +385,29 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           }),
         },
       );
-      let preExistingDirtyPaths = protectedDirtyPathsByTask.get(nextTask.taskId);
+      const executionIdentity = taskExecutionIdentity(nextTask);
+      let preExistingDirtyPaths = protectedDirtyPathsByTask.get(executionIdentity);
       if (!preExistingDirtyPaths) {
         preExistingDirtyPaths = options.commit
           ? await gitDirtyPaths(runtime.cwd, runtime.taskResultPath, runtime.todoPath, runtime.runDir)
           : new Set<string>();
-        protectedDirtyPathsByTask.set(nextTask.taskId, preExistingDirtyPaths);
+        protectedDirtyPathsByTask.set(executionIdentity, preExistingDirtyPaths);
       }
       activeTask = nextTask;
       activeAttempt = attempt;
+      const taskPlanReference = planTaskReference(nextTask, schedulingSnapshot.authorityToken);
+      activeTaskReference = taskPlanReference;
       const outcome = await runtime.workerRunner({
         cwd: runtime.cwd,
         todoPath: runtime.todoPath,
         task: nextTask,
         attempt,
         commitRequested: options.commit,
-        previousAttempts: previousAttempts.get(nextTask.taskId)?.join("\n\n---\n\n"),
+        previousAttempts:
+          priorTaskAttempts
+            .map((item) => item.resultText)
+            .filter((item): item is string => Boolean(item))
+            .join("\n\n---\n\n") || undefined,
         globalInstructions: todoGlobalInstructions(todoMarkdown),
         goal: runtime.goal,
         maxBashTimeoutSeconds: runtime.maxBashTimeoutSeconds,
@@ -316,47 +420,75 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         now: runtime.now,
         onEvent: (event) => emitWorkerEventProgress(runtime, tasksBeforeAttempt, nextTask, attempts, attempt, event),
       });
-      outcomes.push(outcome);
       finalizeWorkerCost(runtime.workerCostState, outcome);
+
+      // A revision may have been accepted while the worker was running. Let all
+      // already-received guidance settle, then resolve this exact task identity
+      // against the latest plan before applying any terminal state.
+      await runtime.steeringQueue?.waitForIdle();
+      const initialResolution = await planStore.resolveTask(taskPlanReference);
+      const initiallyObsolete = initialResolution.stale || !initialResolution.task;
+
+      // Durable attempt evidence must exist before any completion checkbox is
+      // persisted. If this write fails, normal failure handling leaves the task
+      // pending and retryable.
+      await appendTaskResult(runtime.taskResultPath, nextTask, outcome, initiallyObsolete);
+      const settlement = initiallyObsolete
+        ? initialResolution
+        : outcome.done
+          ? await planStore.completeTask(taskPlanReference)
+          : await planStore.resolveTask(taskPlanReference);
+      const obsolete = settlement.stale || !settlement.task;
+      if (obsolete && !initiallyObsolete) {
+        await appendObsoleteDisposition(runtime.taskResultPath);
+      }
+      const settledTask = settlement.task ?? initialResolution.task ?? nextTask;
+      todoMarkdown = settlement.snapshot.markdown;
+      latestTodoMarkdown = todoMarkdown;
+      latestTasks = parseTasks(todoMarkdown);
 
       const attemptDetails: TaskAttemptSummary = {
         taskId: nextTask.taskId,
         title: nextTask.title,
+        taskStableId: nextTask.stableId,
+        taskFingerprint: taskSemanticFingerprint(nextTask),
         attempt,
         reportedStatus: outcome.reportedStatus,
         done: outcome.done,
         error: outcome.error,
+        obsolete,
+        resultText: resultTextForPreviousAttempt(outcome),
       };
       attempts.push(attemptDetails);
-      await appendTaskResult(runtime.taskResultPath, nextTask, outcome);
+      outcomes.push(outcome);
 
-      if (outcome.done) {
-        todoMarkdown = markTaskDone(todoMarkdown, nextTask.taskId);
-        latestTodoMarkdown = todoMarkdown;
-        await writeFile(runtime.todoPath, todoMarkdown, "utf8");
-      }
       activeTask = undefined;
+      activeTaskReference = undefined;
       activeAttempt = undefined;
 
       let taskCommitHash: string | undefined;
       let taskCommitError: string | undefined;
       let taskCommitSkipped: string | undefined;
       if (options.commit) {
-        const commitResult = shouldCommitOutcome(outcome)
-          ? await commitAfterSession({
-              cwd: runtime.cwd,
-              resultPath: runtime.taskResultPath,
-              todoPath: runtime.todoPath,
-              runDir: runtime.runDir,
-              outcome,
-              preExistingDirtyPaths,
-            })
-          : ({ skipped: "outcome is not eligible for commit" } satisfies CommitAfterSessionResult);
+        const commitResult = obsolete
+          ? ({
+              skipped: "task was replaced or removed by an accepted plan revision",
+            } satisfies CommitAfterSessionResult)
+          : shouldCommitOutcome(outcome)
+            ? await commitAfterSession({
+                cwd: runtime.cwd,
+                resultPath: runtime.taskResultPath,
+                todoPath: runtime.todoPath,
+                runDir: runtime.runDir,
+                outcome,
+                preExistingDirtyPaths,
+              })
+            : ({ skipped: "outcome is not eligible for commit" } satisfies CommitAfterSessionResult);
         attemptDetails.commitHash = commitResult.hash;
         attemptDetails.commitError = commitResult.error;
         attemptDetails.commitSkipped = commitResult.skipped;
         if (commitResult.hash || commitResult.error) {
-          commits.push({ taskId: nextTask.taskId, hash: commitResult.hash, error: commitResult.error });
+          commits.push({ taskId: settledTask.taskId, hash: commitResult.hash, error: commitResult.error });
         }
         taskCommitHash = commitResult.hash;
         taskCommitError = commitResult.error;
@@ -364,10 +496,15 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         await appendCommitNote(runtime.taskResultPath, commitResult);
       }
 
+      if (obsolete) {
+        emitObsoleteTaskOutcomeProgress(runtime, latestTasks, nextTask, attempts, outcome);
+        continue;
+      }
+
       emitTaskOutcomeProgress(
         runtime,
-        parseTasks(todoMarkdown),
-        nextTask,
+        latestTasks,
+        settledTask,
         attempts,
         outcome,
         taskCommitHash,
@@ -375,15 +512,33 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         taskCommitSkipped,
       );
 
-      const attemptSummary = resultTextForPreviousAttempt(outcome);
-      previousAttempts.set(nextTask.taskId, [...(previousAttempts.get(nextTask.taskId) ?? []), attemptSummary]);
-
       if (outcome.done) {
         continue;
       }
 
       if (attempt >= runtime.maxAttemptsPerTask) {
-        failure = `TODO ${nextTask.taskId} — ${nextTask.title} did not report done after ${attempt} attempt(s).`;
+        // Give guidance received at the failure boundary the same chance to
+        // replace this work before terminal retry exhaustion is declared.
+        await runtime.steeringQueue?.waitForIdle();
+        const failureResolution = await planStore.resolveTask(taskPlanReference);
+        if (failureResolution.stale || !failureResolution.task) {
+          attemptDetails.obsolete = true;
+          await appendObsoleteDisposition(runtime.taskResultPath);
+          todoMarkdown = failureResolution.snapshot.markdown;
+          latestTodoMarkdown = todoMarkdown;
+          latestTasks = parseTasks(todoMarkdown);
+          emitObsoleteTaskOutcomeProgress(runtime, latestTasks, nextTask, attempts, outcome);
+          continue;
+        }
+        const currentAttemptCount = attemptsForTask(
+          parseTasks(failureResolution.snapshot.markdown),
+          attempts,
+          failureResolution.task,
+        ).length;
+        if (currentAttemptCount < runtime.maxAttemptsPerTask) {
+          continue;
+        }
+        failure = `TODO ${failureResolution.task.taskId} — ${failureResolution.task.title} did not report done after ${currentAttemptCount} attempt(s).`;
         break;
       }
     }
@@ -470,6 +625,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       attempts.push({
         taskId: activeTask.taskId,
         title: activeTask.title,
+        taskStableId: activeTask.stableId,
+        taskFingerprint: taskSemanticFingerprint(activeTask),
         attempt: activeAttempt,
         reportedStatus: "failed",
         done: false,
@@ -607,6 +764,152 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
   });
 }
 
+async function generateSteeringPlanRevision(options: {
+  message: Readonly<SteeringMessage>;
+  currentTodoMarkdown: string;
+  attempts: readonly TaskAttemptSummary[];
+  outcomes: readonly SessionOutcome[];
+  commits: readonly CoordinatorCommitSummary[];
+  activeTask: Task | undefined;
+  activeAttempt: number | undefined;
+  runtime: RuntimeOptions;
+}): Promise<GeneratedPlanRevision> {
+  const currentTasks = parseTasks(options.currentTodoMarkdown);
+  const taskStates = coordinatorPlanTaskStates(currentTasks, options.attempts, options.activeTask);
+
+  return generatePlanRevision({
+    currentTodoMarkdown: options.currentTodoMarkdown,
+    guidance: options.message.text,
+    revisionId: options.message.id,
+    taskStates,
+    relevantResults: relevantPlanRevisionResults(currentTasks, options.attempts, options.outcomes, options.commits),
+    activeTask: options.activeTask
+      ? {
+          taskId: options.activeTask.taskId,
+          title: options.activeTask.title,
+          attempt: options.activeAttempt,
+          activity: options.runtime.workerActivityByWorker.get(
+            workerKey(options.activeTask.taskId, options.activeAttempt ?? 1),
+          ),
+        }
+      : undefined,
+    planner: ({ prompt, request }) =>
+      options.runtime.todoPlanner({
+        inputText: prompt,
+        plannerPrompt: prompt,
+        planRevision: request,
+        cwd: options.runtime.cwd,
+        runDir: options.runtime.runDir,
+        thinkingLevel: options.runtime.todoThinking,
+        model: options.runtime.workerModel,
+        abortSignal: options.runtime.abortSignal,
+        timeoutMs: options.runtime.todoTimeoutMs,
+        gracefulShutdownMs: options.runtime.todoGracefulShutdownMs,
+        sessionFactory: options.runtime.todoSessionFactory,
+        onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
+        goal: options.runtime.goal,
+      }),
+  });
+}
+
+function coordinatorPlanTaskStates(
+  tasks: readonly Task[],
+  attempts: readonly TaskAttemptSummary[],
+  activeTask: Task | undefined,
+): Record<string, PlanTaskState> {
+  const lastAttemptByTask = new Map<string, TaskAttemptSummary>();
+  for (const attempt of taskProgressAttempts(tasks, attempts)) {
+    lastAttemptByTask.set(attempt.taskId, attempt);
+  }
+
+  return Object.fromEntries(
+    tasks.map((task) => {
+      const attempt = lastAttemptByTask.get(task.taskId);
+      const state: PlanTaskState = task.done
+        ? "completed"
+        : activeTask?.stableId && task.stableId === activeTask.stableId
+          ? "running"
+          : activeTask?.taskId === task.taskId && task.title === activeTask.title
+            ? "running"
+            : attempt?.reportedStatus === "blocked"
+              ? "blocked"
+              : attempt
+                ? "failed"
+                : "pending";
+      return [task.taskId, state];
+    }),
+  );
+}
+
+function revisionTaskProgress(revision: GeneratedPlanRevision): TaskProgressModel {
+  const tasks = revision.reconciliation.activeTasks.map((item) => item.task);
+  const running = revision.reconciliation.activeTasks.find((item) => item.state === "running");
+  const stateAttempts = revision.reconciliation.activeTasks.flatMap((item) => {
+    if (item.state !== "failed" && item.state !== "blocked") {
+      return [];
+    }
+    return [
+      {
+        taskId: item.task.taskId,
+        reportedStatus: item.state,
+        done: false,
+      },
+    ];
+  });
+  return buildTaskProgressModel({
+    tasks,
+    attempts: stateAttempts,
+    currentTaskId: running?.task.taskId,
+  });
+}
+
+function relevantPlanRevisionResults(
+  currentTasks: readonly Task[],
+  attempts: readonly TaskAttemptSummary[],
+  outcomes: readonly SessionOutcome[],
+  commits: readonly CoordinatorCommitSummary[],
+): PlanRevisionRelevantResult[] {
+  const commitByTask = new Map(
+    commits.filter((commit) => commit.hash).map((commit) => [commit.taskId, commit.hash as string]),
+  );
+
+  return currentTasks.flatMap((task) => {
+    if (!task.done) {
+      return [];
+    }
+    const completedAttempt = attemptsForTask(currentTasks, attempts, task)
+      .filter((attempt) => attempt.done)
+      .at(-1);
+    if (!completedAttempt) {
+      return [];
+    }
+    const outcome = [...outcomes]
+      .reverse()
+      .find(
+        (item) =>
+          item.attempt === completedAttempt.attempt &&
+          item.task.title === completedAttempt.title &&
+          (!completedAttempt.taskFingerprint ||
+            taskSemanticFingerprint(item.task as Task) === completedAttempt.taskFingerprint),
+      );
+    const commitHash = completedAttempt.commitHash ?? commitByTask.get(completedAttempt.taskId);
+    const outputReferences = [
+      outcome?.sessionFile ? `session:${outcome.sessionFile}` : undefined,
+      outcome?.sessionId ? `session-id:${outcome.sessionId}` : undefined,
+      commitHash ? `commit:${commitHash}` : undefined,
+    ].filter((item): item is string => Boolean(item));
+    return [
+      {
+        taskId: task.taskId,
+        status: completedAttempt.reportedStatus,
+        summary:
+          (outcome ? extractResultSummary(outcome.assistantText).trim() : "") || `Completed TODO ${task.taskId}.`,
+        outputReferences,
+      },
+    ];
+  });
+}
+
 // Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
 // keep this function's public contract stable while moving shared prompt guarding into a helper.
 export async function runTodoPlanner(options: TodoPlannerOptions): Promise<string> {
@@ -627,7 +930,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
   try {
     const plannerText = await runTodoPlannerPrompt({
       session,
-      prompt: buildTodoCreationPrompt(options.inputText, options.goal),
+      prompt: options.plannerPrompt ?? buildTodoCreationPrompt(options.inputText, options.goal),
       abortSignal: options.abortSignal,
       timeoutMs,
       gracefulShutdownMs,
@@ -807,6 +1110,8 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerTextByWorker: new Map(),
     workerTextPublishedLengthByWorker: new Map(),
     plannerDiagnostics: [],
+    steeringQueue: options.steeringQueue,
+    onPlanRevisionAccepted: options.onPlanRevisionAccepted,
   };
 }
 
@@ -1093,6 +1398,27 @@ function activeStatusFromWorkerText(text: string): string {
   return (taskResultIndex >= 0 ? text.slice(0, taskResultIndex) : text).replace(/\s+/g, " ").trim();
 }
 
+function emitObsoleteTaskOutcomeProgress(
+  runtime: RuntimeOptions,
+  tasks: readonly Task[],
+  task: Pick<Task, "taskId" | "title" | "statusItems">,
+  attempts: readonly TaskAttemptSummary[],
+  outcome: SessionOutcome,
+): void {
+  emitProgress(
+    runtime,
+    `TODO ${task.taskId} result was retained as obsolete because an accepted revision replaced or removed the in-flight task.`,
+    {
+      phase: "task_obsolete",
+      taskId: task.taskId,
+      title: task.title,
+      attempt: outcome.attempt,
+      status: "obsolete",
+      taskProgress: buildTaskProgressModel({ tasks, attempts }),
+    },
+  );
+}
+
 function emitTaskOutcomeProgress(
   runtime: RuntimeOptions,
   tasks: readonly Task[],
@@ -1142,23 +1468,62 @@ function emitTaskOutcomeProgress(
   emitProgress(runtime, `TODO ${task.taskId} ${statusText}${commitText}.`, update);
 }
 
+function taskProgressAttempts(tasks: readonly Task[], attempts: readonly TaskAttemptSummary[]): TaskAttemptSummary[] {
+  return attempts.flatMap((attempt) => {
+    if (attempt.obsolete) {
+      return [];
+    }
+    const fingerprintMatches = attempt.taskFingerprint
+      ? tasks.filter((task) => taskSemanticFingerprint(task) === attempt.taskFingerprint)
+      : [];
+    const stableMatches =
+      !attempt.taskFingerprint && attempt.taskStableId
+        ? tasks.filter((task) => task.stableId === attempt.taskStableId)
+        : [];
+    const matched =
+      fingerprintMatches.length === 1
+        ? fingerprintMatches[0]
+        : stableMatches.length === 1
+          ? stableMatches[0]
+          : !attempt.taskFingerprint
+            ? tasks.find((task) => task.taskId === attempt.taskId && task.title === attempt.title)
+            : undefined;
+    return matched ? [{ ...attempt, taskId: matched.taskId, title: matched.title }] : [];
+  });
+}
+
+function attemptsForTask(
+  tasks: readonly Task[],
+  attempts: readonly TaskAttemptSummary[],
+  task: Pick<Task, "taskId">,
+): TaskAttemptSummary[] {
+  return taskProgressAttempts(tasks, attempts).filter((attempt) => attempt.taskId === task.taskId);
+}
+
+function taskExecutionIdentity(task: Task): string {
+  return task.stableId
+    ? `stable:${task.stableId}:${taskSemanticFingerprint(task)}`
+    : `semantic:${taskSemanticFingerprint(task)}`;
+}
+
 function buildCompletionTaskProgressModel(
   tasks: readonly Task[],
   attempts: readonly TaskAttemptSummary[],
   status: CoordinatorStatus,
 ): TaskProgressModel {
+  const currentAttempts = taskProgressAttempts(tasks, attempts);
   if (status === "done") {
-    return buildTaskProgressModel({ tasks, attempts });
+    return buildTaskProgressModel({ tasks, attempts: currentAttempts });
   }
 
-  const lastIncompleteAttempt = [...attempts].reverse().find((attempt) => !attempt.done);
+  const lastIncompleteAttempt = [...currentAttempts].reverse().find((attempt) => !attempt.done);
   if (!lastIncompleteAttempt) {
-    return buildTaskProgressModel({ tasks, attempts });
+    return buildTaskProgressModel({ tasks, attempts: currentAttempts });
   }
 
   return buildTaskProgressModel({
     tasks,
-    attempts,
+    attempts: currentAttempts,
     currentTaskId: lastIncompleteAttempt.taskId,
     currentTaskStatus: outcomeTaskProgressStatus(lastIncompleteAttempt),
   });
@@ -1226,7 +1591,12 @@ async function appendCommitNote(pathname: string, result: CommitAfterSessionResu
   await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
 }
 
-async function appendTaskResult(pathname: string, task: Task, outcome: SessionOutcome): Promise<void> {
+async function appendTaskResult(
+  pathname: string,
+  task: Task,
+  outcome: SessionOutcome,
+  obsolete = false,
+): Promise<void> {
   const summary = extractResultSummary(outcome.assistantText || "").trim() || "TASK_RESULT:\nstatus: unknown";
   const lines = [
     "",
@@ -1237,6 +1607,9 @@ async function appendTaskResult(pathname: string, task: Task, outcome: SessionOu
     `Reported status: ${outcome.reportedStatus}`,
     `Done: ${outcome.done ? "yes" : "no"}`,
   ];
+  if (obsolete) {
+    lines.push(obsoleteDispositionText());
+  }
 
   if (outcome.sessionId) {
     lines.push(`Session ID: ${outcome.sessionId}`);
@@ -1264,9 +1637,17 @@ async function appendTaskResult(pathname: string, task: Task, outcome: SessionOu
   await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function appendObsoleteDisposition(pathname: string): Promise<void> {
+  await appendFile(pathname, `\n${obsoleteDispositionText()}\n`, "utf8");
+}
+
+function obsoleteDispositionText(): string {
+  return "Plan disposition: obsolete — an accepted revision replaced or removed this in-flight task; its result did not update plan status.";
+}
+
 function remainingTaskSummaries(tasks: Task[], attempts: TaskAttemptSummary[]): CoordinatorRemainingTask[] {
   const lastAttemptByTask = new Map<string, TaskAttemptSummary>();
-  for (const attempt of attempts) {
+  for (const attempt of taskProgressAttempts(tasks, attempts)) {
     lastAttemptByTask.set(attempt.taskId, attempt);
   }
 

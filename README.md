@@ -202,6 +202,26 @@ Use `with commits` or `commit true` only when you want Pi Long Task to create el
 
 During execution, Pi Long Task creates `tmp/pi-long-task/<run-id>/TODO.md` and `TASK_RESULT.md`, runs one isolated worker session per unfinished TODO in order, and retries unfinished tasks up to the configured attempt limit. Checked progress in pasted TODO markdown is preserved, so completed tasks are skipped when that artifact is supplied again. A task is marked complete only after the worker returns every required `TASK_RESULT` field without a session error, timeout, or cancellation, and the attempt evidence is appended before the TODO completion marker. In Pi TUI, watch the Long Task sidebar/widget for the active task, subtask checklist, task timeline, counts, and worker spend when available. In headless or non-UI runs, watch the partial tool-result updates in the main output. When the run finishes, the final response lists completed, failed, blocked, and remaining task counts plus the result and TODO file paths.
 
+### Steer a run in progress
+
+While one Pi Long Task is active, send another plain-text message in the Pi prompt to refine the remaining work. For example:
+
+```text
+Add an accessibility review before the documentation task, and require pagination tests for the API task.
+```
+
+Pi acknowledges the guidance immediately, queues rapid messages in submission order, and asks the planner to incorporate each message into the current complete plan. Accepted guidance may edit pending tasks, add or remove work, or reorder the unfinished tasks. The updated `TODO.md` and sidebar use the revised order, and the same run continues from the next eligible task instead of starting over.
+
+Progress is reconciled conservatively:
+
+- Equivalent completed tasks stay checked and are not run again; their result evidence remains available to later workers.
+- If guidance changes completed work, the completed result is retained as history and corrective work is represented as a new unchecked follow-up rather than erasing the old result.
+- If guidance changes or removes the currently running task, that worker may finish, but its stale result is recorded as obsolete and cannot complete the replacement. The scheduler then runs the revised task.
+- A revision must be a complete valid Pi Long Task TODO plan. If generation or validation fails, Pi reports the rejection and keeps executing the prior plan unchanged.
+- Guidance received close to task completion is serialized with the completion update so the rendered checkboxes and scheduler state remain consistent.
+
+Steering applies to text submitted with Pi's active-session steering behavior. Slash commands, shell commands beginning with `!`, image messages, follow-up messages deferred until after the response, and extension-generated input retain their existing behavior instead of revising the plan. If more than one long-task run is active in the same extension session, guidance is not guessed between them.
+
 ## What it looks like
 
 ![Pi Long Task running in the Pi TUI with a live progress sidebar showing the task timeline, subtasks, and worker spend](docs/assets/package-preview.png)
