@@ -2042,7 +2042,7 @@ function emitWorkerEventProgress(
 }
 
 function stripToolOutcomePrefix(activity: string): string {
-  return activity.replace(/^(?:(?:Finished|Failed):\s*)+/i, "");
+  return activity.trim().replace(/^(?:(?:Finished|Failed):\s*)+/i, "");
 }
 
 function activeStatusFromWorkerText(text: string): string {

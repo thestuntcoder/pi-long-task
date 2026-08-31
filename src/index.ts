@@ -276,10 +276,8 @@ function renderSidebarWidgetLines(update: CoordinatorProgressUpdate): string[] {
   const progress = update.taskProgress;
   const summary = progress?.summary;
   const statusDetails = sidebarUpdateStateDetails(update);
-  const lines = [
-    "Pi Long Task",
-    `${statusDetails.icon} ${statusDetails.label} · ${update.activeStatus ?? update.message}`,
-  ];
+  const statusText = normalizeActiveStatus(update.activeStatus ?? update.message);
+  const lines = ["Pi Long Task", `${statusDetails.icon} ${statusDetails.label} · ${statusText}`];
   if (summary) {
     lines.push(
       `Tasks: ${summary.completedTasks}/${summary.totalTasks} · ${summary.completedPercent}%` +
@@ -396,7 +394,8 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
     rows.push(theme.fg("success", "No active task"));
   }
 
-  const activeStatus = update.activeStatus ?? normalizeMessageForSidebar(update.message, update);
+  const rawActiveStatus = update.activeStatus ?? normalizeMessageForSidebar(update.message, update);
+  const activeStatus = rawActiveStatus ? normalizeActiveStatus(rawActiveStatus) : undefined;
   if (currentTask && activeStatus) {
     rows.push("", sidebarHeading("Active status", theme));
     rows.push(...wrapPlainText(activeStatus, width, 6).map((line) => theme.fg("accent", line)));
@@ -681,6 +680,18 @@ function normalizeMessageForSidebar(updateMessage: string, update: CoordinatorPr
   }
   const title = update.taskId && update.title ? `TODO ${update.taskId} — ${update.title}` : undefined;
   return title && message.includes(title) && message.length <= title.length + 16 ? undefined : message;
+}
+
+function normalizeActiveStatus(status: string): string {
+  const normalized = status.trim();
+  const firstOutcome = /^(Finished|Failed):\s*/i.exec(normalized)?.[1];
+  if (!firstOutcome) {
+    return normalized;
+  }
+
+  const activity = normalized.replace(/^(?:(?:Finished|Failed):\s*)+/i, "");
+  const outcome = firstOutcome.toLowerCase() === "failed" ? "Failed" : "Finished";
+  return activity ? `${outcome}: ${activity}` : `${outcome}:`;
 }
 
 function wrapPlainText(text: string, width: number, limit?: number): string[] {

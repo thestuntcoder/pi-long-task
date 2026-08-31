@@ -356,6 +356,17 @@ assert.ok(
 
 sidebar.update({
   ...sidebarUpdate,
+  activeStatus: "Finished: Finished: Finished: Finished: Running grep",
+});
+const normalizedOverlay = (overlayComponent?.render(96) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+const normalizedWidget = (widgetComponent?.render(80) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+assert.match(normalizedOverlay, /Finished: Running grep/);
+assert.doesNotMatch(normalizedOverlay, /Finished: Finished:/);
+assert.match(normalizedWidget, /Finished: Running grep/);
+assert.doesNotMatch(normalizedWidget, /Finished: Finished:/);
+
+sidebar.update({
+  ...sidebarUpdate,
   message: "TODO 2 done.",
   phase: "task_done",
   status: "done",
@@ -375,8 +386,8 @@ const doneWidget = widgetComponent?.render(80).join("\n") ?? "";
 assert.match(doneWidget, /✓ done/);
 assert.match(doneWidget, /2\/3 tasks complete/);
 assert.match(doneWidget, /67% complete/);
-assert.equal(renderRequests, 3);
-assert.equal(overlayRenderRequests, 3);
+assert.equal(renderRequests, 4);
+assert.equal(overlayRenderRequests, 4);
 
 sidebar.close();
 assert.equal(widgetCalls.at(-1)?.content, undefined);

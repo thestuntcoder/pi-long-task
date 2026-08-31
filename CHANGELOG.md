@@ -14,6 +14,10 @@ Notable changes to Pi Long Task are recorded here. This project follows semantic
 - Attribute cumulative reused-session cost and token statistics as task/attempt-level deltas across reuse, retries, counter resets, and rotations.
 - Rotate to fresh sessions after unsafe outcomes, incompatible configuration, unavailable or excessive context usage, and independent retries; reuse may be disabled to retain isolated assignment behavior.
 
+### Fixed
+
+- Collapse repeated `Finished:` and `Failed:` prefixes defensively in both active-status renderers.
+
 ## 0.4.0 - 2026-08-31
 
 ### Added
