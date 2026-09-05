@@ -1519,20 +1519,58 @@ async function extractTodoMarkdownWithOneRepair(
 }
 
 async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Promise<string> {
-  return runtime.todoPlanner({
-    inputText,
-    cwd: runtime.cwd,
-    runDir: runtime.runDir,
-    thinkingLevel: runtime.todoThinking,
-    model: runtime.workerModel,
-    abortSignal: runtime.abortSignal,
-    timeoutMs: runtime.todoTimeoutMs,
-    gracefulShutdownMs: runtime.todoGracefulShutdownMs,
-    sessionFactory: runtime.todoSessionFactory,
-    networkRecovery: runtime.networkRecovery,
-    onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
-    goal: runtime.goal,
-  });
+  return runPlannerOperationWithNetworkRecovery(
+    {
+      inputText,
+      cwd: runtime.cwd,
+      runDir: runtime.runDir,
+      thinkingLevel: runtime.todoThinking,
+      model: runtime.workerModel,
+      abortSignal: runtime.abortSignal,
+      timeoutMs: runtime.todoTimeoutMs,
+      gracefulShutdownMs: runtime.todoGracefulShutdownMs,
+      sessionFactory: runtime.todoSessionFactory,
+      networkRecovery: runtime.networkRecovery,
+      onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
+      goal: runtime.goal,
+    },
+    runtime,
+  );
+}
+
+/**
+ * Retry a side-effect-free planner request only after its provider boundary has
+ * failed. The default planner disables tools and disposes every session before
+ * rejecting, so each retry rotates unsafe conversation state while replaying
+ * only the complete immutable planning context. Recovery owns no planner
+ * repair/attempt counter, and each fresh call retains the planner timeout;
+ * backoff remains governed solely by the separate outage deadline.
+ */
+async function runPlannerOperationWithNetworkRecovery(
+  plannerOptions: TodoPlannerOptions,
+  runtime: RuntimeOptions,
+): Promise<string> {
+  const run = (recoverySignal?: AbortSignal) =>
+    runtime.todoPlanner({
+      ...plannerOptions,
+      abortSignal: combineAbortSignals(plannerOptions.abortSignal, recoverySignal),
+    });
+
+  try {
+    return await run();
+  } catch (initialFailure) {
+    const classification = classifyNetworkFailure(initialFailure);
+    if (!runtime.networkRecovery.enabled || !classification.recoverable) {
+      throw initialFailure;
+    }
+    const recovered = await recoverNetworkOperation({
+      initialFailure,
+      config: runtime.networkRecovery,
+      signal: plannerOptions.abortSignal,
+      retry: ({ signal }) => run(signal),
+    });
+    return recovered.value;
+  }
 }
 
 async function generateSteeringPlanRevision(options: {
@@ -1565,22 +1603,25 @@ async function generateSteeringPlanRevision(options: {
         }
       : undefined,
     planner: ({ prompt, request }) =>
-      options.runtime.todoPlanner({
-        inputText: prompt,
-        plannerPrompt: prompt,
-        planRevision: request,
-        cwd: options.runtime.cwd,
-        runDir: options.runtime.runDir,
-        thinkingLevel: options.runtime.todoThinking,
-        model: options.runtime.workerModel,
-        abortSignal: options.runtime.abortSignal,
-        timeoutMs: options.runtime.todoTimeoutMs,
-        gracefulShutdownMs: options.runtime.todoGracefulShutdownMs,
-        sessionFactory: options.runtime.todoSessionFactory,
-        networkRecovery: options.runtime.networkRecovery,
-        onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
-        goal: options.runtime.goal,
-      }),
+      runPlannerOperationWithNetworkRecovery(
+        {
+          inputText: prompt,
+          plannerPrompt: prompt,
+          planRevision: request,
+          cwd: options.runtime.cwd,
+          runDir: options.runtime.runDir,
+          thinkingLevel: options.runtime.todoThinking,
+          model: options.runtime.workerModel,
+          abortSignal: options.runtime.abortSignal,
+          timeoutMs: options.runtime.todoTimeoutMs,
+          gracefulShutdownMs: options.runtime.todoGracefulShutdownMs,
+          sessionFactory: options.runtime.todoSessionFactory,
+          networkRecovery: options.runtime.networkRecovery,
+          onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
+          goal: options.runtime.goal,
+        },
+        options.runtime,
+      ),
   });
 }
 
@@ -1803,7 +1844,10 @@ async function runTodoPlannerPrompt(options: {
   if (promptResult.error) {
     const message = `TODO planner failed: ${promptResult.error}`;
     options.onDiagnostic?.(plannerPromptDiagnostic("failure", message, promptResult));
-    throw new TodoGenerationError(message);
+    throw new TodoGenerationError(
+      message,
+      promptResult.failure === undefined ? undefined : { cause: promptResult.failure },
+    );
   }
   if (!promptResult.assistantText) {
     const message = "TODO planner did not return assistant text.";

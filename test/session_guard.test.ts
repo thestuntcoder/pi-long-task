@@ -157,4 +157,6 @@ const failed = await runGuardedSessionPrompt({
   prompt: "fail",
 });
 assert.equal(failed.error, "prompt failed");
+assert.ok(failed.failure instanceof Error);
+assert.equal(failed.failure.message, "prompt failed");
 assert.equal(failingSession.disposeCalls, 1);

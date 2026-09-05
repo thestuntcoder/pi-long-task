@@ -23,6 +23,8 @@ export interface GuardedSessionPromptResult {
   timedOut: boolean;
   aborted: boolean;
   error?: string;
+  /** Untouched prompt failure for coordinator-level provider/transport classification. */
+  failure?: unknown;
   diagnostics: string[];
   events: unknown[];
   sessionFile?: string;
@@ -40,6 +42,7 @@ export async function runGuardedSessionPrompt(
   let timedOut = false;
   let aborted = false;
   let error: string | undefined;
+  let failure: unknown;
   let promptSettled = false;
   let finished = false;
   let unsubscribe: (() => void) | undefined;
@@ -180,6 +183,7 @@ export async function runGuardedSessionPrompt(
         },
         (exc: unknown) => {
           promptSettled = true;
+          failure ??= exc;
           error = error ?? errorMessage(exc);
           resolveCompleted();
         },
@@ -194,6 +198,7 @@ export async function runGuardedSessionPrompt(
       await completed;
     }
   } catch (exc) {
+    failure ??= exc;
     error = error ?? errorMessage(exc);
   } finally {
     finished = true;
@@ -215,7 +220,7 @@ export async function runGuardedSessionPrompt(
     }
   }
 
-  return buildResult(session, events, assistantText, timedOut, aborted, error, diagnostics);
+  return buildResult(session, events, assistantText, timedOut, aborted, error, failure, diagnostics);
 }
 
 function buildResult(
@@ -225,6 +230,7 @@ function buildResult(
   timedOut: boolean,
   aborted: boolean,
   error: string | undefined,
+  failure: unknown,
   diagnostics: string[],
 ): GuardedSessionPromptResult {
   return {
@@ -232,6 +238,7 @@ function buildResult(
     timedOut,
     aborted,
     error,
+    ...(failure === undefined ? {} : { failure }),
     diagnostics: [...diagnostics],
     events: [...events],
     sessionFile: session.sessionFile,

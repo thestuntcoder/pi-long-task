@@ -14,8 +14,8 @@ const NUMBERED_ITEM_RE = /^\s*\d+[.)]\s+(.+?)\s*$/;
 const FENCE_RE = /```(?:markdown|md)?\s*\n([\s\S]*?)\n```/gi;
 
 export class TodoGenerationError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "TodoGenerationError";
   }
 }
