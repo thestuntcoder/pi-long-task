@@ -3,19 +3,22 @@ import path from "node:path";
 
 import {
   cancelGoalLoop,
+  excludeNetworkOutageFromGoalDeadlines,
   type GoalIterationState,
   type GoalLoopState,
   type GoalReviewerDecision,
   type GoalReviewerResultState,
+  recordReviewerRecoveryEvidence,
   recordReviewerResult,
 } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
 import { runGuardedSessionPrompt } from "./session_guard.ts";
 import { goalSpecificationToMarkdown, type GoalSpecification } from "./goal_spec.ts";
+import { classifyNetworkFailure } from "./network_failure.ts";
+import { recoverNetworkOperation, type NetworkRecoveryEvent } from "./network_recovery.ts";
 import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import {
   createIsolatedWorkerSession,
-  DEFAULT_WORKER_TOOLS,
   workerUsageCostFromEvent,
   workerUsageCostFromStats,
   workerUsageCostKeyFromEvent,
@@ -24,6 +27,8 @@ import {
 
 export const GOAL_REVIEW_PAYLOAD_FILE = "REVIEW_TASK.md";
 export const GOAL_REVIEW_RAW_FILE = "REVIEW_RESULT_RAW.txt";
+/** Reviewer retries are constrained to inspection and read-only verification. */
+export const GOAL_REVIEWER_TOOLS = ["read", "bash", "grep", "find", "ls"] as const;
 
 export interface GoalReviewOptions {
   state: GoalLoopState;
@@ -72,6 +77,8 @@ export interface GoalReviewerSessionResult {
   timedOut?: boolean;
   aborted?: boolean;
   error?: string;
+  /** Untouched provider/transport failure retained for coordinator recovery classification. */
+  failure?: unknown;
 }
 
 export type GoalReviewerRunner = (options: GoalReviewerRunnerOptions) => Promise<GoalReviewerSessionResult>;
@@ -94,7 +101,7 @@ export class GoalReviewError extends Error {
 export async function runGoalReviewSession(options: GoalReviewOptions): Promise<GoalReviewResult> {
   const now = options.now ?? (() => new Date());
   let state = options.state;
-  const previousTraceLength = state.trace.length;
+  let previousTraceLength = state.trace.length;
   const store =
     options.store ?? new GoalStateStore({ cwd: options.cwd, goalRunId: state.goalRunId, goalRunDir: state.goalRunDir });
 
@@ -119,20 +126,77 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
     throw new GoalReviewError("Goal review was aborted before starting.", { state });
   }
 
-  let sessionResult: GoalReviewerSessionResult;
+  const interruptedResults: GoalReviewerSessionResult[] = [];
+  const interruptedEvidencePaths: string[] = [];
+  let excludedOutageMs = 0;
+  const captureOutage = (event: NetworkRecoveryEvent) => {
+    if (event.type === "cleanup") {
+      excludedOutageMs += event.state.elapsedMs;
+    }
+  };
+
+  let sessionResult: GoalReviewerSessionResult | undefined;
+  let sessionFailure: unknown;
   try {
-    sessionResult = await (options.reviewerRunner ?? runGoalReviewerSession)({
-      prompt: payload,
-      cwd: path.resolve(options.cwd ?? process.cwd()),
-      abortSignal: options.abortSignal,
-      timeoutMs: options.timeoutMs ?? state.limits.reviewerTimeoutMs,
-      model: options.model,
-      modelName: options.modelName,
-      thinkingLevel: options.thinkingLevel,
-      sessionFactory: options.sessionFactory,
+    sessionResult = await runReviewerWithNetworkRecovery({
+      runner: options.reviewerRunner ?? runGoalReviewerSession,
+      runnerOptions: {
+        prompt: payload,
+        cwd: path.resolve(options.cwd ?? process.cwd()),
+        abortSignal: options.abortSignal,
+        timeoutMs: options.timeoutMs ?? state.limits.reviewerTimeoutMs,
+        model: options.model,
+        modelName: options.modelName,
+        thinkingLevel: options.thinkingLevel,
+        sessionFactory: options.sessionFactory,
+        networkRecovery: options.networkRecovery,
+      },
       networkRecovery: options.networkRecovery,
+      abortSignal: options.abortSignal,
+      now,
+      interruptedResults,
+      interruptedEvidencePaths,
+      iterationDir,
+      onInterruption: async () => {
+        state = recordReviewerRecoveryEvidence(
+          state,
+          iteration.iteration,
+          {
+            interruptions: interruptedResults.length,
+            evidencePaths: interruptedEvidencePaths,
+            reviewerCostTotal: reviewerCost(interruptedResults),
+          },
+          { now: now() },
+        );
+        await persistStateChange(store, previousTraceLength, state);
+        previousTraceLength = state.trace.length;
+      },
+      onRecoveryEvent: captureOutage,
     });
   } catch (error) {
+    sessionFailure = error;
+  }
+
+  if (excludedOutageMs > 0) {
+    state = excludeNetworkOutageFromGoalDeadlines(state, excludedOutageMs, "reviewer", { now: now() });
+  }
+  if (state.trace.length !== previousTraceLength) {
+    await persistStateChange(store, previousTraceLength, state);
+    previousTraceLength = state.trace.length;
+  }
+
+  if (sessionFailure !== undefined && options.abortSignal?.aborted) {
+    const reason = `Goal review was aborted during network recovery: ${errorMessage(
+      options.abortSignal.reason ?? sessionFailure,
+    )}`;
+    state = cancelGoalLoop(state, reason, { now: now() });
+    await persistStateChange(store, previousTraceLength, state);
+    await store.writeIterationSnapshot(currentIteration(state, iteration.iteration));
+    throw new GoalReviewError(reason, { cause: sessionFailure, state });
+  }
+
+  if (sessionFailure !== undefined) {
+    const interruptedResult = combineReviewerSessionCosts(interruptedResults);
     const failure = await recordReviewFailure({
       state,
       iteration,
@@ -140,15 +204,21 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
       previousTraceLength,
       payloadPath,
       rawReviewPath,
-      message: `Reviewer session failed: ${errorMessage(error)}`,
-      error,
+      message: `Reviewer session failed: ${errorMessage(sessionFailure)}`,
+      error: sessionFailure,
+      sessionResult: interruptedResult,
       now,
     });
     throw new GoalReviewError(failure.reviewerResult.summary, {
-      cause: error,
+      cause: sessionFailure,
       state: failure.state,
       reviewerResult: failure.reviewerResult,
     });
+  }
+
+  sessionResult = combineReviewerSessionCosts(interruptedResults, sessionResult);
+  if (!sessionResult) {
+    throw new GoalReviewError("Reviewer session ended without a result.", { state });
   }
 
   const rawReviewerOutput = sessionResult.assistantText;
@@ -371,7 +441,7 @@ export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions)
     }
     const factoryResult = await sessionFactory({
       cwd: options.cwd,
-      tools: DEFAULT_WORKER_TOOLS,
+      tools: GOAL_REVIEWER_TOOLS,
       model: options.model,
       modelName: options.modelName,
       thinkingLevel: options.thinkingLevel,
@@ -418,6 +488,7 @@ export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions)
       timedOut: promptResult.timedOut,
       aborted: promptResult.aborted,
       error: promptResult.error,
+      failure: promptResult.failure,
     };
   } catch (exc) {
     return {
@@ -426,6 +497,7 @@ export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions)
       reviewerSessionFile: session?.sessionFile,
       reviewerCostTotal,
       error: errorMessage(exc),
+      failure: exc,
     };
   } finally {
     if (session) {
@@ -436,6 +508,119 @@ export async function runGoalReviewerSession(options: GoalReviewerRunnerOptions)
       }
     }
   }
+}
+
+async function runReviewerWithNetworkRecovery(options: {
+  runner: GoalReviewerRunner;
+  runnerOptions: GoalReviewerRunnerOptions;
+  networkRecovery: Readonly<NetworkRecoveryConfig> | undefined;
+  abortSignal: AbortSignal | undefined;
+  now: () => Date;
+  interruptedResults: GoalReviewerSessionResult[];
+  interruptedEvidencePaths: string[];
+  iterationDir: string;
+  onInterruption: () => Promise<void>;
+  onRecoveryEvent: (event: NetworkRecoveryEvent) => void;
+}): Promise<GoalReviewerSessionResult> {
+  const run = async (recoverySignal?: AbortSignal): Promise<GoalReviewerSessionResult> => {
+    const result = await options.runner({
+      ...options.runnerOptions,
+      abortSignal: combineAbortSignals(options.abortSignal, recoverySignal),
+    });
+    const networkFailure = recoverableReviewerFailure(result);
+    if (networkFailure === undefined) {
+      return result;
+    }
+
+    options.interruptedResults.push(result);
+    options.interruptedEvidencePaths.push(
+      await writeInterruptedReviewEvidence(options.iterationDir, options.interruptedResults.length, result),
+    );
+    await options.onInterruption();
+    throw new ReviewerNetworkFailure(networkFailure, result);
+  };
+
+  try {
+    return await run();
+  } catch (initialFailure) {
+    const classification = classifyNetworkFailure(initialFailure);
+    if (!options.networkRecovery?.enabled || !classification.recoverable) {
+      throw initialFailure;
+    }
+    const recovered = await recoverNetworkOperation({
+      initialFailure,
+      config: options.networkRecovery,
+      signal: options.abortSignal,
+      now: () => options.now().getTime(),
+      onEvent: options.onRecoveryEvent,
+      retry: ({ signal }) => run(signal),
+    });
+    return recovered.value;
+  }
+}
+
+class ReviewerNetworkFailure extends Error {
+  readonly sessionResult: GoalReviewerSessionResult;
+
+  constructor(failure: unknown, sessionResult: GoalReviewerSessionResult) {
+    super(sessionResult.error ?? errorMessage(failure), { cause: failure });
+    this.name = "ReviewerNetworkFailure";
+    this.sessionResult = sessionResult;
+  }
+}
+
+function recoverableReviewerFailure(result: GoalReviewerSessionResult): unknown | undefined {
+  if (result.aborted || result.timedOut || !result.error) {
+    return undefined;
+  }
+  const failure = result.failure ?? new Error(result.error);
+  return classifyNetworkFailure(failure).recoverable ? failure : undefined;
+}
+
+async function writeInterruptedReviewEvidence(
+  iterationDir: string,
+  interruption: number,
+  result: GoalReviewerSessionResult,
+): Promise<string> {
+  const outputPath = path.join(
+    iterationDir,
+    `REVIEW_RESULT_NETWORK_INTERRUPTED_${String(interruption).padStart(2, "0")}.txt`,
+  );
+  const evidence = result.assistantText.trim()
+    ? result.assistantText
+    : `[No assistant text was captured.]\n\n${result.error ?? "Transient reviewer network failure."}\n`;
+  await writeFile(outputPath, evidence, "utf8");
+  return outputPath;
+}
+
+function reviewerCost(results: readonly GoalReviewerSessionResult[]): number {
+  return results.reduce(
+    (total, result) =>
+      total +
+      (typeof result.reviewerCostTotal === "number" && Number.isFinite(result.reviewerCostTotal)
+        ? result.reviewerCostTotal
+        : 0),
+    0,
+  );
+}
+
+function combineReviewerSessionCosts(
+  interrupted: readonly GoalReviewerSessionResult[],
+  final?: GoalReviewerSessionResult,
+): GoalReviewerSessionResult | undefined {
+  if (!final && interrupted.length === 0) {
+    return undefined;
+  }
+  const base = final ?? interrupted.at(-1)!;
+  const reviewerCostTotal = reviewerCost([...interrupted, ...(final ? [final] : [])]);
+  return { ...base, reviewerCostTotal };
+}
+
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const available = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (available.length === 0) return undefined;
+  if (available.length === 1) return available[0];
+  return AbortSignal.any(available);
 }
 
 function currentReviewableIteration(state: GoalLoopState): GoalIterationState {

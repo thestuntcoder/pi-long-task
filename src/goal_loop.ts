@@ -92,6 +92,13 @@ export interface GoalWorkerResultState {
 
 export type GoalReviewerDecision = "complete" | "incomplete" | "blocked" | "failed";
 
+export interface GoalReviewerRecoveryState {
+  interruptions: number;
+  evidencePaths: string[];
+  reviewerCostTotal: number;
+  updatedAt: string;
+}
+
 export interface GoalReviewerResultState {
   decision: GoalReviewerDecision;
   complete: boolean;
@@ -130,6 +137,7 @@ export interface GoalIterationState {
   deadlineAt?: string;
   generatedTodo?: GeneratedTodoState;
   workerResult?: GoalWorkerResultState;
+  reviewerRecovery?: GoalReviewerRecoveryState;
   reviewerResult?: GoalReviewerResultState;
   completion?: GoalCompletionState;
 }
@@ -402,6 +410,70 @@ export function recordReviewerResult(
   });
 }
 
+export function excludeNetworkOutageFromGoalDeadlines(
+  state: GoalLoopState,
+  outageMs: number,
+  operation: "planner" | "reviewer",
+  options: { now?: Date } = {},
+): GoalLoopState {
+  if (!Number.isFinite(outageMs) || outageMs <= 0 || isTerminalGoalLoopStatus(state.status)) {
+    return state;
+  }
+
+  const excludedMs = Math.ceil(outageMs);
+  const timestamp = (options.now ?? new Date()).toISOString();
+  const iterations = state.iterations.map((iteration) =>
+    iteration.iteration === state.currentIteration && iteration.deadlineAt
+      ? { ...iteration, deadlineAt: shiftTimestamp(iteration.deadlineAt, excludedMs), updatedAt: timestamp }
+      : iteration,
+  );
+  return withTrace(
+    {
+      ...state,
+      deadlineAt: state.deadlineAt ? shiftTimestamp(state.deadlineAt, excludedMs) : undefined,
+      iterations,
+      updatedAt: timestamp,
+    },
+    {
+      timestamp,
+      phase: state.phase,
+      event: "network_wait_excluded",
+      message: `Excluded ${excludedMs}ms of ${operation} network recovery from goal-loop deadlines.`,
+      iteration: state.currentIteration || undefined,
+      details: { operation, outageMs: excludedMs },
+    },
+  );
+}
+
+export function recordReviewerRecoveryEvidence(
+  state: GoalLoopState,
+  iterationNumber: number,
+  recovery: Omit<GoalReviewerRecoveryState, "updatedAt">,
+  options: { now?: Date } = {},
+): GoalLoopState {
+  const timestamp = (options.now ?? new Date()).toISOString();
+  return updateIteration(state, iterationNumber, ["todo_executed", "failed"], timestamp, (item) => ({
+    item: {
+      ...item,
+      updatedAt: timestamp,
+      reviewerRecovery: { ...recovery, evidencePaths: [...recovery.evidencePaths], updatedAt: timestamp },
+    },
+    phase: state.phase,
+    trace: {
+      timestamp,
+      phase: state.phase,
+      event: "reviewer_network_interrupted",
+      message: `Preserved ${recovery.interruptions} interrupted reviewer call(s) during network recovery.`,
+      iteration: iterationNumber,
+      details: {
+        interruptions: recovery.interruptions,
+        evidencePaths: recovery.evidencePaths,
+        reviewerCostTotal: recovery.reviewerCostTotal,
+      },
+    },
+  }));
+}
+
 export function failGoalLoop(
   state: GoalLoopState,
   reason: string,
@@ -595,6 +667,10 @@ function isTerminalIterationStatus(status: GoalIterationStatus): boolean {
 
 function withTrace(state: GoalLoopState, event: GoalLoopTraceEvent): GoalLoopState {
   return { ...state, trace: [...state.trace, event] };
+}
+
+function shiftTimestamp(timestamp: string, deltaMs: number): string {
+  return new Date(Date.parse(timestamp) + deltaMs).toISOString();
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {

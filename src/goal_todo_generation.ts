@@ -3,9 +3,17 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { runCoordinator, type CoordinatorResult, type RunCoordinatorOptions } from "./coordinator.ts";
-import { type GoalIterationState, type GoalLoopState, recordGeneratedTodo, startGoalIteration } from "./goal_loop.ts";
+import {
+  excludeNetworkOutageFromGoalDeadlines,
+  type GoalIterationState,
+  type GoalLoopState,
+  recordGeneratedTodo,
+  startGoalIteration,
+} from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
 import type { GoalSpecification } from "./goal_spec.ts";
+import { classifyNetworkFailure } from "./network_failure.ts";
+import { recoverNetworkOperation, type NetworkRecoveryEvent } from "./network_recovery.ts";
 import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import { parseTasks } from "./todo_parser.ts";
 import {
@@ -94,7 +102,13 @@ export async function runGoalTodoGenerationLongTask(
     );
   }
 
-  const childResult = await (options.longTaskRunner ?? runCoordinator)({
+  let excludedOutageMs = 0;
+  const captureOutage = (event: NetworkRecoveryEvent) => {
+    if (event.type === "cleanup") {
+      excludedOutageMs += event.state.elapsedMs;
+    }
+  };
+  const childOptions: RunCoordinatorOptions = {
     inputText: payload,
     commit: false,
     goal: state.goal,
@@ -107,7 +121,35 @@ export async function runGoalTodoGenerationLongTask(
     taskTimeoutMs: childTimeoutMs,
     maxBashTimeoutMs: options.maxBashTimeoutMs,
     networkRecovery: options.networkRecovery,
-  });
+    onNetworkRecovery: captureOutage,
+  };
+
+  let childResult: CoordinatorResult | undefined;
+  let childFailure: unknown;
+  try {
+    childResult = await runGoalPlannerWithNetworkRecovery(
+      options.longTaskRunner ?? runCoordinator,
+      childOptions,
+      options.networkRecovery,
+      options.abortSignal,
+      now,
+      captureOutage,
+    );
+  } catch (error) {
+    childFailure = error;
+  }
+
+  if (excludedOutageMs > 0) {
+    state = excludeNetworkOutageFromGoalDeadlines(state, excludedOutageMs, "planner", { now: now() });
+    await persistStateChange(store, previousTraceLength, state);
+    previousTraceLength = state.trace.length;
+  }
+  if (childFailure !== undefined) {
+    throw childFailure;
+  }
+  if (!childResult) {
+    throw new GoalTodoGenerationError("TODO-generation planner ended without a coordinator result.");
+  }
 
   throwIfAborted(options.abortSignal);
   const rawOutput = await readGeneratedTodo(rawTodoPath, childResult);
@@ -260,6 +302,45 @@ async function persistStateChange(
 ): Promise<void> {
   await store.saveState(state);
   await store.appendNewTraceEvents(previousTraceLength, state);
+}
+
+/**
+ * Resume the TODO-generation child under its stable run ID. This child is
+ * constrained to one replaceable generated-plan artifact (never implementation
+ * work), while the default coordinator durably resumes its TODO evidence and
+ * rotates provider-failed sessions. Network probes therefore neither create a
+ * goal iteration nor consume a normal child task attempt.
+ */
+async function runGoalPlannerWithNetworkRecovery(
+  runner: GoalTodoGenerationLongTaskRunner,
+  childOptions: RunCoordinatorOptions,
+  networkRecovery: Readonly<NetworkRecoveryConfig> | undefined,
+  abortSignal: AbortSignal | undefined,
+  now: () => Date,
+  onRecoveryEvent: (event: NetworkRecoveryEvent) => void,
+): Promise<CoordinatorResult> {
+  const run = (recoverySignal?: AbortSignal) =>
+    runner({
+      ...childOptions,
+      abortSignal: combineAbortSignals(abortSignal, recoverySignal),
+    });
+
+  try {
+    return await run();
+  } catch (initialFailure) {
+    if (!networkRecovery?.enabled || !classifyNetworkFailure(initialFailure).recoverable) {
+      throw initialFailure;
+    }
+    const recovered = await recoverNetworkOperation({
+      initialFailure,
+      config: networkRecovery,
+      signal: abortSignal,
+      now: () => now().getTime(),
+      onEvent: onRecoveryEvent,
+      retry: ({ signal }) => run(signal),
+    });
+    return recovered.value;
+  }
 }
 
 async function readGeneratedTodo(rawTodoPath: string, childResult: CoordinatorResult): Promise<string> {
@@ -539,6 +620,13 @@ function oneLine(value: string): string {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const available = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (available.length === 0) return undefined;
+  if (available.length === 1) return available[0];
+  return AbortSignal.any(available);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

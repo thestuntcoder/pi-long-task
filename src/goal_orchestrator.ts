@@ -481,7 +481,11 @@ function accumulatedWorkerCost(state: GoalLoopState): number {
 }
 
 function accumulatedReviewerCost(state: GoalLoopState): number {
-  return sumFinite(state.iterations.map((iteration) => iteration.reviewerResult?.reviewerCostTotal));
+  return sumFinite(
+    state.iterations.map(
+      (iteration) => iteration.reviewerResult?.reviewerCostTotal ?? iteration.reviewerRecovery?.reviewerCostTotal,
+    ),
+  );
 }
 
 function sumFinite(values: Array<number | undefined>): number {

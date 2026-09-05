@@ -11,7 +11,7 @@ import type {
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { classifyNetworkFailure } from "./network_failure.ts";
-import { recoverNetworkOperation } from "./network_recovery.ts";
+import { recoverNetworkOperation, type NetworkRecoveryEvent } from "./network_recovery.ts";
 import {
   DEFAULT_NETWORK_RECOVERY_CONFIG,
   resolveNetworkRecoveryConfig,
@@ -190,6 +190,8 @@ export interface RunCoordinatorOptions extends PiLongTaskInput {
   steeringQueue?: SerializedSteeringQueue;
   /** Runs after rebase/validation and immediately before the revision is atomically persisted. */
   onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
+  /** Receives coordinator-level outage lifecycle events for parent orchestrators and status integrations. */
+  onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
 }
 
 export interface TodoPlannerOptions {
@@ -309,6 +311,7 @@ interface RuntimeOptions {
   workerSessionMetrics: WorkerSessionMetrics;
   steeringQueue?: SerializedSteeringQueue;
   onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
+  onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
 }
 
 type RetainedWorkerReuseScope = "sequential_task" | "partial_continuation";
@@ -763,6 +766,7 @@ interface WorkerRecoveryExecutionOptions {
   networkRecovery: Readonly<NetworkRecoveryConfig>;
   signal?: AbortSignal;
   onInterruption?: (outcome: SessionOutcome) => void;
+  onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
 }
 
 /**
@@ -806,6 +810,7 @@ async function runWorkerAttemptWithNetworkRecovery(options: WorkerRecoveryExecut
       initialFailure: new WorkerNetworkFailure(initial),
       config: options.networkRecovery,
       signal: options.signal,
+      onEvent: options.onNetworkRecovery,
       retry: async ({ retryCount, signal }) => {
         const previous = interrupted.at(-1)!;
         const resumed = await execute({
@@ -1158,6 +1163,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           networkRecovery: runtime.networkRecovery,
           signal: workerOptions.abortSignal,
           onInterruption: (interrupted) => networkInterruptedOutcomes.push(interrupted),
+          onNetworkRecovery: runtime.onNetworkRecovery,
         });
       } catch (error) {
         if (!assignmentState.obsolete) {
@@ -1567,6 +1573,7 @@ async function runPlannerOperationWithNetworkRecovery(
       initialFailure,
       config: runtime.networkRecovery,
       signal: plannerOptions.abortSignal,
+      onEvent: runtime.onNetworkRecovery,
       retry: ({ signal }) => run(signal),
     });
     return recovered.value;
@@ -1942,6 +1949,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerSessionMetrics: createWorkerSessionMetrics(),
     steeringQueue: options.steeringQueue,
     onPlanRevisionAccepted: options.onPlanRevisionAccepted,
+    onNetworkRecovery: options.onNetworkRecovery,
   };
 }
 
