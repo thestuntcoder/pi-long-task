@@ -10,6 +10,11 @@ import type {
 } from "./types.ts";
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
+import {
+  DEFAULT_NETWORK_RECOVERY_CONFIG,
+  resolveNetworkRecoveryConfig,
+  type NetworkRecoveryConfig,
+} from "./network_recovery_config.ts";
 import { extractResultSummary, hasCompleteTaskResult } from "./result_writer.ts";
 import { runGuardedSessionPrompt } from "./session_guard.ts";
 import {
@@ -79,6 +84,7 @@ export const DEFAULT_COORDINATOR_OPTIONS = {
   todoThinking: "xhigh",
   workerSessionReuse: DEFAULT_WORKER_SESSION_REUSE_ENABLED,
   workerSessionReuseContextThresholdPercent: DEFAULT_WORKER_SESSION_REUSE_CONTEXT_THRESHOLD_PERCENT,
+  networkRecovery: DEFAULT_NETWORK_RECOVERY_CONFIG,
 } as const;
 
 export type WorkerRunner = (options: RunWorkerTaskOptions) => Promise<SessionOutcome>;
@@ -200,6 +206,8 @@ export interface TodoPlannerOptions {
   plannerPrompt?: string;
   /** Structured revision context supplied alongside plannerPrompt. */
   planRevision?: Readonly<PlanRevisionRequest>;
+  /** Normalized coordinator recovery policy; network wait is excluded from operation timeouts. */
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
 }
 
 export interface TaskAttemptSummary {
@@ -280,6 +288,7 @@ interface RuntimeOptions {
   todoThinking: string;
   workerSessionReuse: boolean;
   workerSessionReuseContextThresholdPercent: number;
+  networkRecovery: NetworkRecoveryConfig;
   todoTimeoutMs: number;
   todoGracefulShutdownMs: number;
   workerRunner: WorkerRunner;
@@ -949,6 +958,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         thinkingLevel: runtime.taskThinking,
         abortSignal: combineAbortSignals(runtime.abortSignal, assignmentController.signal),
         sessionFactory: runtime.workerSessionFactory,
+        networkRecovery: runtime.networkRecovery,
         now: runtime.now,
         onEvent: (event) => {
           if (activeWorkerAssignment === assignmentState && !assignmentState.obsolete) {
@@ -1329,6 +1339,7 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
     timeoutMs: runtime.todoTimeoutMs,
     gracefulShutdownMs: runtime.todoGracefulShutdownMs,
     sessionFactory: runtime.todoSessionFactory,
+    networkRecovery: runtime.networkRecovery,
     onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
     goal: runtime.goal,
   });
@@ -1376,6 +1387,7 @@ async function generateSteeringPlanRevision(options: {
         timeoutMs: options.runtime.todoTimeoutMs,
         gracefulShutdownMs: options.runtime.todoGracefulShutdownMs,
         sessionFactory: options.runtime.todoSessionFactory,
+        networkRecovery: options.runtime.networkRecovery,
         onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
         goal: options.runtime.goal,
       }),
@@ -1652,6 +1664,10 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     contextThresholdPercent:
       options.workerSessionReuseContextThresholdPercent ?? parsedWorkerConfig.workerSessionReuseContextThresholdPercent,
   });
+  const networkRecovery = resolveNetworkRecoveryConfig({
+    ...parsedWorkerConfig.networkRecovery,
+    ...options.networkRecovery,
+  });
 
   return {
     cwd,
@@ -1675,6 +1691,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     todoThinking: options.todoThinking ?? DEFAULT_COORDINATOR_OPTIONS.todoThinking,
     workerSessionReuse: workerSessionReuseConfig.enabled,
     workerSessionReuseContextThresholdPercent: workerSessionReuseConfig.contextThresholdPercent,
+    networkRecovery,
     workerRunner: options.workerRunner ?? runWorkerTask,
     useRetainedWorkerLifecycle: options.workerRunner === undefined,
     todoPlanner: options.todoPlanner ?? runTodoPlanner,

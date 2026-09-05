@@ -20,6 +20,11 @@ import {
 } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
 import type { GoalSpecification } from "./goal_spec.ts";
+import {
+  resolveNetworkRecoveryConfig,
+  type NetworkRecoveryConfig,
+  type NetworkRecoveryConfigInput,
+} from "./network_recovery_config.ts";
 import { runGoalReviewSession, type GoalReviewResult, type GoalReviewerRunner } from "./goal_review.ts";
 import {
   runGoalTodoExecutionLongTask,
@@ -92,6 +97,7 @@ export interface RunGoalLoopOptions extends GoalLoopLimitInput {
   thinkingLevel?: string;
   maxBashTimeoutMs?: number;
   maxAttemptsPerTask?: number;
+  networkRecovery?: NetworkRecoveryConfigInput;
   commit?: boolean;
   now?: () => Date;
   onWorkerProgress?: (update: CoordinatorProgressUpdate) => void;
@@ -120,6 +126,7 @@ export class GoalLoopOrchestratorError extends Error {
 
 export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoopRunResult> {
   const now = options.now ?? (() => new Date());
+  const networkRecovery = resolveNetworkRecoveryConfig(options.networkRecovery);
   let state =
     options.initialState ??
     createGoalLoopState({
@@ -186,6 +193,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
         options,
         now,
         publish,
+        networkRecovery,
       });
     }
 
@@ -226,6 +234,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           modelName: options.modelName,
           thinkingLevel: options.thinkingLevel,
           maxBashTimeoutMs: options.maxBashTimeoutMs,
+          networkRecovery,
           now,
           goalSpecification,
         });
@@ -251,6 +260,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           modelName: options.modelName,
           thinkingLevel: options.thinkingLevel,
           maxBashTimeoutMs: options.maxBashTimeoutMs,
+          networkRecovery,
           now,
           goalSpecification,
         });
@@ -278,6 +288,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
             thinkingLevel: options.thinkingLevel,
             maxBashTimeoutMs: options.maxBashTimeoutMs,
             maxAttemptsPerTask: options.maxAttemptsPerTask,
+            networkRecovery,
             commit: options.commit,
             now,
             onProgress: (update) => {
@@ -324,6 +335,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           thinkingLevel: options.thinkingLevel,
           now,
           goalSpecification,
+          networkRecovery,
           timeoutMs: remainingReviewTimeout(state, current.deadlineAt, now()),
         });
         reviewResults.push(review);
@@ -385,6 +397,7 @@ async function maybeRunGoalDiscovery(options: {
   options: RunGoalLoopOptions;
   now: () => Date;
   publish: (phase: GoalLoopProgressPhase, message: string, extra?: Partial<GoalLoopProgressUpdate>) => void;
+  networkRecovery: Readonly<NetworkRecoveryConfig>;
 }): Promise<GoalSpecification | undefined> {
   if (options.discoveryDecision.route !== "discovery") {
     return options.existingSpecification;
@@ -407,6 +420,7 @@ async function maybeRunGoalDiscovery(options: {
       model: options.options.model,
       modelName: options.options.modelName,
       thinkingLevel: options.options.thinkingLevel,
+      networkRecovery: options.networkRecovery,
       now: options.now,
     });
     await options.store.saveGoalSpecification(spec);

@@ -12,6 +12,7 @@ import {
 import { GoalStateStore } from "./goal_state.ts";
 import { runGuardedSessionPrompt } from "./session_guard.ts";
 import { goalSpecificationToMarkdown, type GoalSpecification } from "./goal_spec.ts";
+import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import {
   createIsolatedWorkerSession,
   DEFAULT_WORKER_TOOLS,
@@ -36,6 +37,7 @@ export interface GoalReviewOptions {
   now?: () => Date;
   sessionFactory?: WorkerSessionFactory;
   goalSpecification?: GoalSpecification;
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
   timeoutMs?: number;
 }
 
@@ -59,6 +61,7 @@ export interface GoalReviewerRunnerOptions {
   modelName?: string;
   thinkingLevel?: string;
   sessionFactory?: WorkerSessionFactory;
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
 }
 
 export interface GoalReviewerSessionResult {
@@ -127,6 +130,7 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
       modelName: options.modelName,
       thinkingLevel: options.thinkingLevel,
       sessionFactory: options.sessionFactory,
+      networkRecovery: options.networkRecovery,
     });
   } catch (error) {
     const failure = await recordReviewFailure({

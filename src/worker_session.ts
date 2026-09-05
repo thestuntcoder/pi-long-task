@@ -8,6 +8,7 @@ import {
   parseCompleteTaskResult,
   parseReportedStatus,
 } from "./result_writer.ts";
+import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import type { Task } from "./todo_parser.ts";
 
 export interface WorkerTaskPromptOptions {
@@ -289,6 +290,8 @@ export type WorkerSessionFactory = (options: CreateWorkerSessionOptions) => Prom
 export interface RunWorkerTaskOptions extends WorkerTaskPromptOptions, CreateWorkerSessionOptions {
   taskTimeoutSeconds?: number;
   gracefulShutdownSeconds?: number;
+  /** Normalized coordinator policy for resuming this operation after transient transport failure. */
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
   abortSignal?: AbortSignal;
   sessionFactory?: WorkerSessionFactory;
   onEvent?: (event: CapturedWorkerEvent) => void;

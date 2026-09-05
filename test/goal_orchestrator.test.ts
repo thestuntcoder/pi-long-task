@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { CoordinatorResult, RunCoordinatorOptions } from "../src/coordinator.ts";
+import { runDefaultGoalDiscovery } from "../src/goal_discovery.ts";
 import { runGoalLoop, type GoalLoopProgressUpdate } from "../src/goal_orchestrator.ts";
 import type { GoalReviewerRunner } from "../src/goal_review.ts";
 import { GoalStateStore } from "../src/goal_state.ts";
@@ -25,10 +26,16 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
     minIterations: 1,
     maxIterations: 2,
     commit: false,
+    networkRecovery: { enabled: true, baseDelayMs: 2_000, maxDelayMs: 9_000, maxOutageMs: null },
+    discoveryRunner: async (options) => {
+      assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
+      return runDefaultGoalDiscovery(options);
+    },
     todoGenerationRunner: async (options) => {
       generationInputs.push(options.inputText ?? "");
       assert.equal(options.commit, false);
       assert.equal(options.goal, "Ship a goal loop feature in one pass");
+      assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
       assert.match(options.inputText ?? "", /Persisted goal specification/);
       assert.match(options.inputText ?? "", /REQ-1/);
       assert.match(options.inputText ?? "", /MS-1/);
@@ -42,6 +49,7 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
       executionInputs.push(options.inputText ?? "");
       assert.equal(options.commit, false);
       assert.equal(options.goal, "Ship a goal loop feature in one pass");
+      assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
       assert.match(options.inputText ?? "", /TODO 1 — Iteration 1 work/);
       return coordinatorResult(options, "Worker completed one-pass TODO", {
         completedTasks: 1,
@@ -52,6 +60,7 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
     reviewerRunner: async (options) => {
       reviewerPrompts.push(options.prompt);
       assert.equal(options.timeoutMs, 1_800_000);
+      assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
       assert.match(options.prompt, /Original high-level goal/);
       assert.match(options.prompt, /Persisted goal specification \(primary review target\)/);
       assert.match(options.prompt, /persisted definition-of-done is satisfied/);
@@ -653,6 +662,16 @@ function reviewerResult(
       remainingWork,
     }),
     reviewerCostTotal: 0,
+  };
+}
+
+function expectedNetworkRecoveryConfig() {
+  return {
+    enabled: true,
+    baseDelayMs: 2_000,
+    maxDelayMs: 9_000,
+    maxOutageMs: null,
+    timeoutPolicy: "exclude-network-wait",
   };
 }
 

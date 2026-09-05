@@ -4,6 +4,36 @@ import { Type } from "typebox";
 import type { TaskProgressModel } from "./task_progress.ts";
 import type { SessionOutcome } from "./worker_session.ts";
 
+const NetworkRecoveryParams = Type.Object(
+  {
+    enabled: Type.Optional(
+      Type.Boolean({
+        description:
+          "Enable coordinator-level recovery after Pi's bounded provider retries are exhausted. Defaults to false for backward compatibility.",
+      }),
+    ),
+    baseDelayMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Initial network-recovery delay in milliseconds. Defaults to 1000.",
+      }),
+    ),
+    maxDelayMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description: "Maximum network-recovery backoff delay in milliseconds. Defaults to 30000.",
+      }),
+    ),
+    maxOutageMs: Type.Optional(
+      Type.Union([Type.Integer({ minimum: 1 }), Type.Null()], {
+        description:
+          "Maximum continuous outage duration in milliseconds. Defaults to 300000; use null to wait indefinitely until cancelled.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const PiLongTaskParams = Type.Object(
   {
     inputText: Type.Optional(
@@ -21,6 +51,7 @@ export const PiLongTaskParams = Type.Object(
         description: "Optional high-level goal or desired outcome for the long-task run.",
       }),
     ),
+    networkRecovery: Type.Optional(NetworkRecoveryParams),
   },
   { additionalProperties: false },
 );
@@ -82,6 +113,7 @@ export const PiGoalTaskParams = Type.Object(
         description: "Maximum bash command timeout in milliseconds allowed in worker sessions.",
       }),
     ),
+    networkRecovery: Type.Optional(NetworkRecoveryParams),
   },
   { additionalProperties: false },
 );

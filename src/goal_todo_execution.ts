@@ -15,6 +15,7 @@ import {
   recordWorkerResult,
 } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
+import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import { validateTodoMarkdown } from "./todo_generator.ts";
 
 export const GOAL_TODO_EXECUTION_PROGRESS_FILE = "WORKER_PROGRESS.jsonl";
@@ -32,6 +33,7 @@ export interface GoalTodoExecutionOptions {
   thinkingLevel?: string;
   maxBashTimeoutMs?: number;
   maxAttemptsPerTask?: number;
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
   commit?: boolean;
   now?: () => Date;
   onProgress?: (update: CoordinatorProgressUpdate) => void;
@@ -152,6 +154,7 @@ export async function runGoalTodoExecutionLongTask(
       taskTimeoutMs: childTimeoutMs,
       maxBashTimeoutMs: options.maxBashTimeoutMs,
       maxAttemptsPerTask: options.maxAttemptsPerTask,
+      networkRecovery: options.networkRecovery,
       onProgress: (update) => {
         progressEvents.push(update);
         options.onProgress?.(update);

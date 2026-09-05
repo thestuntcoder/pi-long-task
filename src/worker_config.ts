@@ -1,3 +1,9 @@
+import {
+  NetworkRecoveryConfigError,
+  resolveNetworkRecoveryConfig,
+  type NetworkRecoveryConfigInput,
+} from "./network_recovery_config.ts";
+
 export interface ParsedWorkerRuntimeConfig {
   modelName?: string;
   maxAttemptsPerTask?: number;
@@ -5,6 +11,7 @@ export interface ParsedWorkerRuntimeConfig {
   maxBashTimeoutMs?: number;
   workerSessionReuseEnabled?: boolean;
   workerSessionReuseContextThresholdPercent?: number;
+  networkRecovery?: NetworkRecoveryConfigInput;
 }
 
 type MutableWorkerRuntimeConfig = ParsedWorkerRuntimeConfig & { provider?: string; model?: string };
@@ -36,6 +43,9 @@ export function parseWorkerRuntimeConfig(text: string): ParsedWorkerRuntimeConfi
 
   parseLineDirectives(text, state);
   parseNaturalLanguageDirectives(text, state);
+  if (state.networkRecovery) {
+    resolveNetworkRecoveryConfig(state.networkRecovery);
+  }
 
   const modelName = combineProviderAndModel(state.provider, state.model);
   return {
@@ -49,6 +59,7 @@ export function parseWorkerRuntimeConfig(text: string): ParsedWorkerRuntimeConfi
     ...(state.workerSessionReuseContextThresholdPercent !== undefined
       ? { workerSessionReuseContextThresholdPercent: state.workerSessionReuseContextThresholdPercent }
       : {}),
+    ...(state.networkRecovery ? { networkRecovery: { ...state.networkRecovery } } : {}),
   };
 }
 
@@ -159,6 +170,11 @@ function parseNaturalLanguageDirectives(text: string, state: MutableWorkerRuntim
 }
 
 function applyDirective(key: string, value: string, state: MutableWorkerRuntimeConfig): void {
+  if (/\bnetwork\b/.test(key) && /\brecover(?:y|ies)?\b/.test(key)) {
+    applyNetworkRecoveryDirective(key, value, state);
+    return;
+  }
+
   if (/\breuse\b/.test(key) && /\b(?:threshold|context)\b/.test(key)) {
     const threshold = percentageFromText(value);
     if (threshold !== undefined) {
@@ -213,6 +229,64 @@ function applyDirective(key: string, value: string, state: MutableWorkerRuntimeC
       state.taskTimeoutMs = timeout;
     }
   }
+}
+
+function applyNetworkRecoveryDirective(key: string, value: string, state: MutableWorkerRuntimeConfig): void {
+  const recovery = (state.networkRecovery ??= {});
+
+  if (/\bbase\b/.test(key) && /\bdelay\b/.test(key)) {
+    recovery.baseDelayMs = requiredNetworkRecoveryDuration("base delay", value);
+    return;
+  }
+  if (/\bmax(?:imum)?\b/.test(key) && /\bdelay\b/.test(key)) {
+    recovery.maxDelayMs = requiredNetworkRecoveryDuration("maximum delay", value);
+    return;
+  }
+  if (/\b(?:outage|duration|wait)\b/.test(key)) {
+    const normalized = trimDirectiveValue(value)
+      .toLowerCase()
+      .replace(/[.!]+$/g, "")
+      .trim();
+    if (/^(?:unlimited|indefinite|indefinitely|until cancelled|until canceled)$/.test(normalized)) {
+      recovery.maxOutageMs = null;
+      return;
+    }
+    recovery.maxOutageMs = requiredNetworkRecoveryDuration("maximum outage", value);
+    return;
+  }
+  if (/\b(?:enabled?|enablement)\b/.test(key) || /\bnetwork recovery\b/.test(key)) {
+    const enabled = booleanSetting(value);
+    if (enabled === undefined) {
+      throw new NetworkRecoveryConfigError(
+        "Network recovery must be configured as enabled/disabled, on/off, true/false, or yes/no.",
+      );
+    }
+    recovery.enabled = enabled;
+    return;
+  }
+
+  throw new NetworkRecoveryConfigError(`Unknown network recovery configuration directive: ${key}.`);
+}
+
+function requiredNetworkRecoveryDuration(label: string, value: string): number {
+  const trimmed = trimDirectiveValue(value)
+    .replace(/[.!]+$/g, "")
+    .trim();
+  const match = /^(\d+(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?$/i.exec(
+    trimmed,
+  );
+  if (!match) {
+    throw new NetworkRecoveryConfigError(
+      `Network recovery ${label} must be a positive finite duration (for example 1000ms, 30s, or 5m).`,
+    );
+  }
+  const milliseconds = durationMsFromText(trimmed, { allowBareSeconds: true });
+  if (milliseconds === undefined) {
+    throw new NetworkRecoveryConfigError(
+      `Network recovery ${label} must be a positive finite duration (for example 1000ms, 30s, or 5m).`,
+    );
+  }
+  return milliseconds;
 }
 
 function captureTokens(text: string, pattern: RegExp, apply: (token: string) => void): void {

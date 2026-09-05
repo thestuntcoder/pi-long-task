@@ -6,6 +6,7 @@ import { runCoordinator, type CoordinatorResult, type RunCoordinatorOptions } fr
 import { type GoalIterationState, type GoalLoopState, recordGeneratedTodo, startGoalIteration } from "./goal_loop.ts";
 import { GoalStateStore } from "./goal_state.ts";
 import type { GoalSpecification } from "./goal_spec.ts";
+import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import { parseTasks } from "./todo_parser.ts";
 import {
   applyGoalInstructionsToTodoMarkdown,
@@ -29,6 +30,7 @@ export interface GoalTodoGenerationOptions {
   modelName?: string;
   thinkingLevel?: string;
   maxBashTimeoutMs?: number;
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
   now?: () => Date;
   additionalContext?: string;
   outputPath?: string;
@@ -104,6 +106,7 @@ export async function runGoalTodoGenerationLongTask(
     taskThinking: options.thinkingLevel,
     taskTimeoutMs: childTimeoutMs,
     maxBashTimeoutMs: options.maxBashTimeoutMs,
+    networkRecovery: options.networkRecovery,
   });
 
   throwIfAborted(options.abortSignal);

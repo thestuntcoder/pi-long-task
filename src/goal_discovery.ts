@@ -13,6 +13,7 @@ import {
 } from "./goal_spec.ts";
 import type { GoalLoopState } from "./goal_loop.ts";
 import type { GoalStateStore } from "./goal_state.ts";
+import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 
 export type GoalDiscoveryEntrypoint = "pi_goal_task" | "pi_long_task";
 export type GoalDiscoveryRoute = "discovery" | "direct";
@@ -41,6 +42,7 @@ export interface GoalDiscoveryRunnerOptions {
   model?: unknown;
   modelName?: string;
   thinkingLevel?: string;
+  networkRecovery?: Readonly<NetworkRecoveryConfig>;
   now: () => Date;
 }
 
