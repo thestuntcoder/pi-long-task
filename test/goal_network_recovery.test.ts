@@ -30,6 +30,7 @@ test("goal TODO planner recovery resumes the same iteration and excludes outage 
     let clockMs = Date.parse("2026-09-05T00:00:00.000Z");
     const startedAtMs = clockMs;
     let plannerCalls = 0;
+    const plannerTimeouts: Array<number | undefined> = [];
     let executionCalls = 0;
     let reviewerCalls = 0;
 
@@ -45,6 +46,7 @@ test("goal TODO planner recovery resumes the same iteration and excludes outage 
       networkRecovery: recoveryConfig,
       todoGenerationRunner: async (options) => {
         plannerCalls += 1;
+        plannerTimeouts.push(options.taskTimeoutMs);
         if (plannerCalls === 1) {
           clockMs += 100;
           throw Object.assign(new Error("goal planner connection reset"), { code: "ECONNRESET" });
@@ -66,6 +68,7 @@ test("goal TODO planner recovery resumes the same iteration and excludes outage 
 
     assert.equal(result.state.status, "done");
     assert.equal(plannerCalls, 2);
+    assert.deepEqual(plannerTimeouts, [10_000, 10_000], "network recovery must retain the planner timeout budget");
     assert.equal(executionCalls, 1);
     assert.equal(reviewerCalls, 1);
     assert.equal(result.state.iterations.length, 1, "network retries must not advance the goal loop");
@@ -199,7 +202,7 @@ test("default reviewer recovery disposes the errored session before using a repl
         maxOutageMs: 1_000,
         timeoutPolicy: "exclude-network-wait",
       },
-      now: () => new Date(),
+      now: () => new Date("2026-09-05T01:30:00.000Z"),
     });
 
     assert.equal(sessions.length, 2);

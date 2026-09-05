@@ -249,6 +249,81 @@ test("unlimited mode continues beyond bounded durations until recovery", async (
   assert.equal(outcome.outage.outageExpiresAtMs, undefined);
 });
 
+test("every deterministic failure category bypasses waiting and retries", async () => {
+  const failures: Array<[label: string, error: unknown]> = [
+    ["authentication", Object.assign(new Error("invalid API key"), { status: 401 })],
+    ["authorization", Object.assign(new Error("permission denied"), { status: 403 })],
+    ["billing", Object.assign(new Error("payment required"), { status: 402 })],
+    ["quota", { status: 429, code: "QUOTA_EXCEEDED", message: "too many requests" }],
+    ["invalid model", { status: 404, code: "MODEL_NOT_FOUND", message: "service unavailable" }],
+    ["invalid request", { status: 400, code: "INVALID_REQUEST", message: "connection reset" }],
+    ["other client error", { status: 422, message: "fetch failed" }],
+    ["non-retryable server error", { status: 501, message: "temporarily unavailable" }],
+    ["programming error", new TypeError("Cannot read properties of undefined")],
+  ];
+
+  for (const [label, initialFailure] of failures) {
+    let retries = 0;
+    let sleeps = 0;
+    let events = 0;
+    await assert.rejects(
+      recoverNetworkOperation({
+        initialFailure,
+        config: config(),
+        sleep: async () => {
+          sleeps += 1;
+        },
+        retry: async () => {
+          retries += 1;
+          return "unexpected";
+        },
+        onEvent: () => {
+          events += 1;
+        },
+      }),
+      (error) => error === initialFailure,
+      label,
+    );
+    assert.deepEqual({ retries, sleeps, events }, { retries: 0, sleeps: 0, events: 0 }, label);
+  }
+});
+
+test("a deterministic failure after a transient probe fails once without another wait", async () => {
+  const deterministic = { status: 404, code: "MODEL_NOT_FOUND", message: "model does not exist" };
+  const events: NetworkRecoveryEvent[] = [];
+  let currentTimeMs = 100;
+  let retries = 0;
+  let sleeps = 0;
+
+  await assert.rejects(
+    recoverNetworkOperation({
+      initialFailure: transient(),
+      config: config({ maxOutageMs: null }),
+      now: () => currentTimeMs,
+      jitter: identityJitter,
+      sleep: async (delayMs) => {
+        sleeps += 1;
+        currentTimeMs += delayMs;
+      },
+      retry: async () => {
+        retries += 1;
+        throw deterministic;
+      },
+      onEvent: (event) => events.push(event),
+    }),
+    (error) => error === deterministic,
+  );
+
+  assert.equal(retries, 1);
+  assert.equal(sleeps, 1);
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["outage_started", "retry_scheduled", "retry_started", "failed", "cleanup"],
+  );
+  assert.equal(events.find((event) => event.type === "failed")?.classification?.reason, "invalid_model");
+  assert.equal(events.filter((event) => event.type === "cleanup").length, 1);
+});
+
 test("fails fast for disabled recovery and deterministic retry failures", async () => {
   const initial = transient();
   let calls = 0;
@@ -281,6 +356,83 @@ test("fails fast for disabled recovery and deterministic retry failures", async 
   );
   assert.deepEqual(eventTypes, ["outage_started", "retry_scheduled", "retry_started", "failed", "cleanup"]);
   assert.equal(classifyNetworkFailure(authError).recoverable, false);
+});
+
+test("cancellation is honored at every passive recovery lifecycle boundary", async (t) => {
+  const cases: Array<{
+    boundary: "outage_started" | "retry_scheduled" | "retry_failed" | "expiry_scheduled";
+    bounded: boolean;
+    expectedRetries: number;
+    expectedEvents: string[];
+  }> = [
+    {
+      boundary: "outage_started",
+      bounded: false,
+      expectedRetries: 0,
+      expectedEvents: ["outage_started", "cancelled", "cleanup"],
+    },
+    {
+      boundary: "retry_scheduled",
+      bounded: false,
+      expectedRetries: 0,
+      expectedEvents: ["outage_started", "retry_scheduled", "cancelled", "cleanup"],
+    },
+    {
+      boundary: "retry_failed",
+      bounded: false,
+      expectedRetries: 1,
+      expectedEvents: ["outage_started", "retry_scheduled", "retry_started", "retry_failed", "cancelled", "cleanup"],
+    },
+    {
+      boundary: "expiry_scheduled",
+      bounded: true,
+      expectedRetries: 0,
+      expectedEvents: ["outage_started", "expiry_scheduled", "cancelled", "cleanup"],
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.boundary, async () => {
+      const controller = new AbortController();
+      const eventTypes: string[] = [];
+      let retries = 0;
+      let sleeps = 0;
+      await assert.rejects(
+        recoverNetworkOperation({
+          initialFailure: transient(),
+          config: config({
+            baseDelayMs: 100,
+            maxDelayMs: 100,
+            maxOutageMs: item.bounded ? 100 : null,
+          }),
+          signal: controller.signal,
+          now: () => 1_000,
+          jitter: identityJitter,
+          sleep: async () => {
+            sleeps += 1;
+          },
+          retry: async () => {
+            retries += 1;
+            throw transient("network offline");
+          },
+          onEvent: (event) => {
+            eventTypes.push(event.type);
+            if (event.type === item.boundary) controller.abort(`cancel at ${item.boundary}`);
+          },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof NetworkRecoveryAbortedError);
+          assert.equal(error.reason, `cancel at ${item.boundary}`);
+          return true;
+        },
+      );
+
+      assert.equal(retries, item.expectedRetries);
+      assert.ok(sleeps <= 1);
+      assert.deepEqual(eventTypes, item.expectedEvents);
+      assert.equal(eventTypes.filter((type) => type === "cleanup").length, 1);
+    });
+  }
 });
 
 test("cancellation is prompt even when injected sleep ignores the signal", async () => {

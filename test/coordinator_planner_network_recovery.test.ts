@@ -260,7 +260,7 @@ test("steering recovery preserves accepted revisions and completed work without 
       },
       workerRunner: async (options) => {
         workerCalls.push(options.task.title);
-        return doneOutcome(options);
+        return { ...(await doneOutcome(options)), workerCostTotal: 0.25 };
       },
       onPlanRevisionAccepted: (revision) => {
         acceptedRevisionIds.push(revision.revisionId);
@@ -286,6 +286,7 @@ test("steering recovery preserves accepted revisions and completed work without 
     assert.deepEqual(workerCalls, ["Foundation", "Accepted insertion", "Recovered insertion", "Original follow-up"]);
     assert.equal(workerCalls.filter((title) => title === "Foundation").length, 1);
     assert.equal(result.attemptedTasks, 4);
+    assert.equal(result.workerCostTotal, 1, "accepted revisions and planner recovery must not reset worker costs");
     assert.deepEqual(
       parseTasks(await readFile(result.todoPath, "utf8")).map((task) => [task.title, task.done]),
       [

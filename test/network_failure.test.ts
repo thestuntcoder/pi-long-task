@@ -160,6 +160,27 @@ test("deterministic status, code, and message evidence overrides transient wrapp
   assertReason(wrapped, false, "authentication");
 });
 
+test("covers the complete fail-fast taxonomy independently of transient wrapper messages", () => {
+  const cases: Array<[label: string, error: unknown, reason: NetworkFailureReason]> = [
+    ["authentication", { status: 401, code: "INVALID_API_KEY", message: "connection reset" }, "authentication"],
+    ["authorization", { status: 403, code: "PERMISSION_DENIED", message: "service unavailable" }, "authorization"],
+    ["billing", { status: 402, code: "PAYMENT_REQUIRED", message: "temporarily unavailable" }, "billing"],
+    ["quota exhaustion", { status: 429, code: "INSUFFICIENT_QUOTA", message: "too many requests" }, "quota_exhausted"],
+    ["invalid model", { status: 404, code: "MODEL_NOT_FOUND", message: "provider overloaded" }, "invalid_model"],
+    ["invalid request", { status: 400, code: "INVALID_ARGUMENT", message: "fetch failed" }, "invalid_request"],
+    ["other client error", { status: 422, message: "connection reset" }, "http_client_error"],
+    ["non-retryable server error", { status: 501, message: "service unavailable" }, "non_retryable_server_error"],
+    ["deterministic TLS error", codedError("socket reset: certificate has expired", "CERT_HAS_EXPIRED"), "unknown"],
+  ];
+
+  for (const [label, error, reason] of cases) {
+    const classification = classifyNetworkFailure(error);
+    assert.equal(classification.recoverable, false, label);
+    assert.equal(classification.reason, reason, label);
+    assert.equal(classification.error, error, label);
+  }
+});
+
 test("abort and unknown programming failures are never treated as outages", () => {
   assertReason(new DOMException("This operation was aborted", "AbortError"), false, "cancelled");
   assertReason(codedError("request aborted", "ABORT_ERR"), false, "cancelled");
