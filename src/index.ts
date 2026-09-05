@@ -576,6 +576,8 @@ function sidebarUpdateStateDetails(update: CoordinatorProgressUpdate): {
       return { icon: "↻", label: "Worker session", color: "accent" };
     case "worker_tool":
       return { icon: "+", label: "Worker tool", color: "warning" };
+    case "network_wait":
+      return { icon: "↻", label: "Waiting for connection", color: "warning" };
     case "task_done":
       return { icon: "✓", label: "Task complete", color: "success" };
     case "task_blocked":

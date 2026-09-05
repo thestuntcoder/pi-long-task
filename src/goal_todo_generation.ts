@@ -43,6 +43,7 @@ export interface GoalTodoGenerationOptions {
   additionalContext?: string;
   outputPath?: string;
   goalSpecification?: GoalSpecification;
+  onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
 }
 
 export interface GoalTodoGenerationResult {
@@ -107,6 +108,7 @@ export async function runGoalTodoGenerationLongTask(
     if (event.type === "cleanup") {
       excludedOutageMs += event.state.elapsedMs;
     }
+    options.onNetworkRecovery?.(event);
   };
   const childOptions: RunCoordinatorOptions = {
     inputText: payload,

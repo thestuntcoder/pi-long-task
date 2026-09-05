@@ -62,6 +62,40 @@ export interface NetworkRecoveryOutcome<T> {
   readonly outage: NetworkOutageState;
 }
 
+/** User-facing recovery status derived only from an immutable lifecycle event. */
+export function formatNetworkRecoveryStatus(event: NetworkRecoveryEvent): string {
+  const elapsed = formatRecoveryDuration(event.state.elapsedMs);
+  const retry = event.state.retryCount;
+  const prefix = "Waiting for connection…";
+
+  switch (event.type) {
+    case "outage_started":
+      return `${prefix} outage detected (elapsed ${elapsed}).`;
+    case "retry_scheduled": {
+      const nowMs = event.state.outageStartedAtMs + event.state.elapsedMs;
+      const remainingMs = Math.max(0, (event.state.nextRetryAtMs ?? nowMs) - nowMs);
+      return `${prefix} retry ${retry} in ${formatRecoveryDuration(remainingMs)} (outage ${elapsed}).`;
+    }
+    case "retry_started":
+      return `${prefix} checking connection with retry ${retry} (outage ${elapsed}).`;
+    case "retry_failed":
+      return `${prefix} retry ${retry} failed (outage ${elapsed}).`;
+    case "expiry_scheduled":
+      return `${prefix} outage ${elapsed}; recovery window expires in ${formatRecoveryDuration(
+        event.state.lastDelayMs ?? 0,
+      )}.`;
+    default:
+      return `${prefix} outage ${elapsed}.`;
+  }
+}
+
+function formatRecoveryDuration(milliseconds: number): string {
+  const safeMs = Math.max(0, Math.round(milliseconds));
+  if (safeMs < 1_000) return `${safeMs}ms`;
+  const seconds = safeMs / 1_000;
+  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
+}
+
 export class NetworkOutageExpiredError extends Error {
   readonly outage: NetworkOutageState;
   readonly lastFailure: unknown;
@@ -213,7 +247,15 @@ export async function recoverNetworkOperation<T>(
       return await raceWithAbort(operation, options.signal);
     }
 
-    const deadline = deadlineSleep(remainingOutageMs, deadlineController.signal).then(() => {
+    const deadline = raceWithAbort(
+      deadlineSleep(remainingOutageMs, deadlineController.signal),
+      deadlineController.signal,
+    ).then(() => {
+      // The operation may have won the race and cancelled this deadline.
+      // Never allow a non-cooperative injected timer to emit a stale expiry.
+      if (deadlineController.signal.aborted) {
+        throw abortedError(deadlineController.signal);
+      }
       const expired = new NetworkOutageExpiredError(state());
       retryController.abort(expired);
       return expire();

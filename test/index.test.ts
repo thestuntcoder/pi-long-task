@@ -367,6 +367,20 @@ assert.doesNotMatch(normalizedWidget, /Finished: Finished:/);
 
 sidebar.update({
   ...sidebarUpdate,
+  message: "Waiting for connection… retry 2 in 4s (outage 7s).",
+  activeStatus: "Waiting for connection… retry 2 in 4s (outage 7s).",
+  phase: "network_wait",
+  networkRecoveryEvent: "retry_scheduled",
+  networkRetryCount: 2,
+  networkOutageElapsedMs: 7_000,
+  networkNextRetryInMs: 4_000,
+});
+const waitingWidget = widgetComponent?.render(80).join("\n") ?? "";
+assert.match(waitingWidget, /↻ Waiting for connection/);
+assert.match(waitingWidget, /retry 2 in 4s \(outage 7s\)/);
+
+sidebar.update({
+  ...sidebarUpdate,
   message: "TODO 2 done.",
   phase: "task_done",
   status: "done",
@@ -386,13 +400,16 @@ const doneWidget = widgetComponent?.render(80).join("\n") ?? "";
 assert.match(doneWidget, /✓ done/);
 assert.match(doneWidget, /2\/3 tasks complete/);
 assert.match(doneWidget, /67% complete/);
-assert.equal(renderRequests, 4);
-assert.equal(overlayRenderRequests, 4);
+assert.equal(renderRequests, 5);
+assert.equal(overlayRenderRequests, 5);
 
 sidebar.close();
+const widgetCallCountAfterClose = widgetCalls.length;
+sidebar.close();
+assert.equal(widgetCalls.length, widgetCallCountAfterClose, "sidebar cleanup must be idempotent");
 assert.equal(widgetCalls.at(-1)?.content, undefined);
 assert.equal(widgetComponent, undefined);
-assert.equal(overlayHideCalls, 1);
+assert.equal(overlayHideCalls, 1, "overlay cleanup must run exactly once");
 
 assert.equal(createLongTaskSidebarController(undefined), undefined);
 assert.equal(createLongTaskSidebarController({ hasUI: false } as never), undefined);

@@ -21,6 +21,11 @@ import {
 import { GoalStateStore } from "./goal_state.ts";
 import type { GoalSpecification } from "./goal_spec.ts";
 import {
+  formatNetworkRecoveryStatus,
+  type NetworkRecoveryEvent,
+  type NetworkRecoveryEventType,
+} from "./network_recovery.ts";
+import {
   resolveNetworkRecoveryConfig,
   type NetworkRecoveryConfig,
   type NetworkRecoveryConfigInput,
@@ -48,6 +53,7 @@ export type GoalLoopProgressPhase =
   | "todo_executed"
   | "review_start"
   | "reviewed"
+  | "network_wait"
   | "complete";
 
 export interface GoalLoopProgressUpdate {
@@ -75,6 +81,12 @@ export interface GoalLoopProgressUpdate {
   reviewerCostTotal: number;
   totalCost: number;
   childProgress?: CoordinatorProgressUpdate;
+  networkRecoveryEvent?: NetworkRecoveryEventType;
+  networkRetryCount?: number;
+  networkOutageElapsedMs?: number;
+  networkNextRetryAtMs?: number;
+  networkNextRetryInMs?: number;
+  networkFailureReason?: string;
 }
 
 export type GoalLoopProgressHandler = (update: GoalLoopProgressUpdate) => void;
@@ -102,6 +114,7 @@ export interface RunGoalLoopOptions extends GoalLoopLimitInput {
   now?: () => Date;
   onWorkerProgress?: (update: CoordinatorProgressUpdate) => void;
   onProgress?: GoalLoopProgressHandler;
+  onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
 }
 
 export interface GoalLoopRunResult {
@@ -156,7 +169,9 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
   await store.saveState(state);
   await store.initializeResultIfMissing(state);
   await store.appendNewTraceEvents(await store.durableTraceLength(), state);
+  let progressClosed = false;
   const publish = (phase: GoalLoopProgressPhase, message: string, extra: Partial<GoalLoopProgressUpdate> = {}) => {
+    if (progressClosed) return;
     options.onProgress?.({
       message,
       phase,
@@ -179,6 +194,39 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
       totalCost: accumulatedWorkerCost(state) + accumulatedReviewerCost(state),
       ...extra,
     });
+  };
+  const recoveryProgress = (
+    restorePhase: GoalLoopProgressPhase,
+    restoreMessage: string,
+    extra: Partial<GoalLoopProgressUpdate> = {},
+  ) => {
+    let cleaned = false;
+    return (event: NetworkRecoveryEvent) => {
+      options.onNetworkRecovery?.(event);
+      if (cleaned || progressClosed) return;
+      if (event.type === "cleanup") {
+        cleaned = true;
+        return;
+      }
+      if (event.type === "recovered") {
+        publish(restorePhase, restoreMessage, extra);
+        return;
+      }
+      if (isTerminalNetworkRecoveryProgressEvent(event.type)) return;
+
+      const nowMs = event.state.outageStartedAtMs + event.state.elapsedMs;
+      const message = formatNetworkRecoveryStatus(event);
+      publish("network_wait", message, {
+        ...extra,
+        networkRecoveryEvent: event.type,
+        networkRetryCount: event.state.retryCount,
+        networkOutageElapsedMs: event.state.elapsedMs,
+        networkNextRetryAtMs: event.state.nextRetryAtMs,
+        networkNextRetryInMs:
+          event.state.nextRetryAtMs === undefined ? undefined : Math.max(0, event.state.nextRetryAtMs - nowMs),
+        networkFailureReason: event.state.lastFailure.reason,
+      });
+    };
   };
 
   publish("goal_start", `Starting goal loop: ${state.goal}`);
@@ -237,6 +285,11 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           networkRecovery,
           now,
           goalSpecification,
+          onNetworkRecovery: recoveryProgress(
+            "todo_generation_start",
+            `Goal iteration ${nextIteration}: generating TODO markdown.`,
+            { iteration: nextIteration },
+          ),
         });
         generationResults.push(generation);
         state = generation.state;
@@ -263,6 +316,11 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           networkRecovery,
           now,
           goalSpecification,
+          onNetworkRecovery: recoveryProgress(
+            "todo_generation_start",
+            `Goal iteration ${current.iteration}: resuming TODO generation.`,
+            { iteration: current.iteration },
+          ),
         });
         generationResults.push(generation);
         state = generation.state;
@@ -337,6 +395,11 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           goalSpecification,
           networkRecovery,
           timeoutMs: remainingReviewTimeout(state, current.deadlineAt, now()),
+          onNetworkRecovery: recoveryProgress(
+            "review_start",
+            `Goal iteration ${current.iteration}: reviewing goal completion.`,
+            { iteration: current.iteration },
+          ),
         });
         reviewResults.push(review);
         state = review.state;
@@ -377,6 +440,7 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
   }
 
   publish("complete", `Goal loop ${state.status}: ${state.completion?.reason ?? "finished"}`);
+  progressClosed = true;
 
   return {
     state,
@@ -493,6 +557,10 @@ function sumFinite(values: Array<number | undefined>): number {
     (total, value) => total + (typeof value === "number" && Number.isFinite(value) ? value : 0),
     0,
   );
+}
+
+function isTerminalNetworkRecoveryProgressEvent(type: NetworkRecoveryEventType): boolean {
+  return type === "failed" || type === "cancelled" || type === "outage_expired";
 }
 
 function requiredGoal(goal: string | undefined): string {

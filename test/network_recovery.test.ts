@@ -197,6 +197,35 @@ test("bounded outage deadlines abort retry execution", async () => {
   assert.deepEqual(eventTypes, ["outage_started", "retry_scheduled", "retry_started", "outage_expired", "cleanup"]);
 });
 
+test("a cancelled non-cooperative deadline cannot emit stale events after recovery cleanup", async () => {
+  let releaseDeadline!: () => void;
+  const deadline = new Promise<void>((resolve) => {
+    releaseDeadline = resolve;
+  });
+  const eventTypes: string[] = [];
+
+  const result = await recoverNetworkOperation({
+    initialFailure: transient(),
+    config: config({ baseDelayMs: 1, maxDelayMs: 1, maxOutageMs: 1_000 }),
+    jitter: identityJitter,
+    sleep: async () => {},
+    deadlineSleep: async () => deadline,
+    retry: async () => "online",
+    onEvent: (event) => eventTypes.push(event.type),
+  });
+
+  assert.equal(result.value, "online");
+  assert.deepEqual(eventTypes, ["outage_started", "retry_scheduled", "retry_started", "recovered", "cleanup"]);
+  releaseDeadline();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(
+    eventTypes,
+    ["outage_started", "retry_scheduled", "retry_started", "recovered", "cleanup"],
+    "an ignored deadline abort must not publish expiry after cleanup",
+  );
+});
+
 test("unlimited mode continues beyond bounded durations until recovery", async () => {
   let currentTimeMs = 0;
   let retries = 0;

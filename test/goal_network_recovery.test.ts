@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import type { CoordinatorResult, RunCoordinatorOptions } from "../src/coordinator.ts";
-import { runGoalLoop } from "../src/goal_orchestrator.ts";
+import { runGoalLoop, type GoalLoopProgressUpdate } from "../src/goal_orchestrator.ts";
 import { runGoalReviewSession, type GoalReviewerRunner } from "../src/goal_review.ts";
 import { createGoalLoopState, recordGeneratedTodo, recordWorkerResult, startGoalIteration } from "../src/goal_loop.ts";
 import { GoalStateStore } from "../src/goal_state.ts";
@@ -83,6 +83,7 @@ test("reviewer recovery preserves partial evidence and costs without consuming i
     let clockMs = Date.parse("2026-09-05T01:00:00.000Z");
     const startedAtMs = clockMs;
     const reviewerTimeouts: number[] = [];
+    const progress: GoalLoopProgressUpdate[] = [];
     let reviewerCalls = 0;
 
     const reviewer: GoalReviewerRunner = async (options) => {
@@ -117,6 +118,7 @@ test("reviewer recovery preserves partial evidence and costs without consuming i
       todoExecutionRunner: async (options) => coordinatorResult(options, "Implementation complete", 0.4),
       reviewerRunner: reviewer,
       now: () => new Date(clockMs),
+      onProgress: (update) => progress.push(update),
     });
 
     assert.equal(result.state.status, "done");
@@ -132,6 +134,15 @@ test("reviewer recovery preserves partial evidence and costs without consuming i
     assert.equal(result.state.iterations[0]?.reviewerRecovery?.evidencePaths.length, 1);
     assert.equal(Date.parse(result.state.deadlineAt!), startedAtMs + 20_000 + 300);
     assert.equal(Date.parse(result.state.iterations[0]!.deadlineAt!), startedAtMs + 10_000 + 300);
+    const waiting = progress.filter((update) => update.phase === "network_wait");
+    assert.deepEqual(
+      waiting.map((update) => update.networkRecoveryEvent),
+      ["outage_started", "retry_scheduled", "retry_started"],
+    );
+    assert.match(waiting[1]?.message ?? "", /^Waiting for connection… retry 1 in /);
+    const lastWait = progress.map((update) => update.phase).lastIndexOf("network_wait");
+    assert.equal(progress[lastWait + 1]?.phase, "review_start", "review status must be restored after reconnecting");
+    assert.equal(progress.at(-1)?.phase, "complete");
 
     const evidencePath = path.join(
       result.state.goalRunDir,

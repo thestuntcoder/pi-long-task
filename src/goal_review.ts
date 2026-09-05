@@ -44,6 +44,7 @@ export interface GoalReviewOptions {
   goalSpecification?: GoalSpecification;
   networkRecovery?: Readonly<NetworkRecoveryConfig>;
   timeoutMs?: number;
+  onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
 }
 
 export interface GoalReviewResult {
@@ -133,6 +134,7 @@ export async function runGoalReviewSession(options: GoalReviewOptions): Promise<
     if (event.type === "cleanup") {
       excludedOutageMs += event.state.elapsedMs;
     }
+    options.onNetworkRecovery?.(event);
   };
 
   let sessionResult: GoalReviewerSessionResult | undefined;

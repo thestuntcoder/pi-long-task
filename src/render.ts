@@ -456,6 +456,8 @@ function progressPhaseLabel(phase: string): string {
     case "task_start":
     case "worker_tool":
       return "Build";
+    case "network_wait":
+      return "Network";
     case "task_done":
       return "Done";
     case "task_failed":

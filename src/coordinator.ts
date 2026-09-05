@@ -11,7 +11,12 @@ import type {
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
 import { classifyNetworkFailure } from "./network_failure.ts";
-import { recoverNetworkOperation, type NetworkRecoveryEvent } from "./network_recovery.ts";
+import {
+  formatNetworkRecoveryStatus,
+  recoverNetworkOperation,
+  type NetworkRecoveryEvent,
+  type NetworkRecoveryEventType,
+} from "./network_recovery.ts";
 import {
   DEFAULT_NETWORK_RECOVERY_CONFIG,
   resolveNetworkRecoveryConfig,
@@ -96,6 +101,7 @@ export type CoordinatorProgressPhase =
   | "task_start"
   | "worker_session"
   | "worker_tool"
+  | "network_wait"
   | "task_done"
   | "task_blocked"
   | "task_failed"
@@ -158,6 +164,12 @@ export interface CoordinatorProgressUpdate {
   workerSessionReason?: string;
   workerSessionContextUsagePercent?: number;
   workerSessionContextThresholdPercent?: number;
+  networkRecoveryEvent?: NetworkRecoveryEventType;
+  networkRetryCount?: number;
+  networkOutageElapsedMs?: number;
+  networkNextRetryAtMs?: number;
+  networkNextRetryInMs?: number;
+  networkFailureReason?: string;
 }
 
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
@@ -312,6 +324,10 @@ interface RuntimeOptions {
   steeringQueue?: SerializedSteeringQueue;
   onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
   onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
+  lastProgress?: CoordinatorProgressUpdate;
+  progressClosed: boolean;
+  networkRecoverySequence: number;
+  activeNetworkRecoveries: Map<number, NetworkRecoveryEvent>;
 }
 
 type RetainedWorkerReuseScope = "sequential_task" | "partial_continuation";
@@ -1163,7 +1179,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           networkRecovery: runtime.networkRecovery,
           signal: workerOptions.abortSignal,
           onInterruption: (interrupted) => networkInterruptedOutcomes.push(interrupted),
-          onNetworkRecovery: runtime.onNetworkRecovery,
+          onNetworkRecovery: createNetworkRecoveryProgressHandler(runtime),
         });
       } catch (error) {
         if (!assignmentState.obsolete) {
@@ -1454,6 +1470,8 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     });
     return result;
   } finally {
+    runtime.progressClosed = true;
+    runtime.activeNetworkRecoveries.clear();
     removeSteeringProcessor?.();
     await workerSessionOwner?.dispose();
   }
@@ -1573,7 +1591,7 @@ async function runPlannerOperationWithNetworkRecovery(
       initialFailure,
       config: runtime.networkRecovery,
       signal: plannerOptions.abortSignal,
-      onEvent: runtime.onNetworkRecovery,
+      onEvent: createNetworkRecoveryProgressHandler(runtime),
       retry: ({ signal }) => run(signal),
     });
     return recovered.value;
@@ -1950,6 +1968,9 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     steeringQueue: options.steeringQueue,
     onPlanRevisionAccepted: options.onPlanRevisionAccepted,
     onNetworkRecovery: options.onNetworkRecovery,
+    progressClosed: false,
+    networkRecoverySequence: 0,
+    activeNetworkRecoveries: new Map(),
   };
 }
 
@@ -1958,7 +1979,8 @@ function emitProgress(
   message: string,
   update: Omit<CoordinatorProgressUpdate, "message" | "runId" | "todoPath" | "resultPath" | "workerCostTotal">,
 ): void {
-  runtime.onProgress?.({
+  if (runtime.progressClosed) return;
+  const progress: CoordinatorProgressUpdate = {
     message,
     runId: runtime.runId,
     todoPath: runtime.todoPath,
@@ -1966,7 +1988,105 @@ function emitProgress(
     workerCostTotal: runtime.workerCostState.total,
     ...update,
     goal: runtime.goal,
+  };
+  runtime.lastProgress = progress;
+  const activeRecovery = latestNetworkRecovery(runtime.activeNetworkRecoveries);
+  if (activeRecovery) {
+    publishNetworkRecoveryProgress(runtime, activeRecovery);
+  } else {
+    runtime.onProgress?.(progress);
+  }
+}
+
+/**
+ * Bridge one recovery lifecycle into coordinator progress without replacing the
+ * last stable task/phase update. A recovered operation restores whichever
+ * ordinary status is current; terminal failures are left for the normal final
+ * status path. Operation IDs prevent an older concurrent recovery from
+ * repainting a newer outage or completion.
+ */
+function createNetworkRecoveryProgressHandler(runtime: RuntimeOptions): (event: NetworkRecoveryEvent) => void {
+  const operationId = ++runtime.networkRecoverySequence;
+  let cleaned = false;
+
+  return (event) => {
+    runtime.onNetworkRecovery?.(event);
+    if (cleaned || runtime.progressClosed) return;
+
+    if (event.type === "cleanup") {
+      cleaned = true;
+      runtime.activeNetworkRecoveries.delete(operationId);
+      return;
+    }
+
+    if (isTerminalNetworkRecoveryEvent(event.type)) {
+      runtime.activeNetworkRecoveries.delete(operationId);
+      if (event.type === "recovered") {
+        const active = latestNetworkRecovery(runtime.activeNetworkRecoveries);
+        if (active) {
+          publishNetworkRecoveryProgress(runtime, active);
+        } else if (runtime.lastProgress) {
+          runtime.onProgress?.({ ...runtime.lastProgress, workerCostTotal: runtime.workerCostState.total });
+        }
+      }
+      return;
+    }
+
+    runtime.activeNetworkRecoveries.set(operationId, event);
+    if (operationId === latestNetworkRecoveryId(runtime.activeNetworkRecoveries)) {
+      publishNetworkRecoveryProgress(runtime, event);
+    }
+  };
+}
+
+function publishNetworkRecoveryProgress(runtime: RuntimeOptions, event: NetworkRecoveryEvent): void {
+  if (runtime.progressClosed) return;
+  const stable = runtime.lastProgress;
+  const nowMs = event.state.outageStartedAtMs + event.state.elapsedMs;
+  const message = formatNetworkRecoveryStatus(event);
+  runtime.onProgress?.({
+    message,
+    phase: "network_wait",
+    runId: runtime.runId,
+    todoPath: runtime.todoPath,
+    resultPath: runtime.taskResultPath,
+    workerCostTotal: runtime.workerCostState.total,
+    goal: runtime.goal,
+    taskId: stable?.taskId,
+    title: stable?.title,
+    attempt: stable?.attempt,
+    totalTasks: stable?.totalTasks,
+    currentTask: stable?.currentTask,
+    subtasks: stable?.subtasks,
+    taskProgress: stable?.taskProgress,
+    activeStatus: message,
+    networkRecoveryEvent: event.type,
+    networkRetryCount: event.state.retryCount,
+    networkOutageElapsedMs: event.state.elapsedMs,
+    networkNextRetryAtMs: event.state.nextRetryAtMs,
+    networkNextRetryInMs:
+      event.state.nextRetryAtMs === undefined ? undefined : Math.max(0, event.state.nextRetryAtMs - nowMs),
+    networkFailureReason: event.state.lastFailure.reason,
   });
+}
+
+function latestNetworkRecovery(
+  recoveries: ReadonlyMap<number, NetworkRecoveryEvent>,
+): NetworkRecoveryEvent | undefined {
+  const id = latestNetworkRecoveryId(recoveries);
+  return id === undefined ? undefined : recoveries.get(id);
+}
+
+function latestNetworkRecoveryId(recoveries: ReadonlyMap<number, NetworkRecoveryEvent>): number | undefined {
+  let latest: number | undefined;
+  for (const id of recoveries.keys()) {
+    if (latest === undefined || id > latest) latest = id;
+  }
+  return latest;
+}
+
+function isTerminalNetworkRecoveryEvent(type: NetworkRecoveryEventType): boolean {
+  return type === "recovered" || type === "failed" || type === "cancelled" || type === "outage_expired";
 }
 
 function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDiagnostic): void {
