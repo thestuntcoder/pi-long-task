@@ -10,6 +10,8 @@ import type {
 } from "./types.ts";
 import { commitAfterSession, gitDirtyPaths, shouldCommitOutcome, type CommitAfterSessionResult } from "./git.ts";
 import { formatCoordinatorResultMessage } from "./render.ts";
+import { classifyNetworkFailure } from "./network_failure.ts";
+import { recoverNetworkOperation } from "./network_recovery.ts";
 import {
   DEFAULT_NETWORK_RECOVERY_CONFIG,
   resolveNetworkRecoveryConfig,
@@ -742,6 +744,174 @@ function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortS
   return AbortSignal.any(available);
 }
 
+/** Retains the full worker result while exposing its provider error to the shared classifier. */
+class WorkerNetworkFailure extends Error {
+  readonly outcome: SessionOutcome;
+
+  constructor(outcome: SessionOutcome) {
+    const message = outcome.error ?? "worker network operation failed";
+    super(message, { cause: workerFailureValue(outcome) });
+    this.name = "WorkerNetworkFailure";
+    this.outcome = outcome;
+  }
+}
+
+interface WorkerRecoveryExecutionOptions {
+  workerOptions: RunWorkerTaskOptions;
+  run: (options: RunWorkerTaskOptions) => Promise<SessionOutcome>;
+  taskResultPath: string;
+  networkRecovery: Readonly<NetworkRecoveryConfig>;
+  signal?: AbortSignal;
+  onInterruption?: (outcome: SessionOutcome) => void;
+}
+
+/**
+ * Run one ordinary worker attempt, replacing only transport-failed sessions.
+ * Pi owns bounded request retries inside session.prompt(); therefore an outcome
+ * reaches this boundary only after those retries have settled. Coordinator
+ * probes retain the same task/attempt and always receive a recovery prompt.
+ */
+async function runWorkerAttemptWithNetworkRecovery(options: WorkerRecoveryExecutionOptions): Promise<SessionOutcome> {
+  const interrupted: SessionOutcome[] = [];
+  const thrownErrors = new Map<SessionOutcome, unknown>();
+  const execute = async (workerOptions: RunWorkerTaskOptions): Promise<SessionOutcome> => {
+    try {
+      return await options.run(workerOptions);
+    } catch (error) {
+      const outcome = buildWorkerSessionCreationFailureOutcome(workerOptions, error);
+      thrownErrors.set(outcome, error);
+      return outcome;
+    }
+  };
+  const recordRecoverableInterruption = async (outcome: SessionOutcome): Promise<void> => {
+    await appendNetworkInterruptionEvidence(options.taskResultPath, outcome, interrupted.length + 1);
+    interrupted.push(outcome);
+    options.onInterruption?.(outcome);
+  };
+
+  const initial = await execute(options.workerOptions);
+  const initialFailure = workerFailureValue(initial);
+  const initialClassification = initialFailure === undefined ? undefined : classifyNetworkFailure(initialFailure);
+  if (initialClassification && isFailFastWorkerFailure(initialClassification.reason)) {
+    throw new WorkerNetworkFailure(initial);
+  }
+  if (!options.networkRecovery.enabled || !initialClassification?.recoverable) {
+    if (thrownErrors.has(initial)) throw thrownErrors.get(initial);
+    return initial;
+  }
+  await recordRecoverableInterruption(initial);
+
+  try {
+    const recovered = await recoverNetworkOperation({
+      initialFailure: new WorkerNetworkFailure(initial),
+      config: options.networkRecovery,
+      signal: options.signal,
+      retry: async ({ retryCount, signal }) => {
+        const previous = interrupted.at(-1)!;
+        const resumed = await execute({
+          ...options.workerOptions,
+          // The recovery signal includes both run cancellation and the outage
+          // deadline without replacing the assignment/steering cancellation.
+          abortSignal: combineAbortSignals(options.workerOptions.abortSignal, signal),
+          networkRecoveryContext: {
+            retryCount,
+            durableEvidencePath: options.taskResultPath,
+            priorSessionId: previous.sessionId,
+            failure: previous.error ?? "transient provider or transport failure",
+          },
+        });
+        const resumedFailure = workerFailureValue(resumed);
+        const classification = resumedFailure === undefined ? undefined : classifyNetworkFailure(resumedFailure);
+        if (classification?.recoverable) {
+          await recordRecoverableInterruption(resumed);
+        }
+        if (resumed.error) {
+          if (
+            thrownErrors.has(resumed) &&
+            !classification?.recoverable &&
+            !isFailFastWorkerFailure(classification!.reason)
+          ) {
+            throw thrownErrors.get(resumed);
+          }
+          throw new WorkerNetworkFailure(resumed);
+        }
+        return resumed;
+      },
+    });
+    return mergeWorkerRecoveryOutcomes(interrupted, recovered.value);
+  } catch (error) {
+    // If connectivity recovered but the fresh session failed deterministically,
+    // hand its outcome back to the ordinary worker failure path immediately.
+    if (error instanceof WorkerNetworkFailure) {
+      const merged = mergeWorkerRecoveryOutcomes(interrupted, error.outcome);
+      const mergedFailure = workerFailureValue(merged);
+      const classification = mergedFailure === undefined ? undefined : classifyNetworkFailure(mergedFailure);
+      if (classification && isFailFastWorkerFailure(classification.reason)) {
+        throw new WorkerNetworkFailure(merged);
+      }
+      return merged;
+    }
+    throw error;
+  }
+}
+
+function workerFailureValue(outcome: SessionOutcome): unknown {
+  return outcome.failure ?? outcome.error;
+}
+
+function isFailFastWorkerFailure(reason: ReturnType<typeof classifyNetworkFailure>["reason"]): boolean {
+  return [
+    "authentication",
+    "authorization",
+    "billing",
+    "quota_exhausted",
+    "invalid_model",
+    "invalid_request",
+    "http_client_error",
+    "non_retryable_server_error",
+  ].includes(reason);
+}
+
+function mergeWorkerRecoveryOutcomes(interrupted: readonly SessionOutcome[], final: SessionOutcome): SessionOutcome {
+  if (interrupted.length === 0) return final;
+  const usage = addWorkerUsage([...interrupted.map((item) => item.workerUsage), final.workerUsage]);
+  return {
+    ...final,
+    startedAt: interrupted[0].startedAt,
+    contextObservations: [
+      ...interrupted.flatMap((item, index) => [
+        `network interruption ${index + 1}: ${item.error ?? "transient provider or transport failure"}`,
+        ...item.contextObservations,
+      ]),
+      ...final.contextObservations,
+    ],
+    compactionEvents: [...interrupted.flatMap((item) => item.compactionEvents), ...final.compactionEvents],
+    events: [...interrupted.flatMap((item) => item.events), ...final.events],
+    workerCostTotal: [...interrupted, final].reduce((total, item) => total + item.workerCostTotal, 0),
+    workerCostSource: "network_recovery_aggregate",
+    workerUsage: usage,
+    sessionDiagnostics: [
+      ...interrupted.flatMap((item) => item.sessionDiagnostics ?? []),
+      ...(final.sessionDiagnostics ?? []),
+    ],
+  };
+}
+
+function addWorkerUsage(values: Array<WorkerUsageTotals | undefined>): WorkerUsageTotals | undefined {
+  const available = values.filter((value): value is WorkerUsageTotals => Boolean(value));
+  if (available.length === 0) return undefined;
+  return available.reduce<WorkerUsageTotals>(
+    (total, value) => ({
+      input: total.input + value.input,
+      output: total.output + value.output,
+      cacheRead: total.cacheRead + value.cacheRead,
+      cacheWrite: total.cacheWrite + value.cacheWrite,
+      total: total.total + value.total,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  );
+}
+
 export function workerSessionHealthForOutcome(
   outcome: Pick<SessionOutcome, "timedOut" | "aborted" | "error" | "assistantText">,
   cancelled = false,
@@ -976,18 +1146,38 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         },
       };
       let outcome: SessionOutcome;
+      const networkInterruptedOutcomes: SessionOutcome[] = [];
       try {
-        outcome = workerSessionOwner
-          ? await workerSessionOwner.run(workerOptions, assignmentIdentity)
-          : await runtime.workerRunner(workerOptions);
+        outcome = await runWorkerAttemptWithNetworkRecovery({
+          workerOptions,
+          run: (resumedOptions) =>
+            workerSessionOwner
+              ? workerSessionOwner.run(resumedOptions, assignmentIdentity)
+              : runtime.workerRunner(resumedOptions),
+          taskResultPath: runtime.taskResultPath,
+          networkRecovery: runtime.networkRecovery,
+          signal: workerOptions.abortSignal,
+          onInterruption: (interrupted) => networkInterruptedOutcomes.push(interrupted),
+        });
       } catch (error) {
         if (!assignmentState.obsolete) {
+          const terminalOutcome = error instanceof WorkerNetworkFailure ? error.outcome : undefined;
+          if (terminalOutcome || networkInterruptedOutcomes.length > 0) {
+            finalizeWorkerCost(runtime.workerCostState, accountingWorker, {
+              workerCostTotal:
+                terminalOutcome?.workerCostTotal ??
+                networkInterruptedOutcomes.reduce((total, interrupted) => total + interrupted.workerCostTotal, 0),
+            });
+          }
           throw error;
         }
         // A cancellation-aware custom runner may reject instead of returning
         // an aborted outcome. Preserve historical evidence, but never let that
         // obsolete rejection terminate or update the replacement assignment.
-        outcome = buildWorkerSessionCreationFailureOutcome(workerOptions, error);
+        outcome = mergeWorkerRecoveryOutcomes(
+          networkInterruptedOutcomes,
+          buildWorkerSessionCreationFailureOutcome(workerOptions, error),
+        );
         outcome.aborted = true;
       }
       finalizeWorkerCost(runtime.workerCostState, accountingWorker, outcome);
@@ -2257,6 +2447,43 @@ async function appendCommitNote(pathname: string, result: CommitAfterSessionResu
   } else {
     lines.push(`Commit skipped: ${result.skipped ?? "no staged diff"}.`);
   }
+  await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function appendNetworkInterruptionEvidence(
+  pathname: string,
+  outcome: SessionOutcome,
+  networkRetry: number,
+): Promise<void> {
+  const summary = extractResultSummary(outcome.assistantText || "").trim() || "TASK_RESULT:\nstatus: unknown";
+  const lines = [
+    "",
+    `## TODO ${outcome.task.taskId} — ${outcome.task.title} (ordinary attempt ${outcome.attempt}, network interruption ${networkRetry})`,
+    "",
+    "Disposition: transient provider/transport failure; this is durable evidence, not an ordinary task attempt.",
+    `Started: ${outcome.startedAt}`,
+    `Ended: ${outcome.endedAt}`,
+    `Worker error: ${outcome.error ?? "transient provider or transport failure"}`,
+  ];
+  if (outcome.sessionId) lines.push(`Session ID: ${outcome.sessionId}`);
+  if (outcome.sessionFile) lines.push(`Session file: ${outcome.sessionFile}`);
+  if (outcome.workerCostSource || outcome.workerCostTotal > 0) {
+    lines.push(`Worker cost: ${outcome.workerCostTotal} (${outcome.workerCostSource ?? "unavailable"})`);
+  }
+  if (outcome.workerUsage) {
+    lines.push(
+      `Worker token usage: input=${outcome.workerUsage.input}, output=${outcome.workerUsage.output}, cacheRead=${outcome.workerUsage.cacheRead}, cacheWrite=${outcome.workerUsage.cacheWrite}, total=${outcome.workerUsage.total}`,
+    );
+  }
+  lines.push(
+    "",
+    "Safety: the replacement session must inspect the working tree and this evidence before continuing; completed side effects must not be blindly replayed.",
+    "",
+    "```text",
+    summary,
+    "```",
+    "",
+  );
   await appendFile(pathname, `${lines.join("\n")}\n`, "utf8");
 }
 

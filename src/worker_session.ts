@@ -11,12 +11,22 @@ import {
 import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
 import type { Task } from "./todo_parser.ts";
 
+export interface WorkerNetworkRecoveryContext {
+  /** One-based coordinator network retry count; this is not a task attempt. */
+  retryCount: number;
+  durableEvidencePath: string;
+  priorSessionId?: string;
+  failure: string;
+}
+
 export interface WorkerTaskPromptOptions {
   todoPath: string;
   task: Pick<Task, "taskId" | "title" | "section">;
   attempt: number;
   commitRequested: boolean;
   previousAttempts?: string;
+  /** Continuity supplied only when a failed transport session is replaced. */
+  networkRecoveryContext?: WorkerNetworkRecoveryContext;
   globalInstructions?: string;
   goal?: string;
   maxBashTimeoutSeconds: number;
@@ -44,6 +54,18 @@ Previous attempts for this same assigned task are below. Use them only as contin
 \`\`\`text
 ${previousAttempts}
 \`\`\`
+`
+    : "";
+
+  const recovery = options.networkRecoveryContext;
+  const recoveryText = recovery
+    ? `
+Network recovery continuation (network retry ${recovery.retryCount}, still ordinary task attempt ${options.attempt}):
+- The prior worker session ended only after Pi's bounded provider-request retries were exhausted: ${recovery.failure}
+- Durable interruption evidence was recorded in \`${recovery.durableEvidencePath}\`${recovery.priorSessionId ? ` for session \`${recovery.priorSessionId}\`` : ""}.
+- The prior session may already have completed tool calls and changed the working tree. Inspect the durable evidence and current files before acting.
+- Continue this same TODO from its current state. Never blindly replay prior edits, commands, commits, external writes, or other side effects.
+- Report one final TASK_RESULT for the assignment only after verifying what remains.
 `
     : "";
 
@@ -94,7 +116,7 @@ Rules:
 - Do not run bash commands with timeout greater than ${options.maxBashTimeoutSeconds.toFixed(0)} seconds. For long full-suite checks, run once with a bounded timeout and report any timeout/failure in TASK_RESULT instead of continuing indefinitely.
 - If TODO-file global instructions restrict scope, obey them strictly. If the task appears to require out-of-scope code changes, stop and report \`status: blocked\` instead of changing those files.
 
-${globalText}Assigned task content only:
+${globalText}${recoveryText}Assigned task content only:
 
 \`\`\`markdown
 ${options.task.section.trimEnd()}
@@ -356,6 +378,8 @@ export interface SessionOutcome {
   timedOut: boolean;
   aborted: boolean;
   error?: string;
+  /** Original provider/transport failure retained for coordinator classification. */
+  failure?: unknown;
 }
 
 export function buildMissingTaskResultMessage(): string {
@@ -515,6 +539,7 @@ export async function runWorkerTaskAssignment(
   let timedOut = false;
   let aborted = false;
   let error: string | undefined;
+  let failure: unknown;
   let finished = false;
   let turnCount = 0;
   let messageUsageCostTotal = 0;
@@ -640,6 +665,7 @@ export async function runWorkerTaskAssignment(
       },
       (exc: unknown) => {
         settled = true;
+        failure ??= exc;
         error = error ?? errorMessage(exc);
         resolvePromptWait?.();
         resolvePromptWait = undefined;
@@ -776,6 +802,7 @@ export async function runWorkerTaskAssignment(
       assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
     }
   } catch (exc) {
+    failure ??= exc;
     error = error ?? errorMessage(exc);
   } finally {
     finished = true;
@@ -826,6 +853,7 @@ export async function runWorkerTaskAssignment(
     timedOut,
     aborted: aborted || cancelled,
     error,
+    ...(failure === undefined ? {} : { failure }),
   };
 }
 
@@ -875,6 +903,7 @@ export function buildWorkerSessionCreationFailureOutcome(
     timedOut: false,
     aborted: Boolean(options.abortSignal?.aborted),
     error: message,
+    failure: error,
   };
 }
 
