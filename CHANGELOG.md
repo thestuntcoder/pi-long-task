@@ -2,6 +2,24 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## Unreleased
+
+### Added
+
+- Add opt-in coordinator-level recovery after Pi exhausts its bounded provider retries, with configurable jittered backoff, a bounded five-minute outage window by default, and an indefinite wait-until-cancelled mode.
+- Show `Waiting for connection…` lifecycle status with retry and outage timing across worker, TODO planning, steering, goal planning/discovery, and review operations.
+- Classify transient transport, timeout, stream, overload, rate-limit, and retryable server failures while failing fast for authentication, authorization, billing, quota, invalid request/model, certificate, cancellation, and unknown failures.
+
+### Changed
+
+- Preserve TODO identity, ordinary attempt counts, durable evidence, accepted steering, working-tree changes, goal-loop state, and cost accounting while network recovery is active.
+- Exclude network-recovery time and retries from worker, planner, reviewer, goal-loop timeout and retry budgets; rotate interrupted sessions before safely resuming the same operation.
+
+### Security and reliability
+
+- Prevent blind replay of completed side-effectful worker actions by recording interruption evidence and requiring fresh continuation sessions to inspect durable state before acting.
+- Keep cancellation immediate during backoff and retry execution, with exact-once cleanup of recovery timers, listeners, sessions, and status resources.
+
 ## 0.5.0 - 2026-08-31
 
 ### Added
