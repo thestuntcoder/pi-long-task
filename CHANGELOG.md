@@ -2,6 +2,28 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## Unreleased
+
+### Added
+
+- Expose optional `todoTimeoutMs` and `todoGracefulShutdownMs` settings on both tools and their goal-loop plumbing, with friendly natural-language/global directives and structured-option precedence.
+- Add deterministic adaptive TODO-planner budgets: a 5-minute base for up to four detected items, 30 seconds per additional item, and a 15-minute cap for explicit item counts, enumerated deliverables, or separately planned tasks.
+- Report effective planner budgets, adaptive reasons, bounded elapsed/remaining updates, and grace-period entry consistently across TUI, CLI/headless progress, structured results, and run diagnostics.
+- Warn when requests explicitly require Chrome/browser extensions or direct tools unavailable to isolated workers, constrain generated plans to available alternatives, and require blocked results when the exact capability is mandatory.
+- Record whether partial planner output was observed on timeout or cancellation without exposing its content, and distinguish planner network-recovery lifecycle data from deadline failures.
+
+### Changed
+
+- Use `high` instead of `xhigh` as the planner-only default thinking level, while forwarding every explicit programmatic thinking override unchanged.
+- Make creation and repair prompts concise and planning-only so planners preserve constraints without performing implementation, research, or creative deliverables.
+- Continue observing a stopping planner during the configured grace period and accept only a safe, complete, valid TODO plan that settles there.
+- Keep planner deadlines, grace periods, network outage recovery, and caller cancellation on distinct clocks and diagnostic paths. Network waits do not mutate the configured per-attempt planning budget, and cancellation is never reported as timeout.
+
+### Compatibility
+
+- Existing `pi_long_task`, `pi_goal_task`, `runCoordinator()`, and direct planner calls remain valid when the new options are omitted; defaults and result/schema additions are backward-compatible.
+- Explicit timeout and grace values remain authoritative, including explicit `xhigh` planner thinking for programmatic callers. Existing worker, goal-discovery, reviewer, attempt, and network-recovery defaults are unchanged.
+
 ## 0.6.0 - 2026-09-05
 
 ### Added

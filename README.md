@@ -290,6 +290,53 @@ await runCoordinator({
 
 Explicit, complete `status: partial` results may continue in the same healthy, compatible, below-threshold session on the next attempt. All independent retries—including timeout, abort, cancellation, errors, invalid/incomplete results, and non-partial failures—start fresh. Existing retry limits and delays are unchanged. Setting `workerSessionReuse: false` (or the disabling directive) always isolates assignments.
 
+### TODO planner budgets, grace, and thinking
+
+TODO planning starts with a **5-minute** budget. When no timeout is configured, Pi Long Task deterministically extends that budget for requests containing an explicit item count, enumerated deliverables, or language requiring items to be planned separately. The first four detected items fit in the base budget; each additional item adds **30 seconds**, up to a **15-minute** maximum. For example, a request for 24 separately planned stories receives the capped 15-minute budget. This calculation uses textual scale signals rather than model judgment.
+
+Set an exact budget and grace period in an explicit tool call when needed:
+
+```text
+Use pi_long_task with inputText "plan and implement the checkout migration" and commit false and todoTimeoutMs 720000 and todoGracefulShutdownMs 30000.
+```
+
+The tool schema uses whole milliseconds. The same settings can be written in `inputText` or pasted TODO global instructions with friendly units:
+
+```text
+TODO planner timeout: 12m
+TODO planner graceful shutdown: 30s
+```
+
+A positive timeout is required. Grace defaults to **15 seconds**, may be zero to disable it, and starts only after the planner deadline. Both values are bounded by the runtime timer maximum (about 24.9 days). Configuration precedence is:
+
+1. structured `todoTimeoutMs` and `todoGracefulShutdownMs` options
+2. recognized natural-language or global directives
+3. adaptive timeout and the default grace period
+
+An explicit timeout remains exact and bypasses adaptive scaling. Omitting the new options preserves the previous call shape. The selected budget is returned additively as `plannerBudget`, including its source, detected signals, and extension reason when applicable.
+
+The planner-only thinking default is **`high`**, chosen to balance plan quality and latency. This does not change worker, discovery, or reviewer defaults. Programmatic `runCoordinator()` callers may set `todoThinking` explicitly; every supported Pi level is forwarded unchanged, including `xhigh`:
+
+```ts
+await runCoordinator({
+  commit: false,
+  inputText: "Create 24 separately planned tasks for the migration.",
+  todoTimeoutMs: 12 * 60_000,
+  todoGracefulShutdownMs: 30_000,
+  todoThinking: "xhigh",
+});
+```
+
+Before planning, CLI/TUI and headless progress report the effective budget in friendly units and explain any adaptive extension. Three bounded updates report elapsed and remaining time. If the deadline is reached, progress announces the grace period and its duration rather than appearing frozen.
+
+A grace period is not an extra general-purpose planning budget. It asks the active planner to stop and allows a safe, complete TODO plan already finishing to settle. Invalid or truncated output still fails. Timeout and cancellation diagnostics record only whether partial output was observed; they do not expose the partial text.
+
+### Isolated workers and browser capabilities
+
+Pi Long Task workers are isolated SDK sessions. Extensions loaded in the parent Pi session are deliberately disabled in workers, and workers receive only the direct `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` tools. Consequently, a worker cannot silently use a Chrome/browser extension, Chrome DevTools MCP, or an unlisted browser tool merely because it is available in the parent session.
+
+When a request explicitly requires one of those unavailable capabilities, Pi Long Task emits an actionable warning, includes an isolated-worker constraint in planning, and returns the additive `capabilityWarnings` details. The run may continue when a safe available alternative is equivalent—for example, fetching public content with a supported command-line mechanism through `bash`, running project-provided browser automation through `bash`, or supplying page/source content for local reading. If the exact extension or browser tool is mandatory, the affected task must report `blocked` instead of claiming it used the tool. Merely asking workers to implement a browser extension does not by itself claim that the extension must be loaded during the run.
+
 ### Coordinator-level network recovery
 
 Network recovery is **disabled by default** for backward compatibility. When enabled, it begins only after Pi has exhausted its own bounded provider-request retries. Pi Long Task then uses jittered exponential backoff starting at **1 second**, capped at **30 seconds**, for a maximum continuous outage of **5 minutes**. During recovery, progress displays `Waiting for connection…` with the retry number, next retry delay, or elapsed outage time. Cancellation interrupts both backoff waits and in-flight recovery calls immediately.
@@ -351,9 +398,16 @@ Recovery is deliberately narrow. Recoverable failures include failed fetches; DN
 
 Authentication and authorization failures, billing or credit failures, exhausted account/usage quota, invalid models, malformed or unsupported requests, context-length and content-policy failures, most other 4xx responses, non-retryable server responses, certificate/configuration failures, coordinator timeouts, cancellation, and unknown errors fail immediately through the existing error path. Deterministic evidence wins over transient-looking wrapper text—for example, a 429 response that says the account quota is exhausted is not treated as temporary rate limiting.
 
-#### Timeouts, limits, and preserved state
+#### Planner deadline, grace, recovery, and cancellation
 
-Network retries have their own counter and outage window. Recovery waits do not consume TODO attempts, planner repair retries, reviewer retries, or goal-loop iterations. Time attributed to network recovery is excluded from worker, TODO-planner, reviewer, goal-iteration, and overall goal-loop timeout budgets; while connectivity is unavailable, `maxOutageMs` (or cancellation in indefinite mode) is the recovery limit. Once the operation resumes, its ordinary timeout and retry rules still apply. If the outage window expires, the run fails with the last classified network failure retained as evidence.
+These controls have separate clocks and outcomes:
+
+- The **planner deadline** bounds each provider attempt using the effective adaptive or explicit planning budget.
+- The **grace period** begins only when that deadline is reached and only collects a safely completed plan from the stopping attempt.
+- **Network recovery** has its own outage clock and retry counter. Recovery wait does not consume or silently extend the per-attempt planner deadline; each fresh provider attempt receives the same configured planning budget.
+- **Cancellation** takes priority during active planning, grace, or recovery. It stops promptly and is reported as cancellation, not as timeout or network failure.
+
+Network retries do not consume TODO attempts, planner repair retries, reviewer retries, or goal-loop iterations. Time attributed to network recovery is excluded from worker, TODO-planner, reviewer, goal-iteration, and overall goal-loop timeout budgets; while connectivity is unavailable, `maxOutageMs` (or cancellation in indefinite mode) is the recovery limit. Once the operation resumes, its ordinary timeout and retry rules still apply. Because retries can add wall-clock time, progress labels them separately as planner network recovery and states that the per-attempt deadline is unchanged. If the outage window expires, the run fails with the last classified network failure retained as evidence.
 
 Completed TODOs, current TODO identity and ordinary attempt number, durable attempt evidence, working-tree changes, accepted steering revisions, accumulated costs, and persisted goal/review state remain intact across an outage. An interrupted worker resumes the same TODO in a fresh session: the errored session is rotated, and the continuation is told to inspect the result artifact and current files before acting. This avoids blindly replaying already completed tool calls. The coordinator does not roll back external side effects, so tasks that call non-idempotent external systems should record durable completion/idempotency evidence that a resumed worker can verify.
 
@@ -372,8 +426,11 @@ Pi session statistics can be cumulative across reused assignments. `outcomes[].w
 
 ## Feature reference
 
+- **Adaptive TODO-planner budgets:** deterministically extend the normal 5-minute budget for explicit large item sets, up to 15 minutes, while preserving exact caller overrides.
+- **Visible planner timing:** report effective budget, extension reason, elapsed/remaining time, grace entry, and safe partial-output diagnostics across CLI/TUI and headless progress.
+- **Capability-aware planning:** warn when isolated workers are explicitly asked to use disabled extensions or unavailable browser tools, then constrain the plan to honest alternatives or a blocked result.
 - **Adaptive worker-session reuse:** reuse healthy compatible sessions below the 62.5% default context threshold, while preserving task boundaries and rotating conservatively.
-- **Optional network recovery:** wait through classified transient provider/transport outages without consuming ordinary attempts, while keeping deterministic failures fail-fast and cancellation immediate.
+- **Optional network recovery:** wait through classified transient provider/transport outages without consuming ordinary attempts, while keeping planner deadlines unchanged, deterministic failures fail-fast, and cancellation immediate.
 - **Real Pi TUI sidebar:** in TUI sessions, every TODO appears in a registered sidebar/widget with past, current, and future statuses so you can distinguish completed, active, upcoming, failed, blocked, and remaining work at a glance.
 - **Main-thread worker activity:** the active worker still streams commands, edits, verification, and its per-task `TASK_RESULT` back into the main Pi conversation; the sidebar does not replace tool-result rendering.
 - **Cost visibility:** worker spend is included in Pi Long Task progress and is added to the main Pi `$ spent` total when cost data is available.
@@ -486,17 +543,20 @@ Safety controls:
 - tool cancellation is passed through, bounded locally even if an SDK prompt does not settle after abort, and stops the loop with `cancelled` status.
 - `networkRecovery` applies the same coordinator recovery policy to discovery, TODO generation/execution, and review; its wait time is excluded from goal-loop deadlines and iteration counts.
 - `maxAttemptsPerTask` and `maxBashTimeoutMs` are forwarded to worker long-task runs.
+- `todoTimeoutMs` and `todoGracefulShutdownMs` are forwarded to child long-task planning and plan revisions with the same precedence and validation described below.
 - `commit` controls whether implementation workers may commit; goal loops default to `commit true`, so pass `commit false` when you want to review all changes first.
 
 ## Options
 
-`pi_long_task` has one required input and three optional inputs:
+`pi_long_task` has one required input and five optional inputs:
 
 ```ts
 {
   commit: boolean;
   inputText?: string;
   goal?: string;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   networkRecovery?: {
     enabled?: boolean;
     baseDelayMs?: number;
@@ -509,7 +569,11 @@ Safety controls:
 - `commit` controls whether Pi Long Task may create git commits.
 - `inputText` optionally provides the request or TODO markdown to work on.
 - `goal` optionally provides a high-level desired outcome that is passed to TODO planning and worker task prompts. Coverage goals such as `have testing line coverage above 80%` add coverage-specific planning and verification guidance.
+- `todoTimeoutMs` optionally sets the exact positive whole-millisecond planner deadline. When omitted, deterministic adaptive budgeting applies.
+- `todoGracefulShutdownMs` optionally sets the non-negative whole-millisecond grace period after the planner deadline; it defaults to 15 seconds.
 - `networkRecovery` optionally enables and tunes coordinator-level transient network recovery. See [Coordinator-level network recovery](#coordinator-level-network-recovery) for defaults and safety behavior.
+
+See [TODO planner budgets, grace, and thinking](#todo-planner-budgets-grace-and-thinking) for precedence, directives, and programmatic thinking overrides.
 
 `pi_goal_task` accepts a high-level goal plus safety controls:
 
@@ -524,6 +588,8 @@ Safety controls:
   reviewerTimeoutMs?: number;
   maxAttemptsPerTask?: number;
   maxBashTimeoutMs?: number;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   networkRecovery?: {
     enabled?: boolean;
     baseDelayMs?: number;
@@ -611,7 +677,8 @@ That smoke test creates disposable git repos and verifies both `commit: false` a
 ## Limitations and expectations
 
 - Tasks run sequentially, one TODO at a time; Pi Long Task prioritizes task isolation, progress tracking, and safe handoff over parallel execution. Adaptive reuse may share the underlying SDK session only while policy checks remain safe.
-- Natural-language TODO planning has a bounded time budget (five minutes by default, with a short graceful-shutdown request). If planning times out or is aborted before a valid plan exists, the run fails before worker tasks start and records planner diagnostics in `TASK_RESULT.md`.
+- Natural-language TODO planning has a bounded 5-minute base budget, which can adapt deterministically up to 15 minutes or be overridden explicitly, followed by a 15-second grace period by default. If no valid plan settles, the run fails before worker tasks start and records timeout/cancellation and safe partial-output-presence diagnostics in `TASK_RESULT.md`.
+- Isolated workers cannot load parent-session extensions or unavailable Chrome/browser tools. Explicit requirements produce a warning and planning constraint; exact mandatory capability requirements may leave the affected task blocked.
 - If the planner returns invalid TODO markdown, Pi Long Task makes one repair attempt. A second invalid response fails planning with diagnostics instead of guessing at a plan.
 - Real runs require usable Pi model credentials, such as a working Pi login or API key for the selected model. Network recovery does not retry invalid or exhausted credentials, billing failures, or account quota exhaustion.
 - Worker spend is added to the main Pi `$ spent` total as cost-only usage. Token counts are not merged into the main thread because worker sessions have separate context windows, and merging their token usage would corrupt the main conversation's context statistics.
