@@ -31,6 +31,31 @@ assert.deepEqual(
 assert.deepEqual(parseWorkerRuntimeConfig("Implement the feature normally."), {});
 
 assert.deepEqual(
+  parseWorkerRuntimeConfig(`TODO planner timeout: 7m
+TODO planner graceful shutdown: 25s
+Worker timeout: 45m`),
+  {
+    taskTimeoutMs: 45 * 60 * 1000,
+    todoTimeoutMs: 7 * 60 * 1000,
+    todoGracefulShutdownMs: 25 * 1000,
+  },
+);
+assert.deepEqual(parseWorkerRuntimeConfig("Use a planning timeout of 90s and a planner grace period of 0s."), {
+  todoTimeoutMs: 90 * 1000,
+  todoGracefulShutdownMs: 0,
+});
+
+for (const directive of [
+  "TODO planner timeout: 0ms",
+  "TODO planner timeout: -1s",
+  "TODO planner timeout: 30d",
+  "TODO planner graceful shutdown: -1s",
+  "TODO planner graceful shutdown: 2147483648ms",
+]) {
+  assert.throws(() => parseWorkerRuntimeConfig(directive), /TODO planner/);
+}
+
+assert.deepEqual(
   parseWorkerRuntimeConfig(`Worker session reuse: disabled
 Worker session reuse context threshold: 64%`),
   {

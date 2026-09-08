@@ -45,6 +45,8 @@ try {
     capturedOptions = options;
     assert.equal(options.commit, false);
     assert.equal(options.goal, "Create an observable sample file");
+    assert.equal(options.todoTimeoutMs, 345_678);
+    assert.equal(options.todoGracefulShutdownMs, 4_321);
     assert.match(options.runId ?? "", /goal-execution-todo-worker-01/);
     assert.match(options.inputText ?? "", /TODO 1 — Create sample file/);
     assert.equal(typeof options.taskTimeoutMs, "number");
@@ -92,6 +94,8 @@ try {
     cwd: tempRoot,
     longTaskRunner: fakeLongTaskRunner,
     commit: false,
+    todoTimeoutMs: 345_678,
+    todoGracefulShutdownMs: 4_321,
     now: () => new Date("2026-06-25T10:00:03.000Z"),
   });
 

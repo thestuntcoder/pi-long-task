@@ -3,11 +3,14 @@ import {
   resolveNetworkRecoveryConfig,
   type NetworkRecoveryConfigInput,
 } from "./network_recovery_config.ts";
+import { MAX_PLANNER_DURATION_MS, PlannerDurationConfigError } from "./planner_config.ts";
 
 export interface ParsedWorkerRuntimeConfig {
   modelName?: string;
   maxAttemptsPerTask?: number;
   taskTimeoutMs?: number;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   maxBashTimeoutMs?: number;
   workerSessionReuseEnabled?: boolean;
   workerSessionReuseContextThresholdPercent?: number;
@@ -52,6 +55,8 @@ export function parseWorkerRuntimeConfig(text: string): ParsedWorkerRuntimeConfi
     ...(modelName ? { modelName } : {}),
     ...(state.maxAttemptsPerTask !== undefined ? { maxAttemptsPerTask: state.maxAttemptsPerTask } : {}),
     ...(state.taskTimeoutMs !== undefined ? { taskTimeoutMs: state.taskTimeoutMs } : {}),
+    ...(state.todoTimeoutMs !== undefined ? { todoTimeoutMs: state.todoTimeoutMs } : {}),
+    ...(state.todoGracefulShutdownMs !== undefined ? { todoGracefulShutdownMs: state.todoGracefulShutdownMs } : {}),
     ...(state.maxBashTimeoutMs !== undefined ? { maxBashTimeoutMs: state.maxBashTimeoutMs } : {}),
     ...(state.workerSessionReuseEnabled !== undefined
       ? { workerSessionReuseEnabled: state.workerSessionReuseEnabled }
@@ -135,14 +140,36 @@ function parseNaturalLanguageDirectives(text: string, state: MutableWorkerRuntim
 
   captureDurations(
     text,
-    /\b(?<!bash\s)(?<!max\s)(?:worker\s+|task\s+)?timeout\s*(?:is|=|:|to|of)?\s*(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?)/gi,
+    /\b(?:todo\s+)?(?:planner|planning)\s+timeout\s*(?:is|=|:|to|of)?\s*(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?)/gi,
+    (value) => {
+      state.todoTimeoutMs = value;
+    },
+  );
+  captureDurations(
+    text,
+    /\b(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h))\s+(?:todo\s+)?(?:planner|planning)\s+timeout\b/gi,
+    (value) => {
+      state.todoTimeoutMs = value;
+    },
+  );
+  captureDurations(
+    text,
+    /\b(?:todo\s+)?(?:planner|planning)\s+(?:grace(?:ful)?(?:\s+shutdown|\s+period)?|shutdown\s+grace(?:\s+period)?)\s*(?:duration\s*)?(?:is|=|:|to|of)?\s*(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?)/gi,
+    (value) => {
+      state.todoGracefulShutdownMs = value;
+    },
+    { allowZero: true },
+  );
+  captureDurations(
+    text,
+    /\b(?<!bash\s)(?<!max\s)(?<!planner\s)(?<!planning\s)(?:worker\s+|task\s+)?timeout\s*(?:is|=|:|to|of)?\s*(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?)/gi,
     (value) => {
       state.taskTimeoutMs = value;
     },
   );
   captureDurations(
     text,
-    /\b(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h))\s+(?:worker\s+|task\s+)?timeout\b/gi,
+    /\b(\d+(?:\.\d+)?\s*(?:milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h))[ \t]+(?:worker[ \t]+|task[ \t]+)?timeout\b/gi,
     (value) => {
       state.taskTimeoutMs = value;
     },
@@ -215,6 +242,16 @@ function applyDirective(key: string, value: string, state: MutableWorkerRuntimeC
     return;
   }
 
+  if (/\b(?:planner|planning)\b/.test(key) && /\b(?:grace|graceful|shutdown)\b/.test(key)) {
+    state.todoGracefulShutdownMs = requiredPlannerDuration("graceful-shutdown duration", value, true);
+    return;
+  }
+
+  if (/\b(?:planner|planning)\b/.test(key) && /\btimeout\b/.test(key)) {
+    state.todoTimeoutMs = requiredPlannerDuration("timeout", value, false);
+    return;
+  }
+
   if (/\bbash\b/.test(key) && /\btimeout\b/.test(key)) {
     const timeout = durationMsFromText(value, { allowBareSeconds: true });
     if (timeout !== undefined) {
@@ -268,6 +305,23 @@ function applyNetworkRecoveryDirective(key: string, value: string, state: Mutabl
   throw new NetworkRecoveryConfigError(`Unknown network recovery configuration directive: ${key}.`);
 }
 
+function requiredPlannerDuration(label: string, value: string, allowZero: boolean): number {
+  const trimmed = trimDirectiveValue(value)
+    .replace(/[.!]+$/g, "")
+    .trim();
+  const match = /^(\d+(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?$/i.exec(
+    trimmed,
+  );
+  const milliseconds = match ? durationMsFromText(trimmed, { allowBareSeconds: true, allowZero }) : undefined;
+  if (milliseconds === undefined || milliseconds > MAX_PLANNER_DURATION_MS) {
+    const minimum = allowZero ? "non-negative" : "positive";
+    throw new PlannerDurationConfigError(
+      `TODO planner ${label} must be a ${minimum} finite duration no greater than about 24.9 days (${MAX_PLANNER_DURATION_MS} milliseconds), for example 30s or 5m.`,
+    );
+  }
+  return milliseconds;
+}
+
 function requiredNetworkRecoveryDuration(label: string, value: string): number {
   const trimmed = trimDirectiveValue(value)
     .replace(/[.!]+$/g, "")
@@ -307,9 +361,17 @@ function captureNumbers(text: string, pattern: RegExp, apply: (value: number) =>
   }
 }
 
-function captureDurations(text: string, pattern: RegExp, apply: (value: number) => void): void {
+function captureDurations(
+  text: string,
+  pattern: RegExp,
+  apply: (value: number) => void,
+  options: { allowZero?: boolean } = {},
+): void {
   for (const match of text.matchAll(pattern)) {
-    const value = durationMsFromText(match[1] ?? "", { allowBareSeconds: true });
+    const value = durationMsFromText(match[1] ?? "", {
+      allowBareSeconds: true,
+      allowZero: options.allowZero,
+    });
     if (value !== undefined) {
       apply(value);
     }
@@ -373,7 +435,10 @@ function booleanSetting(value: string): boolean | undefined {
   return undefined;
 }
 
-function durationMsFromText(value: string, options: { allowBareSeconds: boolean }): number | undefined {
+function durationMsFromText(
+  value: string,
+  options: { allowBareSeconds: boolean; allowZero?: boolean },
+): number | undefined {
   const match = /(\d+(?:\.\d+)?)\s*(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)?\b/i.exec(
     value,
   );
@@ -382,7 +447,7 @@ function durationMsFromText(value: string, options: { allowBareSeconds: boolean 
   }
 
   const amount = Number.parseFloat(match[1] ?? "");
-  if (!Number.isFinite(amount) || amount <= 0) {
+  if (!Number.isFinite(amount) || amount < 0 || (!options.allowZero && amount === 0)) {
     return undefined;
   }
 
@@ -393,7 +458,9 @@ function durationMsFromText(value: string, options: { allowBareSeconds: boolean 
 
   const multiplier = durationMultiplier(unit || "seconds");
   const milliseconds = Math.round(amount * multiplier);
-  return Number.isSafeInteger(milliseconds) && milliseconds > 0 ? milliseconds : undefined;
+  return Number.isSafeInteger(milliseconds) && (options.allowZero ? milliseconds >= 0 : milliseconds > 0)
+    ? milliseconds
+    : undefined;
 }
 
 function durationMultiplier(unit: string): number {

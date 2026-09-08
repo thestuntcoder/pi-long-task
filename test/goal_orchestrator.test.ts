@@ -26,6 +26,8 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
     minIterations: 1,
     maxIterations: 2,
     commit: false,
+    todoTimeoutMs: 654_321,
+    todoGracefulShutdownMs: 8_765,
     networkRecovery: { enabled: true, baseDelayMs: 2_000, maxDelayMs: 9_000, maxOutageMs: null },
     discoveryRunner: async (options) => {
       assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
@@ -35,6 +37,8 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
       generationInputs.push(options.inputText ?? "");
       assert.equal(options.commit, false);
       assert.equal(options.goal, "Ship a goal loop feature in one pass");
+      assert.equal(options.todoTimeoutMs, 654_321);
+      assert.equal(options.todoGracefulShutdownMs, 8_765);
       assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
       assert.match(options.inputText ?? "", /Persisted goal specification/);
       assert.match(options.inputText ?? "", /REQ-1/);
@@ -49,6 +53,8 @@ await withTempRoot("pi-goal-orchestrator-one-", async (tempRoot) => {
       executionInputs.push(options.inputText ?? "");
       assert.equal(options.commit, false);
       assert.equal(options.goal, "Ship a goal loop feature in one pass");
+      assert.equal(options.todoTimeoutMs, 654_321);
+      assert.equal(options.todoGracefulShutdownMs, 8_765);
       assert.deepEqual(options.networkRecovery, expectedNetworkRecoveryConfig());
       assert.match(options.inputText ?? "", /TODO 1 — Iteration 1 work/);
       return coordinatorResult(options, "Worker completed one-pass TODO", {

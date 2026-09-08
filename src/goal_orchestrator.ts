@@ -30,6 +30,7 @@ import {
   type NetworkRecoveryConfig,
   type NetworkRecoveryConfigInput,
 } from "./network_recovery_config.ts";
+import { validatePlannerGracefulShutdownMs, validatePlannerTimeoutMs } from "./planner_config.ts";
 import { runGoalReviewSession, type GoalReviewResult, type GoalReviewerRunner } from "./goal_review.ts";
 import {
   runGoalTodoExecutionLongTask,
@@ -109,6 +110,8 @@ export interface RunGoalLoopOptions extends GoalLoopLimitInput {
   thinkingLevel?: string;
   maxBashTimeoutMs?: number;
   maxAttemptsPerTask?: number;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   networkRecovery?: NetworkRecoveryConfigInput;
   commit?: boolean;
   now?: () => Date;
@@ -140,6 +143,8 @@ export class GoalLoopOrchestratorError extends Error {
 export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoopRunResult> {
   const now = options.now ?? (() => new Date());
   const networkRecovery = resolveNetworkRecoveryConfig(options.networkRecovery);
+  const todoTimeoutMs = validatePlannerTimeoutMs(options.todoTimeoutMs);
+  const todoGracefulShutdownMs = validatePlannerGracefulShutdownMs(options.todoGracefulShutdownMs);
   let state =
     options.initialState ??
     createGoalLoopState({
@@ -282,6 +287,8 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           modelName: options.modelName,
           thinkingLevel: options.thinkingLevel,
           maxBashTimeoutMs: options.maxBashTimeoutMs,
+          todoTimeoutMs,
+          todoGracefulShutdownMs,
           networkRecovery,
           now,
           goalSpecification,
@@ -313,6 +320,8 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
           modelName: options.modelName,
           thinkingLevel: options.thinkingLevel,
           maxBashTimeoutMs: options.maxBashTimeoutMs,
+          todoTimeoutMs,
+          todoGracefulShutdownMs,
           networkRecovery,
           now,
           goalSpecification,
@@ -346,6 +355,8 @@ export async function runGoalLoop(options: RunGoalLoopOptions): Promise<GoalLoop
             thinkingLevel: options.thinkingLevel,
             maxBashTimeoutMs: options.maxBashTimeoutMs,
             maxAttemptsPerTask: options.maxAttemptsPerTask,
+            todoTimeoutMs,
+            todoGracefulShutdownMs,
             networkRecovery,
             commit: options.commit,
             now,

@@ -32,6 +32,7 @@ import {
   type PlanRevisionRelevantResult,
 } from "./plan_revision_generation.ts";
 import { taskSemanticFingerprint, type PlanTaskState } from "./plan_revision.ts";
+import { resolvePlannerGracefulShutdownMs, resolvePlannerTimeoutMs } from "./planner_config.ts";
 import {
   PersistentTodoPlanStore,
   planTaskReference,
@@ -1751,6 +1752,11 @@ function relevantPlanRevisionResults(
 // Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
 // keep this function's public contract stable while moving shared prompt guarding into a helper.
 export async function runTodoPlanner(options: TodoPlannerOptions): Promise<string> {
+  const timeoutMs = resolvePlannerTimeoutMs(options.timeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs);
+  const gracefulShutdownMs = resolvePlannerGracefulShutdownMs(
+    options.gracefulShutdownMs,
+    DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
+  );
   const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
   const result = await sessionFactory({
     cwd: options.cwd,
@@ -1759,8 +1765,6 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
     thinkingLevel: options.thinkingLevel,
   });
   const session = result.session;
-  const timeoutMs = positiveMilliseconds(options.timeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs);
-  const gracefulShutdownMs = options.gracefulShutdownMs ?? DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs;
 
   let plannerMarkdown: string | undefined;
   let plannerError: unknown;
@@ -1912,8 +1916,8 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const parsedWorkerConfig = parseWorkerRuntimeConfig(options.inputText ?? "");
   const configuredAttempts = options.maxAttemptsPerTask ?? parsedWorkerConfig.maxAttemptsPerTask;
   const configuredTaskTimeoutMs = options.taskTimeoutMs ?? parsedWorkerConfig.taskTimeoutMs;
-  const configuredTodoTimeoutMs = options.todoTimeoutMs;
-  const configuredTodoGracefulShutdownMs = options.todoGracefulShutdownMs;
+  const configuredTodoTimeoutMs = options.todoTimeoutMs ?? parsedWorkerConfig.todoTimeoutMs;
+  const configuredTodoGracefulShutdownMs = options.todoGracefulShutdownMs ?? parsedWorkerConfig.todoGracefulShutdownMs;
   const configuredMaxBashTimeoutMs = options.maxBashTimeoutMs ?? parsedWorkerConfig.maxBashTimeoutMs;
   const workerModelName = options.workerModelName ?? parsedWorkerConfig.modelName;
   const workerModel = workerModelName ? undefined : options.workerModel;
@@ -1936,8 +1940,8 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     taskResultPath: path.join(runDir, "TASK_RESULT.md"),
     maxAttemptsPerTask: positiveInteger(configuredAttempts, DEFAULT_COORDINATOR_OPTIONS.maxAttemptsPerTask),
     taskTimeoutSeconds: positiveMilliseconds(configuredTaskTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.taskTimeoutMs) / 1000,
-    todoTimeoutMs: positiveMilliseconds(configuredTodoTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs),
-    todoGracefulShutdownMs: positiveMilliseconds(
+    todoTimeoutMs: resolvePlannerTimeoutMs(configuredTodoTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs),
+    todoGracefulShutdownMs: resolvePlannerGracefulShutdownMs(
       configuredTodoGracefulShutdownMs,
       DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
     ),

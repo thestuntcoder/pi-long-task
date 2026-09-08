@@ -85,7 +85,7 @@ interface RegisteredLongTaskTool {
   name?: string;
   parameters?: {
     required?: string[];
-    properties?: Record<string, { description?: string; type?: string }>;
+    properties?: Record<string, { description?: string; type?: string; minimum?: number; maximum?: number }>;
   };
 }
 
@@ -106,6 +106,13 @@ assert.equal(longTaskTool.parameters?.properties?.inputText?.type, "string");
 assert.doesNotMatch(longTaskTool.parameters?.properties?.inputText?.description ?? "", /required/i);
 assert.equal(longTaskTool.parameters?.properties?.goal?.type, "string");
 assert.match(longTaskTool.parameters?.properties?.goal?.description ?? "", /Optional high-level goal/);
+assert.equal(longTaskTool.parameters?.properties?.todoTimeoutMs?.type, "integer");
+assert.equal(longTaskTool.parameters?.properties?.todoTimeoutMs?.minimum, 1);
+assert.equal(longTaskTool.parameters?.properties?.todoTimeoutMs?.maximum, 2_147_483_647);
+assert.match(longTaskTool.parameters?.properties?.todoTimeoutMs?.description ?? "", /TODO-planner timeout/);
+assert.equal(longTaskTool.parameters?.properties?.todoGracefulShutdownMs?.type, "integer");
+assert.equal(longTaskTool.parameters?.properties?.todoGracefulShutdownMs?.minimum, 0);
+assert.match(longTaskTool.parameters?.properties?.todoGracefulShutdownMs?.description ?? "", /Grace period/);
 const goalTaskTool = registeredTools.find((tool) => tool.name === "pi_goal_task");
 assert.ok(goalTaskTool);
 assert.deepEqual(goalTaskTool.parameters?.required, ["goal"]);
@@ -115,6 +122,9 @@ assert.equal(goalTaskTool.parameters?.properties?.minIterations?.type, "integer"
 assert.match(goalTaskTool.parameters?.properties?.minIterations?.description ?? "", /Minimum number/);
 assert.equal(goalTaskTool.parameters?.properties?.maxIterations?.type, "integer");
 assert.match(goalTaskTool.parameters?.properties?.reviewerTimeoutMs?.description ?? "", /reviewer session/);
+assert.equal(goalTaskTool.parameters?.properties?.todoTimeoutMs?.type, "integer");
+assert.equal(goalTaskTool.parameters?.properties?.todoGracefulShutdownMs?.minimum, 0);
+assert.match(goalTaskTool.parameters?.properties?.todoTimeoutMs?.description ?? "", /plan revisions/);
 assert.deepEqual(registeredEvents, ["message_end", "input"]);
 
 type WidgetFactory = (tui: TUI, theme: Theme) => Component;

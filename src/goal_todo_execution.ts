@@ -33,6 +33,8 @@ export interface GoalTodoExecutionOptions {
   thinkingLevel?: string;
   maxBashTimeoutMs?: number;
   maxAttemptsPerTask?: number;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   networkRecovery?: Readonly<NetworkRecoveryConfig>;
   commit?: boolean;
   now?: () => Date;
@@ -154,6 +156,8 @@ export async function runGoalTodoExecutionLongTask(
       taskTimeoutMs: childTimeoutMs,
       maxBashTimeoutMs: options.maxBashTimeoutMs,
       maxAttemptsPerTask: options.maxAttemptsPerTask,
+      todoTimeoutMs: options.todoTimeoutMs,
+      todoGracefulShutdownMs: options.todoGracefulShutdownMs,
       networkRecovery: options.networkRecovery,
       onProgress: (update) => {
         progressEvents.push(update);

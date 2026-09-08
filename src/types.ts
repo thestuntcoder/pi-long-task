@@ -1,6 +1,7 @@
 import type { Static } from "typebox";
 import { Type } from "typebox";
 
+import { MAX_PLANNER_DURATION_MS } from "./planner_config.ts";
 import type { TaskProgressModel } from "./task_progress.ts";
 import type { SessionOutcome } from "./worker_session.ts";
 
@@ -49,6 +50,21 @@ export const PiLongTaskParams = Type.Object(
     goal: Type.Optional(
       Type.String({
         description: "Optional high-level goal or desired outcome for the long-task run.",
+      }),
+    ),
+    todoTimeoutMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        maximum: MAX_PLANNER_DURATION_MS,
+        description: "Explicit TODO-planner timeout in milliseconds. Defaults to 300000 (5 minutes).",
+      }),
+    ),
+    todoGracefulShutdownMs: Type.Optional(
+      Type.Integer({
+        minimum: 0,
+        maximum: MAX_PLANNER_DURATION_MS,
+        description:
+          "Grace period in milliseconds after the TODO-planner timeout. Defaults to 15000 (15 seconds); use 0 to disable the grace period.",
       }),
     ),
     networkRecovery: Type.Optional(NetworkRecoveryParams),
@@ -111,6 +127,22 @@ export const PiGoalTaskParams = Type.Object(
       Type.Integer({
         minimum: 1,
         description: "Maximum bash command timeout in milliseconds allowed in worker sessions.",
+      }),
+    ),
+    todoTimeoutMs: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        maximum: MAX_PLANNER_DURATION_MS,
+        description:
+          "Explicit TODO-planner timeout in milliseconds for child long-task planning and plan revisions. Defaults to 300000 (5 minutes).",
+      }),
+    ),
+    todoGracefulShutdownMs: Type.Optional(
+      Type.Integer({
+        minimum: 0,
+        maximum: MAX_PLANNER_DURATION_MS,
+        description:
+          "Grace period in milliseconds after a child TODO-planner timeout. Defaults to 15000 (15 seconds); use 0 to disable the grace period.",
       }),
     ),
     networkRecovery: Type.Optional(NetworkRecoveryParams),

@@ -136,6 +136,8 @@ try {
     capturedOptions = options;
     assert.equal(options.commit, false);
     assert.equal(options.goal, "Add a sample settings page with tests");
+    assert.equal(options.todoTimeoutMs, 456_789);
+    assert.equal(options.todoGracefulShutdownMs, 7_654);
     assert.match(options.runId ?? "", /goal-generation-todo-generation-01/);
     assert.match(options.inputText ?? "", /do not implement/i);
     assert.match(options.inputText ?? "", /Persisted goal specification/);
@@ -215,6 +217,8 @@ try {
     store,
     cwd: tempRoot,
     longTaskRunner: fakeLongTaskRunner,
+    todoTimeoutMs: 456_789,
+    todoGracefulShutdownMs: 7_654,
     now: () => new Date("2026-06-25T09:00:01.000Z"),
   });
 

@@ -38,6 +38,8 @@ export interface GoalTodoGenerationOptions {
   modelName?: string;
   thinkingLevel?: string;
   maxBashTimeoutMs?: number;
+  todoTimeoutMs?: number;
+  todoGracefulShutdownMs?: number;
   networkRecovery?: Readonly<NetworkRecoveryConfig>;
   now?: () => Date;
   additionalContext?: string;
@@ -122,6 +124,8 @@ export async function runGoalTodoGenerationLongTask(
     taskThinking: options.thinkingLevel,
     taskTimeoutMs: childTimeoutMs,
     maxBashTimeoutMs: options.maxBashTimeoutMs,
+    todoTimeoutMs: options.todoTimeoutMs,
+    todoGracefulShutdownMs: options.todoGracefulShutdownMs,
     networkRecovery: options.networkRecovery,
     onNetworkRecovery: captureOutage,
   };
