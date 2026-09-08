@@ -3,6 +3,7 @@ import { Type } from "typebox";
 
 import { MAX_PLANNER_DURATION_MS, type PlannerBudget } from "./planner_config.ts";
 import type { TaskProgressModel } from "./task_progress.ts";
+import type { WorkerCapabilityWarning } from "./worker_capabilities.ts";
 import type { SessionOutcome } from "./worker_session.ts";
 
 const NetworkRecoveryParams = Type.Object(
@@ -199,6 +200,7 @@ export interface PiLongTaskResult {
   taskProgress: TaskProgressModel;
   workerCostTotal: number;
   plannerBudget?: Readonly<PlannerBudget>;
+  capabilityWarnings?: readonly WorkerCapabilityWarning[];
   commit: boolean;
   goal?: string;
   error?: string;

@@ -81,6 +81,7 @@ function toolDetails(result: CoordinatorResult) {
     taskProgress: result.taskProgress,
     workerCostTotal: result.workerCostTotal,
     plannerBudget: result.plannerBudget,
+    capabilityWarnings: result.capabilityWarnings,
     summary: result.summary,
     goal: result.goal,
     error: result.error,
@@ -575,6 +576,8 @@ function sidebarUpdateStateDetails(update: CoordinatorProgressUpdate): {
   }
 
   switch (update.phase) {
+    case "capability_warning":
+      return { icon: "!", label: "Capability warning", color: "warning" };
     case "planning":
       return { icon: "+", label: "Planning", color: "warning" };
     case "planned":

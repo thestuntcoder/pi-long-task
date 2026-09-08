@@ -133,7 +133,7 @@ export function applyGoalInstructionsToTodoMarkdown(markdown: string, goal?: str
     return markdown;
   }
 
-  let next = insertGlobalGoalInstructions(markdown, trimmedGoal);
+  let next = insertGlobalInstructions(markdown, goalInstructionLines(trimmedGoal));
   const coverageGoal = parseCoverageGoal(trimmedGoal);
   if (coverageGoal) {
     next = appendCoverageVerificationToTasks(next, coverageGoalVerifyBullet(coverageGoal));
@@ -142,14 +142,33 @@ export function applyGoalInstructionsToTodoMarkdown(markdown: string, goal?: str
   return next;
 }
 
-function insertGlobalGoalInstructions(markdown: string, goal: string): string {
+export function applyWorkerCapabilityConstraintsToTodoMarkdown(
+  markdown: string,
+  constraints: readonly string[],
+): string {
+  const additions = constraints
+    .map(oneLine)
+    .filter(Boolean)
+    .map((item) => `- ${item}`);
+  if (additions.length === 0) {
+    return markdown;
+  }
+  const next = insertGlobalInstructions(markdown, additions);
+  validateTodoMarkdown(next);
+  return next;
+}
+
+function goalInstructionLines(goal: string): string[] {
   const coverageGoal = parseCoverageGoal(goal);
   const additions = [`- Long task goal: ${goal}`];
   if (coverageGoal) {
     additions.push(`- Coverage goal: ${coverageGoalAction(coverageGoal)}`);
     additions.push(`- Coverage verification: ${coverageGoalVerification(coverageGoal)}`);
   }
+  return additions;
+}
 
+function insertGlobalInstructions(markdown: string, additions: readonly string[]): string {
   const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const progressIndex = lines.findIndex((line) => /^##\s+Progress\s*$/i.test(line.trim()));
   if (progressIndex < 0) {
@@ -229,20 +248,29 @@ function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-export function todoPlanningOnlyPromptBlock(): string {
+export function todoPlanningOnlyPromptBlock(capabilityConstraints: readonly string[] = []): string {
+  const capabilityBlock = capabilityConstraints.length
+    ? `\n\nWorker capability constraints (preserve these above ## Progress and in affected tasks):\n${capabilityConstraints
+        .map((constraint) => `- ${oneLine(constraint)}`)
+        .join("\n")}`
+    : "";
   return `Planning-only boundary:
 - Produce only a concise executable plan for future workers.
 - Do not perform requested end work: do not implement or write code, execute research or report findings, create requested creative output (prose, stories, copy, designs, or assets), or produce any other final deliverable.
 - Use future-worker action language; do not claim work is complete or invent results.
 - Keep repeated task sections compact: use a one-sentence Goal and Done when, plus only the necessary Status and Verify bullets. Omit rationale, lengthy analysis, summaries, duplicated context, unrequested examples, and boilerplate.
-- Preserve every instruction, constraint, required deliverable, and acceptance condition from the source request and supplied planning context. Put shared constraints above ## Progress and task-specific requirements in the relevant task.`;
+- Preserve every instruction, constraint, required deliverable, and acceptance condition from the source request and supplied planning context. Put shared constraints above ## Progress and task-specific requirements in the relevant task.${capabilityBlock}`;
 }
 
-export function buildTodoCreationPrompt(rawInput: string, goal?: string): string {
+export function buildTodoCreationPrompt(
+  rawInput: string,
+  goal?: string,
+  capabilityConstraints: readonly string[] = [],
+): string {
   const goalBlock = todoGoalPromptBlock(goal);
   return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.
 
-${todoPlanningOnlyPromptBlock()}
+${todoPlanningOnlyPromptBlock(capabilityConstraints)}
 
 Required format:
 - Output only markdown, with no commentary and no code fence.
@@ -264,11 +292,12 @@ export function buildTodoRepairPrompt(
   invalidOutput: string,
   validationError: string,
   goal?: string,
+  capabilityConstraints: readonly string[] = [],
 ): string {
   const goalBlock = todoGoalPromptBlock(goal);
   return `Repair the previous response into valid Pi Long Task TODO markdown. Correct its plan and format only; do not continue or perform any attempted end work.
 
-${todoPlanningOnlyPromptBlock()}
+${todoPlanningOnlyPromptBlock(capabilityConstraints)}
 
 Validation/extraction error:
 ${validationError.trim() || "Unknown validation error."}

@@ -4,6 +4,7 @@ import { Text, type Component } from "@earendil-works/pi-tui";
 import type { GoalLoopState, GoalLoopStatus } from "./goal_loop.ts";
 import type { TaskProgressModel } from "./task_progress.ts";
 import type { CoordinatorCommitSummary, CoordinatorRemainingTask, CoordinatorStatus } from "./types.ts";
+import type { WorkerCapabilityWarning } from "./worker_capabilities.ts";
 
 export interface CoordinatorResultForRendering {
   status: CoordinatorStatus;
@@ -19,6 +20,7 @@ export interface CoordinatorResultForRendering {
   remainingTasks?: CoordinatorRemainingTask[];
   taskProgress?: TaskProgressModel;
   workerCostTotal?: number;
+  capabilityWarnings?: readonly WorkerCapabilityWarning[];
   goal?: string;
   error?: string;
 }
@@ -54,6 +56,10 @@ export function formatCoordinatorResultMessage(result: CoordinatorResultForRende
 
   if (result.workerCostTotal) {
     lines.push(`Worker spend: ${formatCost(result.workerCostTotal)}`);
+  }
+
+  if (result.capabilityWarnings?.length) {
+    lines.push("Worker capability warnings:", ...result.capabilityWarnings.map((warning) => `- ${warning.message}`));
   }
 
   const commitLines = commits
@@ -385,6 +391,9 @@ function renderLongTaskSummary(details: CoordinatorToolRenderDetails, expanded: 
   }
 
   const lines = [summary.join(" — "), theme.fg("muted", details.summary)];
+  for (const warning of details.capabilityWarnings ?? []) {
+    lines.push(theme.fg("warning", `Warning: ${warning.message}`));
+  }
   lines.push(theme.fg("dim", `Result: ${details.resultPath ?? details.taskResultPath ?? "unknown"}`));
   lines.push(theme.fg("dim", `TODO: ${details.todoPath}`));
 
@@ -450,6 +459,8 @@ function progressSubtaskDetails(value: unknown): ProgressSubtaskRenderDetails[] 
 
 function progressPhaseLabel(phase: string): string {
   switch (phase) {
+    case "capability_warning":
+      return "Warning";
     case "planning":
     case "planned":
       return "Thought";
@@ -605,8 +616,33 @@ function longTaskDetails(details: Record<string, unknown> | undefined): Coordina
     remainingTasks: remainingTaskSummaries(details.remainingTasks),
     taskProgress: taskProgressModel(details.taskProgress),
     workerCostTotal: nonNegativeNumberValue(details.workerCostTotal),
+    capabilityWarnings: capabilityWarningDetails(details.capabilityWarnings),
     error: stringValue(details.error),
   };
+}
+
+function capabilityWarningDetails(value: unknown): WorkerCapabilityWarning[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    const record = recordOrUndefined(item);
+    const code = stringValue(record?.code);
+    const message = stringValue(record?.message);
+    const planningConstraint = stringValue(record?.planningConstraint);
+    if (code !== "unavailable_browser_capability" || !message || !planningConstraint) {
+      return [];
+    }
+    return [
+      {
+        code,
+        message,
+        planningConstraint,
+        requestedCapabilities: stringArray(record?.requestedCapabilities),
+        availableTools: stringArray(record?.availableTools),
+      },
+    ];
+  });
 }
 
 function commitSummaries(value: unknown): CoordinatorCommitSummary[] {

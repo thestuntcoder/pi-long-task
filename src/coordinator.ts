@@ -70,6 +70,7 @@ import {
 import { buildTaskProgressModel, type TaskProgressModel, type TaskProgressStatus } from "./task_progress.ts";
 import {
   applyGoalInstructionsToTodoMarkdown,
+  applyWorkerCapabilityConstraintsToTodoMarkdown,
   buildTodoCreationPrompt,
   buildTodoRepairPrompt,
   extractAndValidateTodoMarkdown,
@@ -78,6 +79,7 @@ import {
   validateTodoMarkdown,
 } from "./todo_generator.ts";
 import { parseTasks, todoGlobalInstructions, type Task } from "./todo_parser.ts";
+import { detectUnavailableWorkerCapabilities, type WorkerCapabilityWarning } from "./worker_capabilities.ts";
 import {
   buildWorkerSessionCreationFailureOutcome,
   createIsolatedWorkerSession,
@@ -113,6 +115,7 @@ export const DEFAULT_COORDINATOR_OPTIONS = {
 
 export type WorkerRunner = (options: RunWorkerTaskOptions) => Promise<SessionOutcome>;
 export type CoordinatorProgressPhase =
+  | "capability_warning"
   | "planning"
   | "planned"
   | "task_start"
@@ -188,6 +191,7 @@ export interface CoordinatorProgressUpdate {
   plannerRemainingMs?: number;
   plannerGracePeriodMs?: number;
   plannerGraceRemainingMs?: number;
+  capabilityWarning?: Readonly<WorkerCapabilityWarning>;
   workerSessionEvent?: WorkerSessionDiagnostic["event"];
   workerSessionReason?: string;
   workerSessionContextUsagePercent?: number;
@@ -257,6 +261,8 @@ export interface TodoPlannerOptions {
   planRevision?: Readonly<PlanRevisionRequest>;
   /** Normalized coordinator recovery policy; network wait is excluded from operation timeouts. */
   networkRecovery?: Readonly<NetworkRecoveryConfig>;
+  /** Run-level constraints derived from capabilities unavailable to isolated workers. */
+  capabilityConstraints?: readonly string[];
 }
 
 export interface TaskAttemptSummary {
@@ -311,6 +317,8 @@ export interface CoordinatorResult {
   workerSessionMetrics?: WorkerSessionMetrics;
   /** Deterministic deadline selection used by planner calls in this run. */
   plannerBudget?: Readonly<PlannerBudget>;
+  /** Explicit, non-fatal warnings for requested capabilities unavailable to isolated workers. */
+  capabilityWarnings?: readonly WorkerCapabilityWarning[];
   commit: boolean;
   goal?: string;
   error?: string;
@@ -356,6 +364,7 @@ interface RuntimeOptions {
   workerTextByWorker: Map<string, string>;
   workerTextPublishedLengthByWorker: Map<string, number>;
   plannerDiagnostics: PlannerDiagnostic[];
+  capabilityWarnings: WorkerCapabilityWarning[];
   workerSessionMetrics: WorkerSessionMetrics;
   steeringQueue?: SerializedSteeringQueue;
   onPlanRevisionAccepted?: (revision: GeneratedPlanRevision) => void | Promise<void>;
@@ -992,7 +1001,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   const commits: CoordinatorCommitSummary[] = [];
 
   await mkdir(runtime.runDir, { recursive: true });
-  await writeFile(runtime.taskResultPath, initialTaskResultMarkdown(runtime.runId), "utf8");
+  await writeFile(runtime.taskResultPath, initialTaskResultMarkdown(runtime.runId, runtime.capabilityWarnings), "utf8");
   let planningComplete = false;
   let latestTodoMarkdown: string | undefined;
   let latestTasks: Task[] = [];
@@ -1008,6 +1017,13 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   const protectedDirtyPathsByTask = new Map<string, Set<string>>();
 
   try {
+    for (const warning of runtime.capabilityWarnings) {
+      emitProgress(runtime, warning.message, {
+        phase: "capability_warning",
+        status: "warning",
+        capabilityWarning: warning,
+      });
+    }
     emitPlannerProgress(runtime, createPlannerStartedProgress(runtime.plannerBudget, runtime.todoGracefulShutdownMs));
     let todoMarkdown = await generateOrNormalizeTodoMarkdown(inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
@@ -1411,6 +1427,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       workerUsageTotal: aggregateWorkerUsage(outcomes),
       workerSessionMetrics: snapshotWorkerSessionMetrics(runtime.workerSessionMetrics),
       plannerBudget: runtime.plannerBudget,
+      capabilityWarnings: runtime.capabilityWarnings,
       commit: options.commit,
       goal: runtime.goal,
       error: failure,
@@ -1495,6 +1512,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       workerUsageTotal: aggregateWorkerUsage(outcomes),
       workerSessionMetrics: snapshotWorkerSessionMetrics(runtime.workerSessionMetrics),
       plannerBudget: runtime.plannerBudget,
+      capabilityWarnings: runtime.capabilityWarnings,
       commit: options.commit,
       goal: runtime.goal,
       error: resultError,
@@ -1516,9 +1534,10 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
 }
 
 async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: RuntimeOptions): Promise<string> {
+  const capabilityConstraints = runtime.capabilityWarnings.map((warning) => warning.planningConstraint);
   const local = todoMarkdownFromString(inputText, runtime.goal);
   if (local) {
-    return local;
+    return applyWorkerCapabilityConstraintsToTodoMarkdown(local, capabilityConstraints);
   }
 
   const plannerText = await requestTodoPlan(inputText, runtime);
@@ -1527,6 +1546,7 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
     plannerText,
     (repairPrompt) => requestTodoPlan(repairPrompt, runtime),
     runtime.goal,
+    capabilityConstraints,
     {
       onInvalidOutput: (validationError) =>
         recordPlannerDiagnostic(runtime, {
@@ -1545,7 +1565,8 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
         }),
     },
   );
-  return applyGoalInstructionsToTodoMarkdown(planned, runtime.goal);
+  const withGoal = applyGoalInstructionsToTodoMarkdown(planned, runtime.goal);
+  return applyWorkerCapabilityConstraintsToTodoMarkdown(withGoal, capabilityConstraints);
 }
 
 interface TodoExtractionRepairHooks {
@@ -1559,6 +1580,7 @@ async function extractTodoMarkdownWithOneRepair(
   plannerText: string,
   requestRepair: (repairPrompt: string) => Promise<string>,
   goal?: string,
+  capabilityConstraints: readonly string[] = [],
   hooks: TodoExtractionRepairHooks = {},
 ): Promise<string> {
   try {
@@ -1567,7 +1589,9 @@ async function extractTodoMarkdownWithOneRepair(
     const validationError = errorMessage(error);
     hooks.onInvalidOutput?.(validationError);
     hooks.onRepairAttempt?.(validationError);
-    const repairText = await requestRepair(buildTodoRepairPrompt(inputText, plannerText, validationError, goal));
+    const repairText = await requestRepair(
+      buildTodoRepairPrompt(inputText, plannerText, validationError, goal, capabilityConstraints),
+    );
     try {
       return extractAndValidateTodoMarkdown(repairText);
     } catch (repairError) {
@@ -1594,6 +1618,7 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
       plannerBudget: runtime.plannerBudget,
       sessionFactory: runtime.todoSessionFactory,
       networkRecovery: runtime.networkRecovery,
+      capabilityConstraints: runtime.capabilityWarnings.map((warning) => warning.planningConstraint),
       onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
       onProgress: (event) => {
         if (event.state !== "started") {
@@ -1687,6 +1712,7 @@ async function generateSteeringPlanRevision(options: {
           plannerBudget: options.runtime.plannerBudget,
           sessionFactory: options.runtime.todoSessionFactory,
           networkRecovery: options.runtime.networkRecovery,
+          capabilityConstraints: options.runtime.capabilityWarnings.map((warning) => warning.planningConstraint),
           onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
           onProgress: (event) => emitPlannerProgress(options.runtime, event),
           goal: options.runtime.goal,
@@ -1797,6 +1823,9 @@ function relevantPlanRevisionResults(
 // Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
 // keep this function's public contract stable while moving shared prompt guarding into a helper.
 export async function runTodoPlanner(options: TodoPlannerOptions): Promise<string> {
+  const capabilityConstraints =
+    options.capabilityConstraints ??
+    capabilityWarningsForRequest(options.inputText, options.goal).map((warning) => warning.planningConstraint);
   const plannerBudget =
     options.plannerBudget ??
     resolvePlannerBudget({
@@ -1836,7 +1865,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
   try {
     const plannerText = await runTodoPlannerPrompt({
       session,
-      prompt: options.plannerPrompt ?? buildTodoCreationPrompt(options.inputText, options.goal),
+      prompt: options.plannerPrompt ?? buildTodoCreationPrompt(options.inputText, options.goal, capabilityConstraints),
       abortSignal: options.abortSignal,
       timeoutMs,
       gracefulShutdownMs,
@@ -1862,6 +1891,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
           onProgress: options.onProgress,
         }),
       options.goal,
+      capabilityConstraints,
       {
         onInvalidOutput: (validationError) =>
           options.onDiagnostic?.({
@@ -1905,7 +1935,8 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
   if (!plannerMarkdown) {
     throw new TodoGenerationError("TODO planner did not return valid TODO markdown.");
   }
-  return applyGoalInstructionsToTodoMarkdown(plannerMarkdown, options.goal);
+  const withGoal = applyGoalInstructionsToTodoMarkdown(plannerMarkdown, options.goal);
+  return applyWorkerCapabilityConstraintsToTodoMarkdown(withGoal, capabilityConstraints);
 }
 
 async function runTodoPlannerPrompt(options: {
@@ -2040,6 +2071,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     ...parsedWorkerConfig.networkRecovery,
     ...options.networkRecovery,
   });
+  const capabilityWarnings = capabilityWarningsForRequest(options.inputText, options.goal);
 
   return {
     cwd,
@@ -2078,6 +2110,7 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerTextByWorker: new Map(),
     workerTextPublishedLengthByWorker: new Map(),
     plannerDiagnostics: [],
+    capabilityWarnings,
     workerSessionMetrics: createWorkerSessionMetrics(),
     steeringQueue: options.steeringQueue,
     onPlanRevisionAccepted: options.onPlanRevisionAccepted,
@@ -2715,8 +2748,11 @@ function outcomeProgressItemStatus(
   return "failed";
 }
 
-function initialTaskResultMarkdown(runId: string): string {
-  return `# Pi Long Task TASK_RESULT\n\nRun: ${runId}\n`;
+function initialTaskResultMarkdown(runId: string, capabilityWarnings: readonly WorkerCapabilityWarning[] = []): string {
+  const warningBlock = capabilityWarnings.length
+    ? `\n\n## Worker capability warnings\n\n${capabilityWarnings.map((warning) => `- ${warning.message}`).join("\n")}`
+    : "";
+  return `# Pi Long Task TASK_RESULT\n\nRun: ${runId}${warningBlock}\n`;
 }
 
 async function appendFailureNote(
@@ -2928,6 +2964,17 @@ function normalizeOptionalText(value: string | undefined): string | undefined {
 
 function coordinatorInputText(options: RunCoordinatorOptions): string {
   return normalizeOptionalText(options.inputText) ?? normalizeOptionalText(options.goal) ?? "";
+}
+
+function capabilityWarningsForRequest(inputText?: string, goal?: string): WorkerCapabilityWarning[] {
+  const requestText = [normalizeOptionalText(inputText), normalizeOptionalText(goal)]
+    .filter((item): item is string => Boolean(item))
+    .filter((item, index, all) => all.indexOf(item) === index)
+    .join("\n");
+  return detectUnavailableWorkerCapabilities(requestText, {
+    tools: DEFAULT_WORKER_TOOLS,
+    extensionsEnabled: false,
+  });
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
