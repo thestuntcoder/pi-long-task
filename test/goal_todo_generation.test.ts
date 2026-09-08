@@ -23,9 +23,14 @@ const payload = buildGoalTodoGenerationTaskPayload({
   outputPath: "/tmp/generated/TODO.md",
 });
 assert.match(payload, /^# Pi Long Task TODO/);
-assert.match(payload, /Only generate TODO markdown/);
+assert.match(payload, /Produce only a concise executable plan for future workers/);
+assert.match(payload, /do not implement or write code, execute research or report findings/i);
+assert.match(payload, /create requested creative output \(prose, stories, copy, designs, or assets\)/i);
+assert.match(payload, /Keep repeated task sections compact/);
+assert.match(payload, /Preserve every instruction, constraint, required deliverable, and acceptance condition/);
 assert.match(payload, /Write the generated Pi Long Task-compatible TODO markdown to `\/tmp\/generated\/TODO\.md`/);
 assert.match(payload, /iteration 1 of at least 1 required iteration/);
+assert.doesNotMatch(payload, /Analyze the high-level goal/);
 validateTodoMarkdown(payload);
 
 const specification = createGoalSpecification({
@@ -112,7 +117,8 @@ assert.match(payloadWithSpec, /REQ-1/);
 assert.match(payloadWithSpec, /MS-1/);
 assert.match(payloadWithSpec, /AC-1/);
 assert.match(payloadWithSpec, /VG-1/);
-assert.match(payloadWithSpec, /derive implementation TODOs from that specification/i);
+assert.match(payloadWithSpec, /derive implementation TODOs from it rather than only the original vague goal/i);
+assert.match(payloadWithSpec, /instead of duplicating it in every task field/i);
 validateTodoMarkdown(payloadWithSpec);
 
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-goal-todo-generation-test-"));

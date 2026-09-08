@@ -19,6 +19,7 @@ import { parseTasks } from "./todo_parser.ts";
 import {
   applyGoalInstructionsToTodoMarkdown,
   extractAndValidateTodoMarkdown,
+  todoPlanningOnlyPromptBlock,
   validateTodoMarkdown,
 } from "./todo_generator.ts";
 
@@ -229,16 +230,17 @@ export function buildGoalTodoGenerationTaskPayload(options: {
 
 - Long task goal: ${oneLine(options.state.goal)}
 - This is goal-loop TODO generation iteration ${options.iteration} for goal run ${options.state.goalRunId}.
-- Only generate TODO markdown for future workers; do not implement, edit, test, refactor, or otherwise perform the goal work in this generation run.
 - Write the generated Pi Long Task-compatible TODO markdown to \`${options.outputPath}\`.
 - Do not wrap the generated file in a code fence and do not include commentary outside the TODO markdown in that file.
 - Keep generated tasks focused, independently assignable, and safe for separate worker sessions.
 ${iterationPolicy}
 ${
   options.goalSpecification
-    ? "- A persisted goal specification is available; derive implementation TODOs from that specification rather than only the original vague goal.\n- Ensure generated tasks explicitly cover relevant requirement IDs, milestones, acceptance criteria, verification gates, constraints, and definition-of-done items from the specification.\n- Include spec IDs (for example REQ-*, MS-*, AC-*, VG-*) in generated task goals/status/verification/done-when guidance wherever applicable.\n"
+    ? "- A persisted goal specification is available; derive implementation TODOs from it rather than only the original vague goal.\n- Preserve its requirement IDs, milestones, acceptance criteria, verification gates, constraints, and definition of done in the relevant tasks. Reference each applicable spec ID (for example REQ-*, MS-*, AC-*, VG-*) where it is most useful instead of duplicating it in every task field.\n"
     : ""
 }
+${todoPlanningOnlyPromptBlock()}
+
 ## Progress
 
 - [ ] TODO 1 — Generate Pi Long Task TODO markdown
@@ -250,16 +252,12 @@ ${
 **Goal:** Convert the high-level goal into a valid Pi Long Task TODO plan for the next implementation long task.
 
 **Status:**
-- [ ] Analyze the high-level goal and any iteration context.
-- [ ] Create TODO markdown that starts with \`# Pi Long Task TODO\`.
-- [ ] Include a \`## Progress\` section with one unchecked \`- [ ] TODO N — Title\` line per generated task.
-- [ ] Include a \`---\` separator before generated task sections.
-- [ ] Include sequential \`## TODO N — Title\` sections with \`**Goal:**\`, \`**Status:**\`, \`**Verify:**\`, and \`**Done when:**\` guidance.
-- [ ] Write only the generated TODO markdown to \`${options.outputPath}\`.
+- [ ] Derive focused future-worker tasks from the goal, constraints, and iteration context without performing that work.
+- [ ] Render the required Progress list and sequential task sections with Goal, Status, Verify, and Done when fields.
+- [ ] Write only the concise generated TODO markdown to \`${options.outputPath}\`.
 
 **Verify:**
-- Confirm the file at \`${options.outputPath}\` exists.
-- Confirm it starts with \`# Pi Long Task TODO\`, has a \`## Progress\` section, a \`---\` separator, sequential TODO sections, unchecked status checkboxes, and concrete verification instructions.
+- Confirm \`${options.outputPath}\` contains valid TODO markdown with preserved constraints, compact task sections, unchecked statuses, and concrete checks.
 
 **Done when:**
 - \`${options.outputPath}\` contains valid Pi Long Task-compatible TODO markdown for achieving the high-level goal.

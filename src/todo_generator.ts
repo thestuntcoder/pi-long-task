@@ -229,9 +229,34 @@ function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+export function todoPlanningOnlyPromptBlock(): string {
+  return `Planning-only boundary:
+- Produce only a concise executable plan for future workers.
+- Do not perform requested end work: do not implement or write code, execute research or report findings, create requested creative output (prose, stories, copy, designs, or assets), or produce any other final deliverable.
+- Use future-worker action language; do not claim work is complete or invent results.
+- Keep repeated task sections compact: use a one-sentence Goal and Done when, plus only the necessary Status and Verify bullets. Omit rationale, lengthy analysis, summaries, duplicated context, unrequested examples, and boilerplate.
+- Preserve every instruction, constraint, required deliverable, and acceptance condition from the source request and supplied planning context. Put shared constraints above ## Progress and task-specific requirements in the relevant task.`;
+}
+
 export function buildTodoCreationPrompt(rawInput: string, goal?: string): string {
   const goalBlock = todoGoalPromptBlock(goal);
-  return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.\n\nRequirements:\n- Output only markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n${goalBlock}\nRaw input:\n\n${rawInput.trim()}\n`;
+  return `Convert the following raw project request into Pi Long Task-compatible TODO markdown.
+
+${todoPlanningOnlyPromptBlock()}
+
+Required format:
+- Output only markdown, with no commentary and no code fence.
+- Start with exactly: # Pi Long Task TODO
+- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title
+- Include a --- separator before task sections.
+- Create sequential sections named ## TODO N — Title.
+- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.
+- Keep tasks focused and independently assignable to worker sessions.
+${goalBlock}
+Raw input:
+
+${rawInput.trim()}
+`;
 }
 
 export function buildTodoRepairPrompt(
@@ -241,7 +266,30 @@ export function buildTodoRepairPrompt(
   goal?: string,
 ): string {
   const goalBlock = todoGoalPromptBlock(goal);
-  return `Your previous response was not valid Pi Long Task TODO markdown. Correct it now.\n\nValidation/extraction error:\n${validationError.trim() || "Unknown validation error."}\n\nRequirements:\n- Output only corrected markdown, with no commentary and no code fence.\n- Start with exactly: # Pi Long Task TODO\n- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title\n- Include a --- separator before task sections.\n- Create sequential sections named ## TODO N — Title.\n- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.\n- Preserve any global instructions or constraints that apply to all tasks above ## Progress.\n- Keep tasks focused and independently assignable to worker sessions.\n${goalBlock}\nOriginal raw input:\n\n${rawInput.trim()}\n\nPrevious invalid output:\n\n${invalidOutput.trim()}\n`;
+  return `Repair the previous response into valid Pi Long Task TODO markdown. Correct its plan and format only; do not continue or perform any attempted end work.
+
+${todoPlanningOnlyPromptBlock()}
+
+Validation/extraction error:
+${validationError.trim() || "Unknown validation error."}
+
+Required format:
+- Output only corrected markdown, with no commentary and no code fence.
+- Start with exactly: # Pi Long Task TODO
+- Include a ## Progress section with one unchecked line per task: - [ ] TODO N — Title
+- Include a --- separator before task sections.
+- Create sequential sections named ## TODO N — Title.
+- Each task section must include **Goal:**, **Status:** with unchecked checkbox items, **Verify:** with concrete verification guidance, and **Done when:**.
+- Keep tasks focused and independently assignable to worker sessions.
+${goalBlock}
+Original raw input:
+
+${rawInput.trim()}
+
+Previous invalid output (repair its planning content; do not extend its end work):
+
+${invalidOutput.trim()}
+`;
 }
 
 function todoGoalPromptBlock(goal: string | undefined): string {
