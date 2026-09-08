@@ -33,6 +33,7 @@ import {
 } from "./plan_revision_generation.ts";
 import { taskSemanticFingerprint, type PlanTaskState } from "./plan_revision.ts";
 import {
+  DEFAULT_PLANNER_THINKING_LEVEL,
   DEFAULT_PLANNER_TIMEOUT_MS,
   resolvePlannerBudget,
   resolvePlannerGracefulShutdownMs,
@@ -95,7 +96,7 @@ export const DEFAULT_COORDINATOR_OPTIONS = {
   todoGracefulShutdownMs: 15_000,
   maxBashTimeoutMs: 300_000,
   taskThinking: "high",
-  todoThinking: "xhigh",
+  todoThinking: DEFAULT_PLANNER_THINKING_LEVEL,
   workerSessionReuse: DEFAULT_WORKER_SESSION_REUSE_ENABLED,
   workerSessionReuseContextThresholdPercent: DEFAULT_WORKER_SESSION_REUSE_CONTEXT_THRESHOLD_PERCENT,
   networkRecovery: DEFAULT_NETWORK_RECOVERY_CONFIG,
@@ -219,7 +220,8 @@ export interface TodoPlannerOptions {
   inputText: string;
   cwd: string;
   runDir: string;
-  thinkingLevel: string;
+  /** Defaults to the planner-only balanced level; explicit values are forwarded unchanged. */
+  thinkingLevel?: string;
   model?: unknown;
   abortSignal?: AbortSignal;
   timeoutMs?: number;
@@ -1789,7 +1791,7 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
     cwd: options.cwd,
     tools: [],
     model: options.model,
-    thinkingLevel: options.thinkingLevel,
+    thinkingLevel: options.thinkingLevel ?? DEFAULT_PLANNER_THINKING_LEVEL,
   });
   const session = result.session;
 

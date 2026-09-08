@@ -1,5 +1,15 @@
 export const MAX_PLANNER_DURATION_MS = 2_147_483_647;
 
+/** Thinking levels accepted by the supported Pi SDK, in increasing reasoning-budget order. */
+export const SUPPORTED_PLANNER_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type PlannerThinkingLevel = (typeof SUPPORTED_PLANNER_THINKING_LEVELS)[number];
+/**
+ * Planner-only quality/latency balance. `high` retains enough reasoning budget
+ * for dependency-aware complex plans without imposing `xhigh` latency on every
+ * ordinary request. Explicit caller values remain authoritative.
+ */
+export const DEFAULT_PLANNER_THINKING_LEVEL: PlannerThinkingLevel = "high";
+
 /** Normal planning budget used for requests that do not contain a scale signal. */
 export const DEFAULT_PLANNER_TIMEOUT_MS = 300_000;
 /** Adaptive planning never reduces the normal five-minute budget. */
