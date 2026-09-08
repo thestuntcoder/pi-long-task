@@ -307,7 +307,7 @@ try {
   assert.ok(invalidTwiceRun.error?.includes(invalidTwiceRun.taskResultPath));
   assert.deepEqual(
     invalidTwiceProgressUpdates.filter((update) => update.plannerDiagnostic).map((update) => update.plannerDiagnostic),
-    ["invalid_output", "repair_attempt", "failure", "failure"],
+    ["invalid_output", "repair_attempt", "failure"],
   );
   assert.equal(
     invalidTwiceProgressUpdates.some((update) => update.phase === "task_start"),
@@ -371,7 +371,7 @@ try {
     timeoutCoordinatorProgressUpdates
       .filter((update) => update.plannerDiagnostic)
       .map((update) => update.plannerDiagnostic),
-    ["timeout", "failure"],
+    ["timeout"],
   );
   assert.equal(
     timeoutCoordinatorProgressUpdates.find((update) => update.plannerDiagnostic === "timeout")
@@ -603,7 +603,7 @@ try {
   });
   await abortPromptStarted;
   plannerAbortController.abort(new Error("stop planning"));
-  await assert.rejects(abortedPlannerPromise, /TODO planner aborted: stop planning/);
+  await assert.rejects(abortedPlannerPromise, /TODO planner cancelled \(no planner output observed\): stop planning/);
   assert.equal(abortedPlannerAbortCalls, 1);
   assert.equal(abortedPlannerDisposed, true);
 

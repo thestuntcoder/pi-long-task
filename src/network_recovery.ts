@@ -91,9 +91,9 @@ export function formatNetworkRecoveryStatus(event: NetworkRecoveryEvent): string
 
 function formatRecoveryDuration(milliseconds: number): string {
   const safeMs = Math.max(0, Math.round(milliseconds));
-  if (safeMs < 1_000) return `${safeMs}ms`;
+  if (safeMs > 0 && safeMs < 1_000) return "less than 1 second";
   const seconds = safeMs / 1_000;
-  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s`;
+  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} seconds`;
 }
 
 export class NetworkOutageExpiredError extends Error {

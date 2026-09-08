@@ -33,7 +33,10 @@ export interface GuardedSessionPromptResult {
   outputObserved: boolean;
   /** True when the session had to be stopped because its grace period expired. */
   graceExpired: boolean;
+  /** True when the session was stopped for any reason, including hard timeout. */
   aborted: boolean;
+  /** True only when the caller's AbortSignal cancelled the prompt. */
+  cancelled: boolean;
   error?: string;
   /** Untouched prompt failure for coordinator-level provider/transport classification. */
   failure?: unknown;
@@ -56,6 +59,7 @@ export async function runGuardedSessionPrompt(
   let timedOut = false;
   let graceExpired = false;
   let aborted = false;
+  let cancelled = false;
   let error: string | undefined;
   let failure: unknown;
   let promptSettled = false;
@@ -181,14 +185,16 @@ export async function runGuardedSessionPrompt(
     if (finished || promptSettled) {
       return;
     }
-    abortSession(abortReason(options.abortSignal, "session prompt aborted by outer signal"));
+    cancelled = true;
+    abortSession(abortReason(options.abortSignal, "session prompt cancelled by outer signal"));
     resolveCompleted();
   };
 
   try {
     if (options.abortSignal?.aborted) {
       aborted = true;
-      error = abortReason(options.abortSignal, "session prompt aborted before start");
+      cancelled = true;
+      error = abortReason(options.abortSignal, "session prompt cancelled before start");
     } else {
       unsubscribe = session.subscribe((event: unknown) => {
         events.push(event);
@@ -278,6 +284,7 @@ export async function runGuardedSessionPrompt(
     outputObserved,
     graceExpired,
     aborted,
+    cancelled,
     error,
     failure,
     diagnostics,
@@ -293,6 +300,7 @@ function buildResult(
   outputObserved: boolean,
   graceExpired: boolean,
   aborted: boolean,
+  cancelled: boolean,
   error: string | undefined,
   failure: unknown,
   diagnostics: string[],
@@ -304,6 +312,7 @@ function buildResult(
     outputObserved,
     graceExpired,
     aborted,
+    cancelled,
     error,
     ...(failure === undefined ? {} : { failure }),
     diagnostics: [...diagnostics],

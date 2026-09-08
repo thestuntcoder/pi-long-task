@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { runCoordinator, type TodoPlanner } from "../src/coordinator.ts";
+import { runCoordinator, type CoordinatorProgressUpdate, type TodoPlanner } from "../src/coordinator.ts";
 import { SerializedSteeringQueue } from "../src/steering.ts";
 import { generatedTodoMarkdown } from "../src/todo_generator.ts";
 import { parseTasks } from "../src/todo_parser.ts";
@@ -156,6 +156,7 @@ test("initial planning recovers before and during provider calls in rotated sess
 test("initial planner recovery keeps outage waiting separate from the planner timeout and repair budget", async () => {
   await withTempDir(async (cwd) => {
     const seenTimeouts: Array<number | undefined> = [];
+    const updates: CoordinatorProgressUpdate[] = [];
     let calls = 0;
     const planner: TodoPlanner = async (options) => {
       calls += 1;
@@ -176,12 +177,130 @@ test("initial planner recovery keeps outage waiting separate from the planner ti
       todoPlanner: planner,
       workerRunner: doneOutcome,
       networkRecovery: recoveryConfig,
+      onProgress: (update) => updates.push(update),
     });
 
     assert.equal(result.status, "done");
     assert.equal(calls, 2);
     assert.deepEqual(seenTimeouts, [4_321, 4_321]);
     assert.equal(result.attemptedTasks, 1);
+    const networkUpdates = updates.filter((update) => update.phase === "network_wait");
+    assert.ok(networkUpdates.length > 0);
+    assert.equal(
+      networkUpdates.every((update) => update.networkOperation === "planner"),
+      true,
+    );
+    assert.equal(
+      networkUpdates.every((update) => update.plannerDeadlinePolicy === "per_attempt_excludes_network_wait"),
+      true,
+    );
+    assert.match(networkUpdates[0]?.message ?? "", /planner network recovery/i);
+    assert.match(networkUpdates[0]?.message ?? "", /planning deadline remains unchanged/i);
+  });
+});
+
+test("network recovery followed by planner timeout reports both states distinctly", async () => {
+  await withTempDir(async (cwd) => {
+    let calls = 0;
+    const result = await runCoordinator({
+      cwd,
+      runId: "network-then-planner-timeout",
+      inputText: "Create a plan despite one recoverable interruption.",
+      commit: false,
+      todoTimeoutMs: 25,
+      todoPlanner: async (options) => {
+        calls += 1;
+        if (calls === 1) {
+          throw Object.assign(new Error("temporary connection reset"), { code: "ECONNRESET" });
+        }
+        options.onDiagnostic?.({
+          kind: "timeout",
+          message: "TODO planner timed out (partial output observed; content omitted): time budget exceeded",
+          partialOutputObserved: true,
+          sessionId: "retry-planner",
+        });
+        throw new Error("TODO planner timed out after its unchanged deadline");
+      },
+      workerRunner: doneOutcome,
+      networkRecovery: recoveryConfig,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(calls, 2);
+    const taskResult = await readFile(result.taskResultPath, "utf8");
+    assert.match(taskResult, /- network_recovery: TODO planner network recovery started/);
+    assert.match(taskResult, /- timeout: TODO planner timed out/);
+    assert.match(taskResult, /Partial output observed: yes/);
+    assert.doesNotMatch(taskResult, /- network_failure:/);
+  });
+});
+
+test("terminal planner network failure preserves safe partial-output metadata", async () => {
+  await withTempDir(async (cwd) => {
+    let calls = 0;
+    const result = await runCoordinator({
+      cwd,
+      runId: "planner-network-partial-output",
+      inputText: "Plan while preserving safe interruption metadata.",
+      commit: false,
+      todoPlanner: async (options) => {
+        calls += 1;
+        if (calls === 1) {
+          options.onDiagnostic?.({
+            kind: "failure",
+            message: "TODO planner failed after partial output",
+            partialOutputObserved: true,
+          });
+          throw Object.assign(new Error("planner stream disconnected"), { code: "ECONNRESET" });
+        }
+        throw Object.assign(new Error("provider rejected resumed request"), { status: 400 });
+      },
+      workerRunner: doneOutcome,
+      networkRecovery: recoveryConfig,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(calls, 2);
+    const taskResult = await readFile(result.taskResultPath, "utf8");
+    assert.match(taskResult, /- network_failure: TODO planner network recovery ended/);
+    assert.match(taskResult, /Partial output observed: yes/);
+    assert.match(taskResult, /Network failure reason: invalid_request/);
+  });
+});
+
+test("cancellation during planner network recovery is not reported as timeout or network failure", async () => {
+  await withTempDir(async (cwd) => {
+    const controller = new AbortController();
+    const updates: CoordinatorProgressUpdate[] = [];
+    const resultPromise = runCoordinator({
+      cwd,
+      runId: "cancel-planner-recovery",
+      inputText: "Plan after an unavailable connection.",
+      commit: false,
+      abortSignal: controller.signal,
+      todoPlanner: async () => {
+        throw Object.assign(new Error("network unavailable"), { code: "ENETUNREACH" });
+      },
+      workerRunner: doneOutcome,
+      networkRecovery: { enabled: true, baseDelayMs: 10_000, maxDelayMs: 10_000, maxOutageMs: null },
+      onProgress: (update) => {
+        updates.push(update);
+        if (update.networkRecoveryEvent === "retry_scheduled" && !controller.signal.aborted) {
+          controller.abort("user cancelled planner recovery");
+        }
+      },
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.status, "failed");
+    const taskResult = await readFile(result.taskResultPath, "utf8");
+    assert.match(taskResult, /- cancelled: TODO planning cancelled: user cancelled planner recovery/);
+    assert.doesNotMatch(taskResult, /- timeout:/);
+    assert.doesNotMatch(taskResult, /- network_failure:/);
+    assert.equal(
+      updates.some((update) => update.networkOperation === "planner"),
+      true,
+    );
   });
 });
 

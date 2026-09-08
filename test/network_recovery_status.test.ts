@@ -112,7 +112,11 @@ test("planner recovery restores planning before publishing the completed plan", 
     const lastWait = updates.map((update) => update.phase).lastIndexOf("network_wait");
     assert.ok(lastWait >= 0);
     assert.equal(updates[lastWait + 1]?.phase, "planning");
-    assert.equal(updates[lastWait + 2]?.phase, "planned");
+    assert.equal(updates[lastWait + 1]?.plannerDiagnostic, "network_recovery");
+    assert.equal(
+      updates.slice(lastWait + 1).some((update) => update.phase === "planned"),
+      true,
+    );
   });
 });
 

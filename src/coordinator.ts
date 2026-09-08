@@ -44,6 +44,7 @@ import {
   createPlannerActiveProgress,
   createPlannerGraceProgress,
   createPlannerStartedProgress,
+  formatFriendlyDuration,
   plannerProgressCheckpoints,
   type PlannerProgressEvent,
   type PlannerProgressHandler,
@@ -128,16 +129,30 @@ export type CoordinatorProgressPhase =
   | "task_obsolete"
   | "complete";
 
-export type PlannerDiagnosticKind = "timeout" | "abort" | "invalid_output" | "repair_attempt" | "failure";
+export type PlannerDiagnosticKind =
+  | "timeout"
+  | "cancelled"
+  /** @deprecated Planner cancellation is now reported as `cancelled`. */
+  | "abort"
+  | "network_recovery"
+  | "network_failure"
+  | "invalid_output"
+  | "repair_attempt"
+  | "failure";
 
 export interface PlannerDiagnostic {
   kind: PlannerDiagnosticKind;
   message: string;
-  /** Present on timeout diagnostics; partial content itself is deliberately omitted. */
+  /** Present whenever output presence is known; partial content itself is deliberately omitted. */
   partialOutputObserved?: boolean;
   diagnostics?: string[];
   sessionFile?: string;
   sessionId?: string;
+  /** Network lifecycle data is separate from timeout/cancellation classification. */
+  networkRecoveryEvent?: NetworkRecoveryEventType;
+  networkFailureReason?: string;
+  networkRetryCount?: number;
+  networkOutageElapsedMs?: number;
 }
 
 export type PlannerDiagnosticHandler = (diagnostic: PlannerDiagnostic) => void;
@@ -202,6 +217,10 @@ export interface CoordinatorProgressUpdate {
   networkNextRetryAtMs?: number;
   networkNextRetryInMs?: number;
   networkFailureReason?: string;
+  /** Identifies whether recovery belongs to planning or worker execution. */
+  networkOperation?: "planner" | "worker";
+  /** Planner recovery never mutates the configured per-attempt deadline. */
+  plannerDeadlinePolicy?: "per_attempt_excludes_network_wait";
 }
 
 export type CoordinatorProgressHandler = (update: CoordinatorProgressUpdate) => void;
@@ -259,7 +278,11 @@ export interface TodoPlannerOptions {
   plannerPrompt?: string;
   /** Structured revision context supplied alongside plannerPrompt. */
   planRevision?: Readonly<PlanRevisionRequest>;
-  /** Normalized coordinator recovery policy; network wait is excluded from operation timeouts. */
+  /**
+   * Normalized coordinator recovery policy. Recovery wait is accounted on its
+   * own outage clock; every replay receives the same configured per-attempt
+   * planner deadline, so recovery settings never replace that deadline.
+   */
   networkRecovery?: Readonly<NetworkRecoveryConfig>;
   /** Run-level constraints derived from capabilities unavailable to isolated workers. */
   capabilityConstraints?: readonly string[];
@@ -372,7 +395,12 @@ interface RuntimeOptions {
   lastProgress?: CoordinatorProgressUpdate;
   progressClosed: boolean;
   networkRecoverySequence: number;
-  activeNetworkRecoveries: Map<number, NetworkRecoveryEvent>;
+  activeNetworkRecoveries: Map<number, ActiveNetworkRecovery>;
+}
+
+interface ActiveNetworkRecovery {
+  event: NetworkRecoveryEvent;
+  operation: "planner" | "worker";
 }
 
 type RetainedWorkerReuseScope = "sequential_task" | "partial_continuation";
@@ -1442,10 +1470,12 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
     return result;
   } catch (error) {
     const message = errorMessage(error);
-    if (!planningComplete) {
+    if (!planningComplete && !hasTerminalPlannerDiagnostic(runtime.plannerDiagnostics)) {
       recordPlannerDiagnostic(runtime, {
-        kind: "failure",
-        message: `TODO planning failed: ${message}`,
+        kind: runtime.abortSignal?.aborted ? "cancelled" : "failure",
+        message: runtime.abortSignal?.aborted
+          ? `TODO planning cancelled: ${abortSignalReason(runtime.abortSignal)}`
+          : `TODO planning failed: ${message}`,
       });
     }
     const resultError = !planningComplete
@@ -1636,8 +1666,10 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
  * failed. The default planner disables tools and disposes every session before
  * rejecting, so each retry rotates unsafe conversation state while replaying
  * only the complete immutable planning context. Recovery owns no planner
- * repair/attempt counter, and each fresh call retains the planner timeout;
- * backoff remains governed solely by the separate outage deadline.
+ * repair/attempt counter, and each fresh call retains the exact configured
+ * per-attempt planner timeout. Network wait is intentionally excluded and is
+ * governed solely by the separate outage deadline; recovery cannot reset,
+ * extend, or replace the timeout attached to any individual planner call.
  */
 async function runPlannerOperationWithNetworkRecovery(
   plannerOptions: TodoPlannerOptions,
@@ -1646,6 +1678,8 @@ async function runPlannerOperationWithNetworkRecovery(
   const run = (recoverySignal?: AbortSignal) =>
     runtime.todoPlanner({
       ...plannerOptions,
+      // The recovery signal carries cancellation/outage expiry only. It does
+      // not alter timeoutMs, which remains authoritative for every replay.
       abortSignal: combineAbortSignals(plannerOptions.abortSignal, recoverySignal),
     });
 
@@ -1653,17 +1687,73 @@ async function runPlannerOperationWithNetworkRecovery(
     return await run();
   } catch (initialFailure) {
     const classification = classifyNetworkFailure(initialFailure);
+    if (plannerOptions.abortSignal?.aborted || classification.reason === "cancelled") {
+      recordPlannerCancellation(runtime, plannerOptions.abortSignal, initialFailure);
+      throw plannerCancellationError(plannerOptions.abortSignal, initialFailure);
+    }
     if (!runtime.networkRecovery.enabled || !classification.recoverable) {
       throw initialFailure;
     }
-    const recovered = await recoverNetworkOperation({
-      initialFailure,
-      config: runtime.networkRecovery,
-      signal: plannerOptions.abortSignal,
-      onEvent: createNetworkRecoveryProgressHandler(runtime),
-      retry: ({ signal }) => run(signal),
-    });
-    return recovered.value;
+
+    const publishRecovery = createNetworkRecoveryProgressHandler(runtime, "planner");
+    let recoveryStarted = false;
+    let lastRecoveryEvent: NetworkRecoveryEvent | undefined;
+    const onRecoveryEvent = (event: NetworkRecoveryEvent) => {
+      if (event.type !== "cleanup") lastRecoveryEvent = event;
+      if (event.type === "outage_started" && !recoveryStarted) {
+        recoveryStarted = true;
+        recordPlannerDiagnostic(
+          runtime,
+          plannerNetworkDiagnostic(
+            event,
+            plannerOptions.timeoutMs,
+            latestPlannerPartialOutput(runtime.plannerDiagnostics),
+          ),
+        );
+      }
+      publishRecovery(event);
+      if (event.type === "recovered") {
+        recordPlannerDiagnostic(
+          runtime,
+          plannerNetworkDiagnostic(
+            event,
+            plannerOptions.timeoutMs,
+            latestPlannerPartialOutput(runtime.plannerDiagnostics),
+          ),
+        );
+      }
+    };
+
+    try {
+      const recovered = await recoverNetworkOperation({
+        initialFailure,
+        config: runtime.networkRecovery,
+        signal: plannerOptions.abortSignal,
+        onEvent: onRecoveryEvent,
+        retry: ({ signal }) => run(signal),
+      });
+      return recovered.value;
+    } catch (recoveryFailure) {
+      if (plannerOptions.abortSignal?.aborted) {
+        recordPlannerCancellation(runtime, plannerOptions.abortSignal, recoveryFailure);
+        throw plannerCancellationError(plannerOptions.abortSignal, recoveryFailure);
+      } else if (!hasTerminalPlannerDiagnosticAfterLatestRecovery(runtime.plannerDiagnostics)) {
+        const finalClassification = classifyNetworkFailure(recoveryFailure);
+        recordPlannerDiagnostic(runtime, {
+          kind: "network_failure",
+          message: `TODO planner network recovery ended before planning completed: ${errorMessage(recoveryFailure)}`,
+          partialOutputObserved: latestPlannerPartialOutput(runtime.plannerDiagnostics),
+          networkRecoveryEvent:
+            lastRecoveryEvent?.type === "outage_expired" || lastRecoveryEvent?.type === "failed"
+              ? lastRecoveryEvent.type
+              : "failed",
+          networkFailureReason: lastRecoveryEvent?.state.lastFailure.reason ?? finalClassification.reason,
+          networkRetryCount: lastRecoveryEvent?.state.retryCount,
+          networkOutageElapsedMs: lastRecoveryEvent?.state.elapsedMs,
+        });
+      }
+      throw recoveryFailure;
+    }
   }
 }
 
@@ -1969,6 +2059,16 @@ async function runTodoPlannerPrompt(options: {
     dispose: false,
   });
 
+  // Caller cancellation wins even when it arrives during grace. A hard abort
+  // caused by grace expiry has cancelled=false and remains a timeout.
+  if (promptResult.cancelled) {
+    const outputState = promptResult.outputObserved
+      ? "partial output observed; content omitted"
+      : "no planner output observed";
+    const message = `TODO planner cancelled (${outputState}): ${promptResult.error ?? "caller cancellation"}`;
+    options.onDiagnostic?.(plannerPromptDiagnostic("cancelled", message, promptResult));
+    throw new TodoGenerationError(message);
+  }
   if (promptResult.timedOut) {
     if (
       promptResult.completedDuringGrace &&
@@ -1987,8 +2087,8 @@ async function runTodoPlannerPrompt(options: {
     throw new TodoGenerationError(message);
   }
   if (promptResult.aborted) {
-    const message = `TODO planner aborted: ${promptResult.error ?? "outer abort signal"}`;
-    options.onDiagnostic?.(plannerPromptDiagnostic("abort", message, promptResult));
+    const message = `TODO planner stopped: ${promptResult.error ?? "session abort"}`;
+    options.onDiagnostic?.(plannerPromptDiagnostic("failure", message, promptResult));
     throw new TodoGenerationError(message);
   }
   if (promptResult.error) {
@@ -2008,7 +2108,7 @@ async function runTodoPlannerPrompt(options: {
 }
 
 function plannerPromptDiagnostic(
-  kind: Extract<PlannerDiagnosticKind, "timeout" | "abort" | "failure">,
+  kind: Extract<PlannerDiagnosticKind, "timeout" | "cancelled" | "abort" | "failure">,
   message: string,
   promptResult: {
     outputObserved: boolean;
@@ -2020,7 +2120,7 @@ function plannerPromptDiagnostic(
   return {
     kind,
     message,
-    ...(kind === "timeout" ? { partialOutputObserved: promptResult.outputObserved } : {}),
+    partialOutputObserved: promptResult.outputObserved,
     diagnostics: promptResult.diagnostics,
     sessionFile: promptResult.sessionFile,
     sessionId: promptResult.sessionId,
@@ -2156,7 +2256,7 @@ function emitProgress(
   runtime.lastProgress = progress;
   const activeRecovery = latestNetworkRecovery(runtime.activeNetworkRecoveries);
   if (activeRecovery) {
-    publishNetworkRecoveryProgress(runtime, activeRecovery);
+    publishNetworkRecoveryProgress(runtime, activeRecovery.event, activeRecovery.operation);
   } else {
     runtime.onProgress?.(progress);
   }
@@ -2169,7 +2269,10 @@ function emitProgress(
  * status path. Operation IDs prevent an older concurrent recovery from
  * repainting a newer outage or completion.
  */
-function createNetworkRecoveryProgressHandler(runtime: RuntimeOptions): (event: NetworkRecoveryEvent) => void {
+function createNetworkRecoveryProgressHandler(
+  runtime: RuntimeOptions,
+  operation: "planner" | "worker" = "worker",
+): (event: NetworkRecoveryEvent) => void {
   const operationId = ++runtime.networkRecoverySequence;
   let cleaned = false;
 
@@ -2188,7 +2291,7 @@ function createNetworkRecoveryProgressHandler(runtime: RuntimeOptions): (event: 
       if (event.type === "recovered") {
         const active = latestNetworkRecovery(runtime.activeNetworkRecoveries);
         if (active) {
-          publishNetworkRecoveryProgress(runtime, active);
+          publishNetworkRecoveryProgress(runtime, active.event, active.operation);
         } else if (runtime.lastProgress) {
           runtime.onProgress?.({ ...runtime.lastProgress, workerCostTotal: runtime.workerCostState.total });
         }
@@ -2196,18 +2299,26 @@ function createNetworkRecoveryProgressHandler(runtime: RuntimeOptions): (event: 
       return;
     }
 
-    runtime.activeNetworkRecoveries.set(operationId, event);
+    runtime.activeNetworkRecoveries.set(operationId, { event, operation });
     if (operationId === latestNetworkRecoveryId(runtime.activeNetworkRecoveries)) {
-      publishNetworkRecoveryProgress(runtime, event);
+      publishNetworkRecoveryProgress(runtime, event, operation);
     }
   };
 }
 
-function publishNetworkRecoveryProgress(runtime: RuntimeOptions, event: NetworkRecoveryEvent): void {
+function publishNetworkRecoveryProgress(
+  runtime: RuntimeOptions,
+  event: NetworkRecoveryEvent,
+  operation: "planner" | "worker" = "worker",
+): void {
   if (runtime.progressClosed) return;
   const stable = runtime.lastProgress;
   const nowMs = event.state.outageStartedAtMs + event.state.elapsedMs;
-  const message = formatNetworkRecoveryStatus(event);
+  const recoveryStatus = formatNetworkRecoveryStatus(event);
+  const message =
+    operation === "planner"
+      ? `TODO planner network recovery: ${recoveryStatus} The ${formatFriendlyDuration(runtime.todoTimeoutMs)} planning deadline remains unchanged for each provider attempt.`
+      : recoveryStatus;
   runtime.onProgress?.({
     message,
     phase: "network_wait",
@@ -2231,17 +2342,19 @@ function publishNetworkRecoveryProgress(runtime: RuntimeOptions, event: NetworkR
     networkNextRetryInMs:
       event.state.nextRetryAtMs === undefined ? undefined : Math.max(0, event.state.nextRetryAtMs - nowMs),
     networkFailureReason: event.state.lastFailure.reason,
+    networkOperation: operation,
+    ...(operation === "planner" ? { plannerDeadlinePolicy: "per_attempt_excludes_network_wait" as const } : {}),
   });
 }
 
 function latestNetworkRecovery(
-  recoveries: ReadonlyMap<number, NetworkRecoveryEvent>,
-): NetworkRecoveryEvent | undefined {
+  recoveries: ReadonlyMap<number, ActiveNetworkRecovery>,
+): ActiveNetworkRecovery | undefined {
   const id = latestNetworkRecoveryId(recoveries);
   return id === undefined ? undefined : recoveries.get(id);
 }
 
-function latestNetworkRecoveryId(recoveries: ReadonlyMap<number, NetworkRecoveryEvent>): number | undefined {
+function latestNetworkRecoveryId(recoveries: ReadonlyMap<number, ActiveNetworkRecovery>): number | undefined {
   let latest: number | undefined;
   for (const id of recoveries.keys()) {
     if (latest === undefined || id > latest) latest = id;
@@ -2253,6 +2366,67 @@ function isTerminalNetworkRecoveryEvent(type: NetworkRecoveryEventType): boolean
   return type === "recovered" || type === "failed" || type === "cancelled" || type === "outage_expired";
 }
 
+function plannerNetworkDiagnostic(
+  event: NetworkRecoveryEvent,
+  timeoutMs: number | undefined,
+  partialOutputObserved: boolean | undefined,
+): PlannerDiagnostic {
+  const recovered = event.type === "recovered";
+  const budget = formatFriendlyDuration(timeoutMs ?? DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs);
+  return {
+    kind: "network_recovery",
+    message: recovered
+      ? `TODO planner network recovery succeeded after ${formatFriendlyDuration(event.state.elapsedMs)}; planning continues with its unchanged ${budget} per-attempt deadline.`
+      : `TODO planner network recovery started (${event.state.lastFailure.reason}); its outage clock is separate and the ${budget} per-attempt planning deadline remains unchanged.`,
+    partialOutputObserved,
+    networkRecoveryEvent: event.type,
+    networkFailureReason: event.state.lastFailure.reason,
+    networkRetryCount: event.state.retryCount,
+    networkOutageElapsedMs: event.state.elapsedMs,
+  };
+}
+
+function latestPlannerPartialOutput(diagnostics: readonly PlannerDiagnostic[]): boolean | undefined {
+  return [...diagnostics].reverse().find((diagnostic) => diagnostic.partialOutputObserved !== undefined)
+    ?.partialOutputObserved;
+}
+
+function hasTerminalPlannerDiagnostic(diagnostics: readonly PlannerDiagnostic[]): boolean {
+  const kind = diagnostics.at(-1)?.kind;
+  return kind !== undefined && ["timeout", "cancelled", "abort", "network_failure", "failure"].includes(kind);
+}
+
+function hasTerminalPlannerDiagnosticAfterLatestRecovery(diagnostics: readonly PlannerDiagnostic[]): boolean {
+  let recoveryIndex = -1;
+  for (let index = diagnostics.length - 1; index >= 0; index -= 1) {
+    if (diagnostics[index]?.kind === "network_recovery") {
+      recoveryIndex = index;
+      break;
+    }
+  }
+  return diagnostics
+    .slice(recoveryIndex + 1)
+    .some((diagnostic) => ["timeout", "cancelled", "abort", "network_failure"].includes(diagnostic.kind));
+}
+
+function recordPlannerCancellation(runtime: RuntimeOptions, signal: AbortSignal | undefined, cause: unknown): void {
+  if (runtime.plannerDiagnostics.some((diagnostic) => diagnostic.kind === "cancelled")) return;
+  recordPlannerDiagnostic(runtime, {
+    kind: "cancelled",
+    message: `TODO planning cancelled: ${signal?.aborted ? abortSignalReason(signal) : errorMessage(cause)}`,
+    partialOutputObserved: latestPlannerPartialOutput(runtime.plannerDiagnostics),
+  });
+}
+
+function abortSignalReason(signal: AbortSignal): string {
+  return signal.reason === undefined ? "cancelled by caller" : errorMessage(signal.reason);
+}
+
+function plannerCancellationError(signal: AbortSignal | undefined, cause: unknown): TodoGenerationError {
+  const reason = signal?.aborted ? abortSignalReason(signal) : errorMessage(cause);
+  return new TodoGenerationError(`TODO planning cancelled: ${reason}`, { cause });
+}
+
 function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDiagnostic): void {
   const normalized: PlannerDiagnostic = {
     kind: diagnostic.kind,
@@ -2261,6 +2435,10 @@ function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDia
     diagnostics: diagnostic.diagnostics?.filter(Boolean),
     sessionFile: diagnostic.sessionFile,
     sessionId: diagnostic.sessionId,
+    networkRecoveryEvent: diagnostic.networkRecoveryEvent,
+    networkFailureReason: diagnostic.networkFailureReason,
+    networkRetryCount: diagnostic.networkRetryCount,
+    networkOutageElapsedMs: diagnostic.networkOutageElapsedMs,
   };
   const last = runtime.plannerDiagnostics.at(-1);
   if (last?.kind === normalized.kind && last.message === normalized.message) {
@@ -2270,12 +2448,22 @@ function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDia
   emitProgress(runtime, normalized.message, {
     phase: "planning",
     status: normalized.kind,
-    isError: normalized.kind !== "repair_attempt",
+    isError: !["repair_attempt", "network_recovery"].includes(normalized.kind),
     plannerDiagnostic: normalized.kind,
     plannerDiagnostics: normalized.diagnostics,
     plannerPartialOutputObserved: normalized.partialOutputObserved,
     plannerSessionFile: normalized.sessionFile,
     plannerSessionId: normalized.sessionId,
+    networkRecoveryEvent: normalized.networkRecoveryEvent,
+    networkRetryCount: normalized.networkRetryCount,
+    networkOutageElapsedMs: normalized.networkOutageElapsedMs,
+    networkFailureReason: normalized.networkFailureReason,
+    networkOperation:
+      normalized.kind === "network_recovery" || normalized.kind === "network_failure" ? "planner" : undefined,
+    plannerDeadlinePolicy:
+      normalized.kind === "network_recovery" || normalized.kind === "network_failure"
+        ? "per_attempt_excludes_network_wait"
+        : undefined,
     taskProgress: buildTaskProgressModel({ tasks: [] }),
   });
 }
@@ -2767,6 +2955,18 @@ async function appendFailureNote(
       lines.push("", `- ${diagnostic.kind}: ${diagnostic.message}`);
       if (diagnostic.partialOutputObserved !== undefined) {
         lines.push(`  - Partial output observed: ${diagnostic.partialOutputObserved ? "yes" : "no"}`);
+      }
+      if (diagnostic.networkRecoveryEvent) {
+        lines.push(`  - Network recovery event: ${diagnostic.networkRecoveryEvent}`);
+      }
+      if (diagnostic.networkFailureReason) {
+        lines.push(`  - Network failure reason: ${diagnostic.networkFailureReason}`);
+      }
+      if (diagnostic.networkRetryCount !== undefined) {
+        lines.push(`  - Network retry count: ${diagnostic.networkRetryCount}`);
+      }
+      if (diagnostic.networkOutageElapsedMs !== undefined) {
+        lines.push(`  - Network outage elapsed: ${formatFriendlyDuration(diagnostic.networkOutageElapsedMs)}`);
       }
       if (diagnostic.sessionId) {
         lines.push(`  - Session ID: ${diagnostic.sessionId}`);

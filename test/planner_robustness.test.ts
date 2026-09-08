@@ -375,14 +375,49 @@ test("planner abort aborts and disposes the planner session", async () => {
 
     await promptStarted;
     abortController.abort(new Error("stop planning"));
-    await assert.rejects(plannerPromise, /TODO planner aborted: stop planning/);
+    await assert.rejects(plannerPromise, /TODO planner cancelled \(no planner output observed\): stop planning/);
     assert.equal(abortCalls, 1);
     assert.equal(disposeCalls, 1);
     assert.deepEqual(
       diagnostics.map((diagnostic) => diagnostic.kind),
-      ["abort"],
+      ["cancelled"],
     );
     assert.equal(diagnostics[0]?.sessionId, "abort-session");
+    assert.equal(diagnostics[0]?.partialOutputObserved, false);
+  });
+});
+
+test("planner cancellation during grace wins over timeout and retains partial-output metadata", async (t) => {
+  await withTempDir(async (cwd) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const controller = new AbortController();
+    const diagnostics: PlannerDiagnostic[] = [];
+    const session = new GracePeriodPlannerSession({
+      output: "# Pi Long Task TODO\n\npartial cancellation output",
+      completeMessage: false,
+    });
+
+    const plannerPromise = runTodoPlanner({
+      inputText: "Plan until cancellation during grace.",
+      cwd,
+      runDir: path.join(cwd, "planner-grace-cancel"),
+      abortSignal: controller.signal,
+      timeoutMs: 10,
+      gracefulShutdownMs: 100,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      sessionFactory: async () => ({ session }),
+    });
+
+    await session.promptStarted;
+    t.mock.timers.tick(10);
+    assert.equal(session.followUps.length, 1);
+    controller.abort("user stopped planning during grace");
+
+    await assert.rejects(plannerPromise, /TODO planner cancelled \(partial output observed; content omitted\)/);
+    assert.equal(session.abortCalls, 1);
+    assert.equal(session.disposeCalls, 1);
+    assert.equal(diagnostics[0]?.kind, "cancelled");
+    assert.equal(diagnostics[0]?.partialOutputObserved, true);
   });
 });
 
