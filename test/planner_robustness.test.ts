@@ -89,8 +89,9 @@ test("planner success path creates work and disposes the planner session", async
   });
 });
 
-test("planner timeout aborts and disposes the planner session", async () => {
+test("planner timeout aborts and disposes the planner session using a fake clock", async (t) => {
   await withTempDir(async (cwd) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const diagnostics: PlannerDiagnostic[] = [];
     let abortCalls = 0;
     let disposeCalls = 0;
@@ -126,6 +127,7 @@ test("planner timeout aborts and disposes the planner session", async () => {
     });
 
     await promptStarted;
+    t.mock.timers.tick(10);
     await assert.rejects(plannerPromise, /TODO planner timed out/);
     assert.equal(abortCalls, 1);
     assert.equal(disposeCalls, 1);
