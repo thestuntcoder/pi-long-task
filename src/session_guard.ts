@@ -20,7 +20,14 @@ export interface GuardedSessionPromptOptions {
 
 export interface GuardedSessionPromptResult {
   assistantText: string;
+  /** True when the primary prompt deadline elapsed, even if the prompt safely completed during grace. */
   timedOut: boolean;
+  /** True only when a timed-out prompt settled during the configured grace period. */
+  completedDuringGrace: boolean;
+  /** True when non-whitespace assistant output was observed before prompt termination. */
+  outputObserved: boolean;
+  /** True when the session had to be stopped because its grace period expired. */
+  graceExpired: boolean;
   aborted: boolean;
   error?: string;
   /** Untouched prompt failure for coordinator-level provider/transport classification. */
@@ -39,7 +46,10 @@ export async function runGuardedSessionPrompt(
   const events: unknown[] = [];
   const timers = new Set<ReturnType<typeof setTimeout>>();
   let assistantText = "";
+  let currentAssistantText = "";
+  let outputObserved = false;
   let timedOut = false;
+  let graceExpired = false;
   let aborted = false;
   let error: string | undefined;
   let failure: unknown;
@@ -47,6 +57,7 @@ export async function runGuardedSessionPrompt(
   let finished = false;
   let unsubscribe: (() => void) | undefined;
   let complete: (() => void) | undefined;
+  const assistantTextAtStart = latestAssistantText(session, [], "");
 
   const completed = new Promise<void>((resolve) => {
     complete = resolve;
@@ -137,6 +148,7 @@ export async function runGuardedSessionPrompt(
       if (finished || promptSettled) {
         return;
       }
+      graceExpired = true;
       abortSession(`session prompt exceeded ${formatMilliseconds(timeoutMs(options.timeoutMs))} timeout`);
       resolveCompleted();
     };
@@ -163,9 +175,21 @@ export async function runGuardedSessionPrompt(
     } else {
       unsubscribe = session.subscribe((event: unknown) => {
         events.push(event);
-        const text = assistantTextFromEvent(event);
-        if (text) {
-          assistantText = text;
+        if (isAssistantMessageStart(event)) {
+          currentAssistantText = "";
+        }
+        const delta = assistantTextDeltaFromEvent(event);
+        if (delta !== undefined) {
+          currentAssistantText += delta;
+          assistantText = currentAssistantText || assistantText;
+          outputObserved ||= delta.trim().length > 0;
+        } else {
+          const text = assistantTextFromEvent(event);
+          if (text) {
+            currentAssistantText = text;
+            assistantText = text;
+            outputObserved ||= text.trim().length > 0;
+          }
         }
         try {
           options.onEvent?.(event);
@@ -206,6 +230,7 @@ export async function runGuardedSessionPrompt(
     options.abortSignal?.removeEventListener("abort", abortListener);
     unsubscribe?.();
     assistantText = latestAssistantText(session, events, assistantText);
+    outputObserved ||= assistantText.trim().length > 0 && assistantText !== assistantTextAtStart;
     if (options.dispose !== false) {
       try {
         const disposeResult = (session.dispose as (() => unknown) | undefined)?.();
@@ -220,7 +245,19 @@ export async function runGuardedSessionPrompt(
     }
   }
 
-  return buildResult(session, events, assistantText, timedOut, aborted, error, failure, diagnostics);
+  return buildResult(
+    session,
+    events,
+    assistantText,
+    timedOut,
+    timedOut && promptSettled && !graceExpired && !aborted && failure === undefined,
+    outputObserved,
+    graceExpired,
+    aborted,
+    error,
+    failure,
+    diagnostics,
+  );
 }
 
 function buildResult(
@@ -228,6 +265,9 @@ function buildResult(
   events: unknown[],
   assistantText: string,
   timedOut: boolean,
+  completedDuringGrace: boolean,
+  outputObserved: boolean,
+  graceExpired: boolean,
   aborted: boolean,
   error: string | undefined,
   failure: unknown,
@@ -236,6 +276,9 @@ function buildResult(
   return {
     assistantText: latestAssistantText(session, events, assistantText),
     timedOut,
+    completedDuringGrace,
+    outputObserved,
+    graceExpired,
     aborted,
     error,
     ...(failure === undefined ? {} : { failure }),
@@ -275,6 +318,26 @@ function nonNegativeMilliseconds(value: number | undefined): number {
 
 function formatMilliseconds(ms: number): string {
   return `${(ms / 1000).toFixed(3)}s`;
+}
+
+function isAssistantMessageStart(event: unknown): boolean {
+  return (
+    isRecord(event) && event.type === "message_start" && isRecord(event.message) && event.message.role === "assistant"
+  );
+}
+
+function assistantTextDeltaFromEvent(event: unknown): string | undefined {
+  if (!isRecord(event) || event.type !== "message_update" || !isRecord(event.assistantMessageEvent)) {
+    return undefined;
+  }
+  const assistantEvent = event.assistantMessageEvent;
+  return assistantEvent.type === "text_delta" && typeof assistantEvent.delta === "string"
+    ? assistantEvent.delta
+    : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function abortReason(signal: AbortSignal | undefined, fallback: string): string {

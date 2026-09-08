@@ -121,6 +121,8 @@ export type PlannerDiagnosticKind = "timeout" | "abort" | "invalid_output" | "re
 export interface PlannerDiagnostic {
   kind: PlannerDiagnosticKind;
   message: string;
+  /** Present on timeout diagnostics; partial content itself is deliberately omitted. */
+  partialOutputObserved?: boolean;
   diagnostics?: string[];
   sessionFile?: string;
   sessionId?: string;
@@ -166,6 +168,7 @@ export interface CoordinatorProgressUpdate {
   taskProgress?: TaskProgressModel;
   plannerDiagnostic?: PlannerDiagnosticKind;
   plannerDiagnostics?: string[];
+  plannerPartialOutputObserved?: boolean;
   plannerSessionFile?: string;
   plannerSessionId?: string;
   /** Deterministic deadline selection used by planner calls in this run. */
@@ -1890,7 +1893,19 @@ async function runTodoPlannerPrompt(options: {
   });
 
   if (promptResult.timedOut) {
-    const message = `TODO planner timed out: ${promptResult.error ?? "time budget exceeded"}`;
+    if (
+      promptResult.completedDuringGrace &&
+      promptResult.outputObserved &&
+      !promptResult.error &&
+      isSafeCompletedTodoPlannerOutput(promptResult.assistantText)
+    ) {
+      return promptResult.assistantText;
+    }
+
+    const outputState = promptResult.outputObserved
+      ? "partial output observed; content omitted"
+      : "no planner output observed";
+    const message = `TODO planner timed out (${outputState}): ${promptResult.error ?? "time budget exceeded"}`;
     options.onDiagnostic?.(plannerPromptDiagnostic("timeout", message, promptResult));
     throw new TodoGenerationError(message);
   }
@@ -1919,6 +1934,7 @@ function plannerPromptDiagnostic(
   kind: Extract<PlannerDiagnosticKind, "timeout" | "abort" | "failure">,
   message: string,
   promptResult: {
+    outputObserved: boolean;
     diagnostics: string[];
     sessionFile?: string;
     sessionId?: string;
@@ -1927,10 +1943,23 @@ function plannerPromptDiagnostic(
   return {
     kind,
     message,
+    ...(kind === "timeout" ? { partialOutputObserved: promptResult.outputObserved } : {}),
     diagnostics: promptResult.diagnostics,
     sessionFile: promptResult.sessionFile,
     sessionId: promptResult.sessionId,
   };
+}
+
+function isSafeCompletedTodoPlannerOutput(text: string): boolean {
+  if (!text.trim()) {
+    return false;
+  }
+  try {
+    extractAndValidateTodoMarkdown(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function buildTodoPlanningShutdownMessage(): string {
@@ -2132,6 +2161,7 @@ function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDia
   const normalized: PlannerDiagnostic = {
     kind: diagnostic.kind,
     message: diagnostic.message,
+    partialOutputObserved: diagnostic.partialOutputObserved,
     diagnostics: diagnostic.diagnostics?.filter(Boolean),
     sessionFile: diagnostic.sessionFile,
     sessionId: diagnostic.sessionId,
@@ -2147,6 +2177,7 @@ function recordPlannerDiagnostic(runtime: RuntimeOptions, diagnostic: PlannerDia
     isError: normalized.kind !== "repair_attempt",
     plannerDiagnostic: normalized.kind,
     plannerDiagnostics: normalized.diagnostics,
+    plannerPartialOutputObserved: normalized.partialOutputObserved,
     plannerSessionFile: normalized.sessionFile,
     plannerSessionId: normalized.sessionId,
     taskProgress: buildTaskProgressModel({ tasks: [] }),
@@ -2635,6 +2666,9 @@ async function appendFailureNote(
     lines.push("", "### Planner diagnostics");
     for (const diagnostic of plannerDiagnostics) {
       lines.push("", `- ${diagnostic.kind}: ${diagnostic.message}`);
+      if (diagnostic.partialOutputObserved !== undefined) {
+        lines.push(`  - Partial output observed: ${diagnostic.partialOutputObserved ? "yes" : "no"}`);
+      }
       if (diagnostic.sessionId) {
         lines.push(`  - Session ID: ${diagnostic.sessionId}`);
       }

@@ -374,12 +374,18 @@ try {
     ["timeout", "failure"],
   );
   assert.equal(
+    timeoutCoordinatorProgressUpdates.find((update) => update.plannerDiagnostic === "timeout")
+      ?.plannerPartialOutputObserved,
+    false,
+  );
+  assert.equal(
     timeoutCoordinatorProgressUpdates.some((update) => update.phase === "task_start"),
     false,
   );
   const timeoutCoordinatorResult = await readFile(timeoutCoordinatorRun.taskResultPath, "utf8");
   assert.match(timeoutCoordinatorResult, /### Planner diagnostics/);
-  assert.match(timeoutCoordinatorResult, /timeout: TODO planner timed out/);
+  assert.match(timeoutCoordinatorResult, /timeout: TODO planner timed out \(no planner output observed\)/);
+  assert.match(timeoutCoordinatorResult, /Partial output observed: no/);
   assert.match(timeoutCoordinatorResult, /Session ID: planner-timeout-session/);
   assert.match(timeoutCoordinatorResult, /Session file: planner-timeout\.session\.json/);
 
@@ -558,7 +564,10 @@ try {
     }),
   });
   await timeoutPromptStarted;
-  await assert.rejects(timeoutPlannerPromise, /TODO planner timed out: session prompt exceeded 0\.010s timeout/);
+  await assert.rejects(
+    timeoutPlannerPromise,
+    /TODO planner timed out \(no planner output observed\): session prompt exceeded 0\.010s timeout/,
+  );
   assert.equal(timeoutPlannerAbortCalls, 1);
   assert.equal(timeoutPlannerDisposed, true);
 

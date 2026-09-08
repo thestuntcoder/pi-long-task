@@ -137,6 +137,205 @@ test("planner timeout aborts and disposes the planner session", async () => {
   });
 });
 
+class GracePeriodPlannerSession {
+  sessionId = "grace-period-planner";
+  messages: unknown[] = [];
+  followUps: string[] = [];
+  abortCalls = 0;
+  disposeCalls = 0;
+  private readonly listeners = new Set<(event: unknown) => void>();
+  private readonly output?: string;
+  private readonly outputDelayMs?: number;
+  private readonly completeMessage: boolean;
+  private resolvePrompt: (() => void) | undefined;
+  private resolvePromptStarted: (() => void) | undefined;
+  readonly promptStarted = new Promise<void>((resolve) => {
+    this.resolvePromptStarted = resolve;
+  });
+
+  constructor(options: { output?: string; outputDelayMs?: number; completeMessage?: boolean }) {
+    this.output = options.output;
+    this.outputDelayMs = options.outputDelayMs;
+    this.completeMessage = options.completeMessage ?? true;
+  }
+
+  subscribe(listener: (event: unknown) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async prompt(): Promise<void> {
+    if (this.output !== undefined && this.outputDelayMs === undefined) {
+      this.emitText(this.output);
+    }
+    this.resolvePromptStarted?.();
+    await new Promise<void>((resolve) => {
+      this.resolvePrompt = resolve;
+    });
+  }
+
+  async followUp(text: string): Promise<void> {
+    this.followUps.push(text);
+    if (this.output === undefined || this.outputDelayMs === undefined) {
+      return;
+    }
+    setTimeout(() => {
+      this.emitText(this.output ?? "");
+      this.resolvePrompt?.();
+    }, this.outputDelayMs);
+  }
+
+  abort(): void {
+    this.abortCalls += 1;
+    this.resolvePrompt?.();
+  }
+
+  dispose(): void {
+    this.disposeCalls += 1;
+  }
+
+  getLastAssistantText(): string | undefined {
+    const message = this.messages.at(-1);
+    if (typeof message !== "object" || message === null || !("content" in message)) {
+      return undefined;
+    }
+    return typeof message.content === "string" ? message.content : undefined;
+  }
+
+  private emitText(text: string): void {
+    const message = { role: "assistant", content: text };
+    this.emit({ type: "message_start", message: { role: "assistant" } });
+    this.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+    if (this.completeMessage) {
+      this.messages.push(message);
+      this.emit({ type: "message_end", message });
+    }
+  }
+
+  private emit(event: unknown): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+}
+
+test("planner accepts valid completed output during grace using a fake clock", async (t) => {
+  await withTempDir(async (cwd) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const diagnostics: PlannerDiagnostic[] = [];
+    const session = new GracePeriodPlannerSession({
+      output: generatedTodoMarkdown(["Grace period success"]),
+      outputDelayMs: 5,
+    });
+
+    const plannerPromise = runTodoPlanner({
+      inputText: "Plan one task during grace.",
+      cwd,
+      runDir: path.join(cwd, "planner-grace-success"),
+      timeoutMs: 10,
+      gracefulShutdownMs: 20,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      sessionFactory: async () => ({ session }),
+    });
+
+    await session.promptStarted;
+    t.mock.timers.tick(10);
+    assert.equal(session.followUps.length, 1);
+    t.mock.timers.tick(5);
+
+    const markdown = await plannerPromise;
+    assert.match(markdown, /TODO 1 — Grace period success/);
+    assert.equal(session.abortCalls, 0);
+    assert.equal(session.disposeCalls, 1);
+    assert.deepEqual(diagnostics, []);
+  });
+});
+
+test("planner rejects invalid output that completes during grace using a fake clock", async (t) => {
+  await withTempDir(async (cwd) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const diagnostics: PlannerDiagnostic[] = [];
+    const session = new GracePeriodPlannerSession({
+      output: "# Pi Long Task TODO\n\ntruncated",
+      outputDelayMs: 5,
+    });
+
+    const plannerPromise = runTodoPlanner({
+      inputText: "Plan one task but finish with invalid output.",
+      cwd,
+      runDir: path.join(cwd, "planner-invalid-grace"),
+      timeoutMs: 10,
+      gracefulShutdownMs: 20,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      sessionFactory: async () => ({ session }),
+    });
+
+    await session.promptStarted;
+    t.mock.timers.tick(10);
+    t.mock.timers.tick(5);
+
+    await assert.rejects(plannerPromise, /TODO planner timed out \(partial output observed; content omitted\)/);
+    assert.equal(session.abortCalls, 0);
+    assert.equal(diagnostics[0]?.partialOutputObserved, true);
+  });
+});
+
+test("planner timeout reports partial output without leaking it using a fake clock", async (t) => {
+  await withTempDir(async (cwd) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const diagnostics: PlannerDiagnostic[] = [];
+    const unsafePartial = "# Pi Long Task TODO\n\nSECRET-TRUNCATED-CONTENT";
+    const session = new GracePeriodPlannerSession({ output: unsafePartial, completeMessage: false });
+
+    const plannerPromise = runTodoPlanner({
+      inputText: "Plan one task but emit only a fragment.",
+      cwd,
+      runDir: path.join(cwd, "planner-partial-timeout"),
+      timeoutMs: 10,
+      gracefulShutdownMs: 20,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      sessionFactory: async () => ({ session }),
+    });
+
+    await session.promptStarted;
+    t.mock.timers.tick(10);
+    t.mock.timers.tick(20);
+
+    await assert.rejects(plannerPromise, /TODO planner timed out \(partial output observed; content omitted\)/);
+    assert.equal(session.abortCalls, 1);
+    assert.equal(diagnostics[0]?.kind, "timeout");
+    assert.equal(diagnostics[0]?.partialOutputObserved, true);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /SECRET-TRUNCATED-CONTENT/);
+  });
+});
+
+test("planner timeout distinguishes no output using a fake clock", async (t) => {
+  await withTempDir(async (cwd) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const diagnostics: PlannerDiagnostic[] = [];
+    const session = new GracePeriodPlannerSession({});
+
+    const plannerPromise = runTodoPlanner({
+      inputText: "Plan one task but emit nothing.",
+      cwd,
+      runDir: path.join(cwd, "planner-no-output-timeout"),
+      timeoutMs: 10,
+      gracefulShutdownMs: 20,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      sessionFactory: async () => ({ session }),
+    });
+
+    await session.promptStarted;
+    t.mock.timers.tick(10);
+    t.mock.timers.tick(20);
+
+    await assert.rejects(plannerPromise, /TODO planner timed out \(no planner output observed\)/);
+    assert.equal(session.abortCalls, 1);
+    assert.equal(diagnostics[0]?.kind, "timeout");
+    assert.equal(diagnostics[0]?.partialOutputObserved, false);
+  });
+});
+
 test("planner abort aborts and disposes the planner session", async () => {
   await withTempDir(async (cwd) => {
     const abortController = new AbortController();
