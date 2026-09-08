@@ -32,7 +32,13 @@ import {
   type PlanRevisionRelevantResult,
 } from "./plan_revision_generation.ts";
 import { taskSemanticFingerprint, type PlanTaskState } from "./plan_revision.ts";
-import { resolvePlannerGracefulShutdownMs, resolvePlannerTimeoutMs } from "./planner_config.ts";
+import {
+  DEFAULT_PLANNER_TIMEOUT_MS,
+  resolvePlannerBudget,
+  resolvePlannerGracefulShutdownMs,
+  resolvePlannerTimeoutMs,
+  type PlannerBudget,
+} from "./planner_config.ts";
 import {
   PersistentTodoPlanStore,
   planTaskReference,
@@ -85,7 +91,7 @@ export type { CoordinatorStatus } from "./types.ts";
 export const DEFAULT_COORDINATOR_OPTIONS = {
   maxAttemptsPerTask: 3,
   taskTimeoutMs: 900_000,
-  todoTimeoutMs: 300_000,
+  todoTimeoutMs: DEFAULT_PLANNER_TIMEOUT_MS,
   todoGracefulShutdownMs: 15_000,
   maxBashTimeoutMs: 300_000,
   taskThinking: "high",
@@ -161,6 +167,8 @@ export interface CoordinatorProgressUpdate {
   plannerDiagnostics?: string[];
   plannerSessionFile?: string;
   plannerSessionId?: string;
+  /** Deterministic deadline selection used by planner calls in this run. */
+  plannerBudget?: Readonly<PlannerBudget>;
   workerSessionEvent?: WorkerSessionDiagnostic["event"];
   workerSessionReason?: string;
   workerSessionContextUsagePercent?: number;
@@ -216,6 +224,8 @@ export interface TodoPlannerOptions {
   abortSignal?: AbortSignal;
   timeoutMs?: number;
   gracefulShutdownMs?: number;
+  /** Structured record of explicit/default/adaptive deadline selection. */
+  plannerBudget?: Readonly<PlannerBudget>;
   sessionFactory?: WorkerSessionFactory;
   onDiagnostic?: PlannerDiagnosticHandler;
   goal?: string;
@@ -277,6 +287,8 @@ export interface CoordinatorResult {
   workerUsageTotal?: WorkerUsageTotals;
   /** Additive lifecycle counters for adaptive worker-session reuse. */
   workerSessionMetrics?: WorkerSessionMetrics;
+  /** Deterministic deadline selection used by planner calls in this run. */
+  plannerBudget?: Readonly<PlannerBudget>;
   commit: boolean;
   goal?: string;
   error?: string;
@@ -308,6 +320,7 @@ interface RuntimeOptions {
   networkRecovery: NetworkRecoveryConfig;
   todoTimeoutMs: number;
   todoGracefulShutdownMs: number;
+  plannerBudget: PlannerBudget;
   workerRunner: WorkerRunner;
   useRetainedWorkerLifecycle: boolean;
   todoPlanner: TodoPlanner;
@@ -973,7 +986,10 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   const protectedDirtyPathsByTask = new Map<string, Set<string>>();
 
   try {
-    emitProgress(runtime, "Creating TODO plan...", { phase: "planning" });
+    emitProgress(runtime, "Creating TODO plan...", {
+      phase: "planning",
+      plannerBudget: runtime.plannerBudget,
+    });
     let todoMarkdown = await generateOrNormalizeTodoMarkdown(inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
     planningComplete = true;
@@ -1375,6 +1391,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       workerCostTotal: runtime.workerCostState.total,
       workerUsageTotal: aggregateWorkerUsage(outcomes),
       workerSessionMetrics: snapshotWorkerSessionMetrics(runtime.workerSessionMetrics),
+      plannerBudget: runtime.plannerBudget,
       commit: options.commit,
       goal: runtime.goal,
       error: failure,
@@ -1458,6 +1475,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       workerCostTotal: runtime.workerCostState.total,
       workerUsageTotal: aggregateWorkerUsage(outcomes),
       workerSessionMetrics: snapshotWorkerSessionMetrics(runtime.workerSessionMetrics),
+      plannerBudget: runtime.plannerBudget,
       commit: options.commit,
       goal: runtime.goal,
       error: resultError,
@@ -1554,6 +1572,7 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
       abortSignal: runtime.abortSignal,
       timeoutMs: runtime.todoTimeoutMs,
       gracefulShutdownMs: runtime.todoGracefulShutdownMs,
+      plannerBudget: runtime.plannerBudget,
       sessionFactory: runtime.todoSessionFactory,
       networkRecovery: runtime.networkRecovery,
       onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
@@ -1641,6 +1660,7 @@ async function generateSteeringPlanRevision(options: {
           abortSignal: options.runtime.abortSignal,
           timeoutMs: options.runtime.todoTimeoutMs,
           gracefulShutdownMs: options.runtime.todoGracefulShutdownMs,
+          plannerBudget: options.runtime.plannerBudget,
           sessionFactory: options.runtime.todoSessionFactory,
           networkRecovery: options.runtime.networkRecovery,
           onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
@@ -1752,7 +1772,14 @@ function relevantPlanRevisionResults(
 // Planner/worker lifecycle differences are audited in docs/planner-worker-lifecycle-audit.md;
 // keep this function's public contract stable while moving shared prompt guarding into a helper.
 export async function runTodoPlanner(options: TodoPlannerOptions): Promise<string> {
-  const timeoutMs = resolvePlannerTimeoutMs(options.timeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs);
+  const plannerBudget =
+    options.plannerBudget ??
+    resolvePlannerBudget({
+      inputText: options.inputText,
+      explicitTimeoutMs: options.timeoutMs,
+      defaultTimeoutMs: DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs,
+    });
+  const timeoutMs = resolvePlannerTimeoutMs(options.timeoutMs, plannerBudget.timeoutMs);
   const gracefulShutdownMs = resolvePlannerGracefulShutdownMs(
     options.gracefulShutdownMs,
     DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
@@ -1918,6 +1945,11 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
   const configuredTaskTimeoutMs = options.taskTimeoutMs ?? parsedWorkerConfig.taskTimeoutMs;
   const configuredTodoTimeoutMs = options.todoTimeoutMs ?? parsedWorkerConfig.todoTimeoutMs;
   const configuredTodoGracefulShutdownMs = options.todoGracefulShutdownMs ?? parsedWorkerConfig.todoGracefulShutdownMs;
+  const plannerBudget = resolvePlannerBudget({
+    inputText: coordinatorInputText(options),
+    explicitTimeoutMs: configuredTodoTimeoutMs,
+    defaultTimeoutMs: DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs,
+  });
   const configuredMaxBashTimeoutMs = options.maxBashTimeoutMs ?? parsedWorkerConfig.maxBashTimeoutMs;
   const workerModelName = options.workerModelName ?? parsedWorkerConfig.modelName;
   const workerModel = workerModelName ? undefined : options.workerModel;
@@ -1940,11 +1972,12 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     taskResultPath: path.join(runDir, "TASK_RESULT.md"),
     maxAttemptsPerTask: positiveInteger(configuredAttempts, DEFAULT_COORDINATOR_OPTIONS.maxAttemptsPerTask),
     taskTimeoutSeconds: positiveMilliseconds(configuredTaskTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.taskTimeoutMs) / 1000,
-    todoTimeoutMs: resolvePlannerTimeoutMs(configuredTodoTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.todoTimeoutMs),
+    todoTimeoutMs: plannerBudget.timeoutMs,
     todoGracefulShutdownMs: resolvePlannerGracefulShutdownMs(
       configuredTodoGracefulShutdownMs,
       DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
     ),
+    plannerBudget,
     maxBashTimeoutSeconds:
       positiveMilliseconds(configuredMaxBashTimeoutMs, DEFAULT_COORDINATOR_OPTIONS.maxBashTimeoutMs) / 1000,
     workerModel,

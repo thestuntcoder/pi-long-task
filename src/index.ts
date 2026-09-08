@@ -80,6 +80,7 @@ function toolDetails(result: CoordinatorResult) {
     remainingTasks: result.remainingTasks,
     taskProgress: result.taskProgress,
     workerCostTotal: result.workerCostTotal,
+    plannerBudget: result.plannerBudget,
     summary: result.summary,
     goal: result.goal,
     error: result.error,

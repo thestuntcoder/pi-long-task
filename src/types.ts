@@ -1,7 +1,7 @@
 import type { Static } from "typebox";
 import { Type } from "typebox";
 
-import { MAX_PLANNER_DURATION_MS } from "./planner_config.ts";
+import { MAX_PLANNER_DURATION_MS, type PlannerBudget } from "./planner_config.ts";
 import type { TaskProgressModel } from "./task_progress.ts";
 import type { SessionOutcome } from "./worker_session.ts";
 
@@ -56,7 +56,8 @@ export const PiLongTaskParams = Type.Object(
       Type.Integer({
         minimum: 1,
         maximum: MAX_PLANNER_DURATION_MS,
-        description: "Explicit TODO-planner timeout in milliseconds. Defaults to 300000 (5 minutes).",
+        description:
+          "Explicit TODO-planner timeout in milliseconds. When omitted, the 5-minute default adapts deterministically for explicit item counts, enumerated deliverables, and separately planned tasks, up to 15 minutes.",
       }),
     ),
     todoGracefulShutdownMs: Type.Optional(
@@ -134,7 +135,7 @@ export const PiGoalTaskParams = Type.Object(
         minimum: 1,
         maximum: MAX_PLANNER_DURATION_MS,
         description:
-          "Explicit TODO-planner timeout in milliseconds for child long-task planning and plan revisions. Defaults to 300000 (5 minutes).",
+          "Explicit TODO-planner timeout in milliseconds for child long-task planning and plan revisions. When omitted, the 5-minute default adapts deterministically for explicit item counts, enumerated deliverables, and separately planned tasks, up to 15 minutes.",
       }),
     ),
     todoGracefulShutdownMs: Type.Optional(
@@ -197,6 +198,7 @@ export interface PiLongTaskResult {
   }>;
   taskProgress: TaskProgressModel;
   workerCostTotal: number;
+  plannerBudget?: Readonly<PlannerBudget>;
   commit: boolean;
   goal?: string;
   error?: string;
