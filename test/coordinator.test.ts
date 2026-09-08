@@ -72,7 +72,7 @@ try {
   assert.deepEqual(
     progressUpdates.map((update) => update.message),
     [
-      "Creating TODO plan...",
+      "Creating TODO plan. Effective planning budget: 5 minutes. A 15-second graceful-shutdown period is available afterward.",
       "Created TODO plan with 2 task(s).",
       "Running TODO 1 — First task...",
       "TODO 1 done.",

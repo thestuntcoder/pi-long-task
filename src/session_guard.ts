@@ -15,6 +15,11 @@ export interface GuardedSessionPromptOptions {
   gracefulShutdownPrompt?: string;
   diagnostics?: string[];
   onEvent?: (event: unknown) => void;
+  /** Bounded elapsed-time checkpoints while the primary deadline is active. */
+  progressCheckpointsMs?: readonly number[];
+  onProgressCheckpoint?: (elapsedMs: number) => void;
+  /** Called exactly when a positive grace period begins. */
+  onGracePeriodStart?: (gracePeriodMs: number) => void;
   dispose?: boolean;
 }
 
@@ -101,6 +106,14 @@ export async function runGuardedSessionPrompt(
     }
   };
 
+  const notifyTiming = (callback: (() => void) | undefined, label: string) => {
+    try {
+      callback?.();
+    } catch (exc) {
+      diagnostics.push(`${label} listener failed: ${errorMessage(exc)}`);
+    }
+  };
+
   const requestGracefulShutdown = () => {
     const message = options.gracefulShutdownPrompt?.trim();
     if (!message || finished || promptSettled || aborted) {
@@ -141,9 +154,13 @@ export async function runGuardedSessionPrompt(
     }
     timedOut = true;
     diagnostics.push(`session prompt timed out after ${formatMilliseconds(timeoutMs(options.timeoutMs))}`);
-    requestGracefulShutdown();
 
     const graceMs = nonNegativeMilliseconds(options.gracefulShutdownMs);
+    if (graceMs > 0) {
+      notifyTiming(() => options.onGracePeriodStart?.(graceMs), "grace-period progress");
+    }
+    requestGracefulShutdown();
+
     const hardAbort = () => {
       if (finished || promptSettled) {
         return;
@@ -216,6 +233,13 @@ export async function runGuardedSessionPrompt(
 
       const limitMs = timeoutMs(options.timeoutMs);
       if (limitMs > 0) {
+        for (const checkpoint of normalizedProgressCheckpoints(options.progressCheckpointsMs, limitMs)) {
+          schedule(() => {
+            if (!finished && !promptSettled && !timedOut && !aborted) {
+              notifyTiming(() => options.onProgressCheckpoint?.(checkpoint), "timing progress");
+            }
+          }, checkpoint);
+        }
         schedule(triggerTimeout, limitMs);
       }
 
@@ -307,6 +331,16 @@ function timeoutMs(value: number | undefined): number {
     return 0;
   }
   return Math.max(0, value);
+}
+
+function normalizedProgressCheckpoints(values: readonly number[] | undefined, limitMs: number): number[] {
+  if (!values) {
+    return [];
+  }
+  return [...new Set(values)]
+    .filter((value) => Number.isFinite(value) && value > 0 && value < limitMs)
+    .map((value) => Math.floor(value))
+    .sort((left, right) => left - right);
 }
 
 function nonNegativeMilliseconds(value: number | undefined): number {

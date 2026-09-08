@@ -350,7 +350,15 @@ function renderSidebarRows(update: CoordinatorProgressUpdate | undefined, theme:
   rows.push(renderSidebarStateLine(update, theme));
 
   if (!progress || progress.tasks.length === 0) {
-    rows.push("", sidebarHeading("Context", theme), theme.fg("muted", "Waiting for TODO plan"));
+    const planningStatus =
+      update.phase === "planning" ? normalizeActiveStatus(update.activeStatus ?? update.message) : undefined;
+    rows.push(
+      "",
+      sidebarHeading(planningStatus ? "Planning timing" : "Context", theme),
+      ...(planningStatus
+        ? wrapPlainText(planningStatus, width, 8).map((line) => theme.fg("accent", line))
+        : [theme.fg("muted", "Waiting for TODO plan")]),
+    );
     if (update.workerCostTotal > 0) {
       rows.push(theme.fg("muted", `${formatCost(update.workerCostTotal)} spent`));
     }

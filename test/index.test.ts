@@ -251,6 +251,44 @@ assert.equal(widgetCalls[0]?.placement, "aboveEditor");
 assert.equal(widgetFactoryCalls, 1);
 assert.match(widgetComponent?.render(80).join("\n") ?? "", /Preparing long-task sidebar/);
 
+sidebar.update({
+  message:
+    "Creating TODO plan. Effective planning budget: 15 minutes. Adaptive extension: 10 minutes because the request includes 24 separately planned tasks. A 15-second graceful-shutdown period is available afterward.",
+  phase: "planning",
+  runId: "run-1",
+  todoPath: "/tmp/TODO.md",
+  resultPath: "/tmp/TASK_RESULT.md",
+  workerCostTotal: 0,
+  plannerProgressState: "started",
+  plannerElapsedMs: 0,
+  plannerRemainingMs: 900_000,
+  plannerGracePeriodMs: 15_000,
+});
+const planningWidget = (widgetComponent?.render(80) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+const planningOverlay = (overlayComponent?.render(96) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+assert.match(planningWidget, /Effective planning budget: 15 minutes/);
+assert.match(planningWidget, /Adaptive extension: 10 minutes/);
+assert.match(planningOverlay, /24 separately planned tasks/);
+assert.match(planningOverlay, /15-second graceful-shutdown period/);
+
+sidebar.update({
+  message:
+    "Planning budget reached after 15 minutes; entering a 15-second graceful-shutdown period to finish a valid plan.",
+  phase: "planning",
+  runId: "run-1",
+  todoPath: "/tmp/TODO.md",
+  resultPath: "/tmp/TASK_RESULT.md",
+  workerCostTotal: 0,
+  plannerProgressState: "grace",
+  plannerElapsedMs: 900_000,
+  plannerRemainingMs: 0,
+  plannerGracePeriodMs: 15_000,
+  plannerGraceRemainingMs: 15_000,
+});
+const graceOverlay = (overlayComponent?.render(96) ?? []).join(" ").replaceAll("│", " ").replace(/\s+/g, " ");
+assert.match(graceOverlay, /budget reached after 15 minutes/);
+assert.match(graceOverlay, /entering a 15-second graceful-shutdown period/);
+
 const sidebarUpdate = {
   message: "Running TODO 2 — Wire Sidebar Rendering...",
   phase: "task_start",
@@ -326,8 +364,8 @@ const runningOverlay = overlayComponent?.render(96).join("\n") ?? "";
 assert.match(runningOverlay, /TODO 2 — Wire Sidebar Rendering/);
 assert.match(runningOverlay, /Task timeline/);
 assert.match(runningOverlay, /› ▢ TODO 2/);
-assert.equal(renderRequests, 1);
-assert.equal(overlayRenderRequests, 1);
+assert.equal(renderRequests, 3);
+assert.equal(overlayRenderRequests, 3);
 assert.ok(runningWidgetLines.length > 6);
 assert.ok(runningWidgetLines.length <= 24, "sidebar should cap its height even on tall terminals");
 (sidebarTui as unknown as { terminal: { rows: number } }).terminal.rows = 14;
@@ -410,8 +448,8 @@ const doneWidget = widgetComponent?.render(80).join("\n") ?? "";
 assert.match(doneWidget, /✓ done/);
 assert.match(doneWidget, /2\/3 tasks complete/);
 assert.match(doneWidget, /67% complete/);
-assert.equal(renderRequests, 5);
-assert.equal(overlayRenderRequests, 5);
+assert.equal(renderRequests, 7);
+assert.equal(overlayRenderRequests, 7);
 
 sidebar.close();
 const widgetCallCountAfterClose = widgetCalls.length;

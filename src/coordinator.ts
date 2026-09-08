@@ -41,6 +41,15 @@ import {
   type PlannerBudget,
 } from "./planner_config.ts";
 import {
+  createPlannerActiveProgress,
+  createPlannerGraceProgress,
+  createPlannerStartedProgress,
+  plannerProgressCheckpoints,
+  type PlannerProgressEvent,
+  type PlannerProgressHandler,
+  type PlannerProgressState,
+} from "./planner_progress.ts";
+import {
   PersistentTodoPlanStore,
   planTaskReference,
   resolvePlanTaskReference,
@@ -173,6 +182,12 @@ export interface CoordinatorProgressUpdate {
   plannerSessionId?: string;
   /** Deterministic deadline selection used by planner calls in this run. */
   plannerBudget?: Readonly<PlannerBudget>;
+  /** Human-facing state with exact millisecond values retained for integrations. */
+  plannerProgressState?: PlannerProgressState;
+  plannerElapsedMs?: number;
+  plannerRemainingMs?: number;
+  plannerGracePeriodMs?: number;
+  plannerGraceRemainingMs?: number;
   workerSessionEvent?: WorkerSessionDiagnostic["event"];
   workerSessionReason?: string;
   workerSessionContextUsagePercent?: number;
@@ -233,6 +248,8 @@ export interface TodoPlannerOptions {
   plannerBudget?: Readonly<PlannerBudget>;
   sessionFactory?: WorkerSessionFactory;
   onDiagnostic?: PlannerDiagnosticHandler;
+  /** Shared human-readable timing events for CLI, TUI, and headless integrations. */
+  onProgress?: PlannerProgressHandler;
   goal?: string;
   /** Exact prompt for revision planners; bypasses the initial TODO-creation wrapper. */
   plannerPrompt?: string;
@@ -991,10 +1008,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
   const protectedDirtyPathsByTask = new Map<string, Set<string>>();
 
   try {
-    emitProgress(runtime, "Creating TODO plan...", {
-      phase: "planning",
-      plannerBudget: runtime.plannerBudget,
-    });
+    emitPlannerProgress(runtime, createPlannerStartedProgress(runtime.plannerBudget, runtime.todoGracefulShutdownMs));
     let todoMarkdown = await generateOrNormalizeTodoMarkdown(inputText, runtime);
     validateTodoMarkdown(todoMarkdown);
     planningComplete = true;
@@ -1581,6 +1595,11 @@ async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Prom
       sessionFactory: runtime.todoSessionFactory,
       networkRecovery: runtime.networkRecovery,
       onDiagnostic: (diagnostic) => recordPlannerDiagnostic(runtime, diagnostic),
+      onProgress: (event) => {
+        if (event.state !== "started") {
+          emitPlannerProgress(runtime, event);
+        }
+      },
       goal: runtime.goal,
     },
     runtime,
@@ -1669,6 +1688,7 @@ async function generateSteeringPlanRevision(options: {
           sessionFactory: options.runtime.todoSessionFactory,
           networkRecovery: options.runtime.networkRecovery,
           onDiagnostic: (diagnostic) => recordPlannerDiagnostic(options.runtime, diagnostic),
+          onProgress: (event) => emitPlannerProgress(options.runtime, event),
           goal: options.runtime.goal,
         },
         options.runtime,
@@ -1789,6 +1809,18 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
     options.gracefulShutdownMs,
     DEFAULT_COORDINATOR_OPTIONS.todoGracefulShutdownMs,
   );
+  const effectivePlannerBudget: PlannerBudget =
+    timeoutMs === plannerBudget.timeoutMs
+      ? plannerBudget
+      : {
+          ...plannerBudget,
+          timeoutMs,
+          extensionApplied: false,
+          extensionMs: 0,
+          source: "explicit",
+          trigger: undefined,
+        };
+  notifyPlannerProgress(options.onProgress, createPlannerStartedProgress(effectivePlannerBudget, gracefulShutdownMs));
   const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
   const result = await sessionFactory({
     cwd: options.cwd,
@@ -1810,6 +1842,8 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
       gracefulShutdownMs,
       diagnostics: result.diagnostics,
       onDiagnostic: options.onDiagnostic,
+      plannerBudget: effectivePlannerBudget,
+      onProgress: options.onProgress,
     });
 
     plannerMarkdown = await extractTodoMarkdownWithOneRepair(
@@ -1824,6 +1858,8 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
           gracefulShutdownMs,
           diagnostics: result.diagnostics,
           onDiagnostic: options.onDiagnostic,
+          plannerBudget: effectivePlannerBudget,
+          onProgress: options.onProgress,
         }),
       options.goal,
       {
@@ -1880,6 +1916,8 @@ async function runTodoPlannerPrompt(options: {
   gracefulShutdownMs: number;
   diagnostics?: string[];
   onDiagnostic?: PlannerDiagnosticHandler;
+  plannerBudget: Readonly<PlannerBudget>;
+  onProgress?: PlannerProgressHandler;
 }): Promise<string> {
   const promptResult = await runGuardedSessionPrompt({
     session: options.session,
@@ -1889,6 +1927,14 @@ async function runTodoPlannerPrompt(options: {
     gracefulShutdownMs: options.gracefulShutdownMs,
     gracefulShutdownPrompt: buildTodoPlanningShutdownMessage(),
     diagnostics: options.diagnostics,
+    progressCheckpointsMs: plannerProgressCheckpoints(options.timeoutMs),
+    onProgressCheckpoint: (elapsedMs) =>
+      notifyPlannerProgress(
+        options.onProgress,
+        createPlannerActiveProgress(options.plannerBudget, options.gracefulShutdownMs, elapsedMs),
+      ),
+    onGracePeriodStart: (gracePeriodMs) =>
+      notifyPlannerProgress(options.onProgress, createPlannerGraceProgress(options.plannerBudget, gracePeriodMs)),
     dispose: false,
   });
 
@@ -2040,6 +2086,23 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     networkRecoverySequence: 0,
     activeNetworkRecoveries: new Map(),
   };
+}
+
+function emitPlannerProgress(runtime: RuntimeOptions, event: Readonly<PlannerProgressEvent>): void {
+  emitProgress(runtime, event.message, {
+    phase: "planning",
+    activeStatus: event.message,
+    plannerBudget: event.budget,
+    plannerProgressState: event.state,
+    plannerElapsedMs: event.elapsedMs,
+    plannerRemainingMs: event.remainingMs,
+    plannerGracePeriodMs: event.gracePeriodMs,
+    ...(event.graceRemainingMs === undefined ? {} : { plannerGraceRemainingMs: event.graceRemainingMs }),
+  });
+}
+
+function notifyPlannerProgress(handler: PlannerProgressHandler | undefined, event: PlannerProgressEvent): void {
+  handler?.(event);
 }
 
 function emitProgress(

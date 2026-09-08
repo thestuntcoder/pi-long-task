@@ -79,6 +79,53 @@ const progress = renderLongTaskToolResult(
 );
 assert.equal(renderText(progress), "+ Build: TODO 1: worker tool bash started.");
 
+const planningProgress = renderLongTaskToolResult(
+  {
+    content: [
+      {
+        type: "text",
+        text: "Still planning: 1 minute elapsed; about 4 minutes remaining in the 5-minute budget.",
+      },
+    ],
+    details: {
+      phase: "planning",
+      message: "Still planning: 1 minute elapsed; about 4 minutes remaining in the 5-minute budget.",
+      plannerProgressState: "active",
+      plannerElapsedMs: 60_000,
+      plannerRemainingMs: 240_000,
+    },
+  } satisfies AgentToolResult<unknown>,
+  { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+  theme,
+);
+assert.equal(
+  renderText(planningProgress),
+  "+ Thought: Still planning: 1 minute elapsed; about 4 minutes remaining in the 5-minute budget.",
+);
+
+const planningGrace = renderLongTaskToolResult(
+  {
+    content: [
+      {
+        type: "text",
+        text: "Planning budget reached after 5 minutes; entering a 15-second graceful-shutdown period to finish a valid plan.",
+      },
+    ],
+    details: {
+      phase: "planning",
+      message:
+        "Planning budget reached after 5 minutes; entering a 15-second graceful-shutdown period to finish a valid plan.",
+      plannerProgressState: "grace",
+      plannerElapsedMs: 300_000,
+      plannerRemainingMs: 0,
+      plannerGraceRemainingMs: 15_000,
+    },
+  } satisfies AgentToolResult<unknown>,
+  { expanded: false, isPartial: true } satisfies ToolRenderResultOptions,
+  theme,
+);
+assert.match(renderText(planningGrace), /entering a 15-second graceful-shutdown period/);
+
 const progressWithSubtasks = renderLongTaskToolResult(
   {
     content: [{ type: "text", text: "TODO 2: worker tool bash started." }],
