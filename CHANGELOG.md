@@ -2,6 +2,14 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## Unreleased
+
+### Performance
+
+- Coalesce and cap retained worker token-delta events instead of returning thousands of tiny diagnostic objects, while preserving complete final assistant results.
+- Bound and throttle live worker commentary so long streamed responses do not trigger quadratic text processing or excessive progress renders.
+- Keep planner-generated task counts lean by combining tightly coupled implementation, test, and documentation work, and guide workers to batch independent inspection and use focused checks.
+
 ## 0.7.0 - 2026-09-08
 
 ### Added

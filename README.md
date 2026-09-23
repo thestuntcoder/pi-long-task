@@ -258,6 +258,10 @@ Pi Long Task coordinates a long request from planning through task completion:
 5. **Write run artifacts:** the coordinator writes the generated/normalized `TODO.md`, `TASK_RESULT.md`, attempt summaries, and final run details to `tmp/pi-long-task/<run-id>/`.
 6. **Commit only when enabled:** if `commit` is `true`, Pi Long Task may create a commit after each completed task using only eligible task changes. If commits are disabled, no commits are created; even when enabled, commits can be skipped when there are no eligible changes or the task outcome is not commit-worthy.
 
+### Low-overhead streaming and planning
+
+Pi Long Task keeps live status responsive without serializing every model token as a separate diagnostic event. Worker text updates use a bounded rolling status buffer, progress publication is throttled, and retained token deltas are coalesced and capped; the complete final assistant result remains available in each outcome. Planning prompts also tell the planner to use the fewest safe worker handoffs and to keep tightly coupled implementation, tests, and documentation in one assignment when they share context.
+
 ### Adaptive worker-session reuse
 
 Reuse is enabled by default. Related sequential TODOs in the same coordinator run and worktree may share one idle Pi `AgentSession`, which avoids repeated startup and repository exploration. Reuse does not merge task semantics: every TODO still gets its complete current assignment, an explicit boundary from the previous assignment, its own result extraction, attempts, progress, and `TASK_RESULT` outcome.
@@ -426,6 +430,7 @@ Pi session statistics can be cumulative across reused assignments. `outcomes[].w
 
 ## Feature reference
 
+- **Low-overhead execution:** coalesce and bound streamed token diagnostics, throttle live commentary updates, and minimize unnecessary model handoffs without dropping final worker results.
 - **Adaptive TODO-planner budgets:** deterministically extend the normal 5-minute budget for explicit large item sets, up to 15 minutes, while preserving exact caller overrides.
 - **Visible planner timing:** report effective budget, extension reason, elapsed/remaining time, grace entry, and safe partial-output diagnostics across CLI/TUI and headless progress.
 - **Capability-aware planning:** warn when isolated workers are explicitly asked to use disabled extensions or unavailable browser tools, then constrain the plan to honest alternatives or a blocked result.
