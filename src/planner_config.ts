@@ -1,14 +1,16 @@
+import { DEFAULT_THINKING_FALLBACK_LEVEL, SUPPORTED_THINKING_LEVELS, type ThinkingLevel } from "./thinking_policy.ts";
+
 export const MAX_PLANNER_DURATION_MS = 2_147_483_647;
 
-/** Thinking levels accepted by the supported Pi SDK, in increasing reasoning-budget order. */
-export const SUPPORTED_PLANNER_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type PlannerThinkingLevel = (typeof SUPPORTED_PLANNER_THINKING_LEVELS)[number];
+/** @deprecated Prefer the shared thinking-policy names for new planner and worker code. */
+export const SUPPORTED_PLANNER_THINKING_LEVELS = SUPPORTED_THINKING_LEVELS;
+export type PlannerThinkingLevel = ThinkingLevel;
 /**
  * Planner-only quality/latency balance. `high` retains enough reasoning budget
  * for dependency-aware complex plans without imposing `xhigh` latency on every
  * ordinary request. Explicit caller values remain authoritative.
  */
-export const DEFAULT_PLANNER_THINKING_LEVEL: PlannerThinkingLevel = "high";
+export const DEFAULT_PLANNER_THINKING_LEVEL: PlannerThinkingLevel = DEFAULT_THINKING_FALLBACK_LEVEL;
 
 /** Normal planning budget used for requests that do not contain a scale signal. */
 export const DEFAULT_PLANNER_TIMEOUT_MS = 300_000;
