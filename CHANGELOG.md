@@ -2,7 +2,7 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
-## Unreleased
+## 0.7.2 - 2026-09-23
 
 ### Changed
 
