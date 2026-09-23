@@ -9,6 +9,7 @@ import {
   parseReportedStatus,
 } from "./result_writer.ts";
 import type { NetworkRecoveryConfig } from "./network_recovery_config.ts";
+import { resolveAdaptiveThinkingLevel, supportedThinkingLevelsForModel } from "./thinking_policy.ts";
 import type { Task } from "./todo_parser.ts";
 
 export interface WorkerNetworkRecoveryContext {
@@ -880,15 +881,29 @@ export async function runWorkerTaskAssignment(
 
 /** Backward-compatible isolated lifecycle: create, execute one assignment, and dispose. */
 export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<SessionOutcome> {
+  const effectiveOptions: RunWorkerTaskOptions = {
+    ...options,
+    thinkingLevel: resolveAdaptiveThinkingLevel({
+      taskKind: "worker",
+      inputText: options.globalInstructions,
+      taskTitle: options.task.title,
+      taskSection: options.task.section,
+      explicitThinkingLevel: options.thinkingLevel,
+      supportedThinkingLevels: supportedThinkingLevelsForModel(options.model),
+    }).thinkingLevel,
+  };
   let resource: WorkerSessionResource | undefined;
   try {
-    resource = await createWorkerSessionResource(options, options.sessionFactory ?? createIsolatedWorkerSession);
-    return await runWorkerTaskAssignment(options, resource);
+    resource = await createWorkerSessionResource(
+      effectiveOptions,
+      effectiveOptions.sessionFactory ?? createIsolatedWorkerSession,
+    );
+    return await runWorkerTaskAssignment(effectiveOptions, resource);
   } catch (error) {
     if (resource) {
       throw error;
     }
-    return buildWorkerSessionCreationFailureOutcome(options, error);
+    return buildWorkerSessionCreationFailureOutcome(effectiveOptions, error);
   } finally {
     if (resource) {
       try {

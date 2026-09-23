@@ -42,7 +42,7 @@ function plannerSessionFactory(onThinkingLevel: (thinkingLevel: string | undefin
   };
 }
 
-test("planner defaults to the documented balanced thinking level when omitted", async () => {
+test("planner adaptively lowers straightforward requests when no override is present", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-planner-thinking-default-"));
   let directThinkingLevel: string | undefined;
   let coordinatorThinkingLevel: string | undefined;
@@ -74,8 +74,8 @@ test("planner defaults to the documented balanced thinking level when omitted", 
 
   assert.equal(DEFAULT_PLANNER_THINKING_LEVEL, "high");
   assert.equal(DEFAULT_COORDINATOR_OPTIONS.todoThinking, DEFAULT_PLANNER_THINKING_LEVEL);
-  assert.equal(directThinkingLevel, DEFAULT_PLANNER_THINKING_LEVEL);
-  assert.equal(coordinatorThinkingLevel, DEFAULT_PLANNER_THINKING_LEVEL);
+  assert.equal(directThinkingLevel, "low");
+  assert.equal(coordinatorThinkingLevel, "low");
 });
 
 test("every supported explicit planner thinking level is forwarded unchanged", async () => {
@@ -124,7 +124,7 @@ test("every supported explicit planner thinking level is forwarded unchanged", a
   assert.equal(coordinatorLevels.includes("xhigh"), true);
 });
 
-test("planner overrides do not alter the worker thinking default", async () => {
+test("planner overrides do not alter independent worker selection", async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-planner-worker-thinking-isolation-"));
   const workerLevels: Array<string | undefined> = [];
 
@@ -146,4 +146,116 @@ test("planner overrides do not alter the worker thinking default", async () => {
 
   assert.equal(DEFAULT_COORDINATOR_OPTIONS.taskThinking, "high");
   assert.deepEqual(workerLevels, ["high"]);
+});
+
+test("planner and worker invocations retain high reasoning for complex or risky work", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-adaptive-thinking-high-"));
+  let plannerLevel: string | undefined;
+  let workerLevel: string | undefined;
+
+  try {
+    await runTodoPlanner({
+      inputText: "Redesign the architecture across multiple services while preserving the public API.",
+      cwd,
+      runDir: path.join(cwd, "planner"),
+      sessionFactory: plannerSessionFactory((level) => {
+        plannerLevel = level;
+      }),
+    });
+
+    await runCoordinator({
+      inputText: generatedTodoMarkdown(["Migrate production payment data securely"]),
+      cwd,
+      runId: "worker",
+      commit: false,
+      workerRunner: async (options) => {
+        workerLevel = options.thinkingLevel;
+        return doneOutcome(options);
+      },
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+
+  assert.equal(plannerLevel, "high");
+  assert.equal(workerLevel, "high");
+});
+
+test("straightforward workers adapt to low while explicit worker overrides remain authoritative", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-adaptive-worker-thinking-"));
+  const levels: Array<string | undefined> = [];
+
+  try {
+    await runCoordinator({
+      inputText: generatedTodoMarkdown(["Fix a simple README typo"]),
+      cwd,
+      runId: "adaptive",
+      commit: false,
+      workerRunner: async (options) => {
+        levels.push(options.thinkingLevel);
+        return doneOutcome(options);
+      },
+    });
+    await runCoordinator({
+      inputText: generatedTodoMarkdown(["Fix a simple README typo"]),
+      cwd,
+      runId: "explicit",
+      commit: false,
+      taskThinking: "xhigh",
+      workerRunner: async (options) => {
+        levels.push(options.thinkingLevel);
+        return doneOutcome(options);
+      },
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+
+  assert.deepEqual(levels, ["low", "xhigh"]);
+});
+
+test("adaptive integration honors concrete model thinking capabilities", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-adaptive-thinking-capabilities-"));
+  const model = { reasoning: true, thinkingLevelMap: { low: null } };
+  let plannerLevel: string | undefined;
+  let nonReasoningPlannerLevel: string | undefined;
+  let workerLevel: string | undefined;
+
+  try {
+    await runTodoPlanner({
+      inputText: "Plan a simple README typo correction.",
+      cwd,
+      runDir: path.join(cwd, "planner"),
+      model,
+      sessionFactory: plannerSessionFactory((level) => {
+        plannerLevel = level;
+      }),
+    });
+    await runTodoPlanner({
+      inputText: "Plan a simple README typo correction.",
+      cwd,
+      runDir: path.join(cwd, "non-reasoning-planner"),
+      model: { reasoning: false },
+      sessionFactory: plannerSessionFactory((level) => {
+        nonReasoningPlannerLevel = level;
+      }),
+    });
+    await runCoordinator({
+      inputText: generatedTodoMarkdown(["Fix a simple README typo"]),
+      cwd,
+      runId: "worker",
+      commit: false,
+      workerModel: model,
+      workerRunner: async (options) => {
+        workerLevel = options.thinkingLevel;
+        return doneOutcome(options);
+      },
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+
+  assert.equal(plannerLevel, "medium");
+  assert.equal(nonReasoningPlannerLevel, "off");
+  assert.equal(workerLevel, "medium");
 });

@@ -1,3 +1,5 @@
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
+
 /** Thinking levels accepted by the supported Pi SDK, in increasing reasoning-budget order. */
 export const SUPPORTED_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof SUPPORTED_THINKING_LEVELS)[number];
@@ -46,6 +48,18 @@ export interface AdaptiveThinkingSelection {
   source: ThinkingSelectionSource;
   classification: ThinkingClassification;
   signals: readonly ThinkingPolicySignalKind[];
+}
+
+/**
+ * Reads Pi's model capability metadata when a concrete model is already
+ * available. Undefined means resolution is deferred to Pi's session factory,
+ * which performs the same provider-aware clamping after model discovery.
+ */
+export function supportedThinkingLevelsForModel(model: unknown): readonly string[] | undefined {
+  if (!isModelCapabilityRecord(model)) {
+    return undefined;
+  }
+  return getSupportedThinkingLevels(model as Model<Api>);
 }
 
 interface SignalRule {
@@ -107,7 +121,7 @@ const AMBIGUITY_RULES: readonly SignalRule[] = [
 const STRAIGHTFORWARD_RULES: readonly SignalRule[] = [
   {
     kind: "explicitly_straightforward",
-    expression: /\b(?:simple|straightforward|trivial|small|low[ -]?risk|mechanical|focused|single[ -]file)\b/i,
+    expression: /\b(?:simple|straightforward|trivial|small|low[ -]?risk|mechanical|single[ -]file)\b/i,
   },
   {
     kind: "documentation_only",
@@ -196,6 +210,12 @@ export function resolveAdaptiveThinkingLevel(options: AdaptiveThinkingPolicyOpti
   };
 }
 
+function isModelCapabilityRecord(value: unknown): value is { reasoning: boolean } {
+  return (
+    typeof value === "object" && value !== null && typeof (value as { reasoning?: unknown }).reasoning === "boolean"
+  );
+}
+
 function matchingSignals(text: string, rules: readonly SignalRule[]): ThinkingPolicySignalKind[] {
   return rules.filter((rule) => rule.expression.test(text)).map((rule) => rule.kind);
 }
@@ -220,12 +240,15 @@ function nearestSupportedThinkingLevel(
   desired: ThinkingLevel,
   supplied: readonly string[] | undefined,
   safeFallback: ThinkingLevel,
-): ThinkingLevel {
+): string {
   const suppliedSet = supplied ? new Set(supplied) : undefined;
   const supported = suppliedSet
     ? SUPPORTED_THINKING_LEVELS.filter((level) => suppliedSet.has(level))
     : [...SUPPORTED_THINKING_LEVELS];
 
+  if (supported.length === 0 && suppliedSet?.has("off")) {
+    return "off";
+  }
   // Invalid or empty capability metadata is ambiguous. Preserve the historical
   // safe fallback instead of lowering reasoning based on unsupported data.
   if (supported.length === 0) {

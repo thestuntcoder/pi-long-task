@@ -6,9 +6,9 @@ export const MAX_PLANNER_DURATION_MS = 2_147_483_647;
 export const SUPPORTED_PLANNER_THINKING_LEVELS = SUPPORTED_THINKING_LEVELS;
 export type PlannerThinkingLevel = ThinkingLevel;
 /**
- * Planner-only quality/latency balance. `high` retains enough reasoning budget
- * for dependency-aware complex plans without imposing `xhigh` latency on every
- * ordinary request. Explicit caller values remain authoritative.
+ * Conservative planner fallback. `high` retains enough reasoning budget for
+ * complex, risky, or ambiguous plans; adaptive selection may lower confident
+ * straightforward requests. Explicit caller values remain authoritative.
  */
 export const DEFAULT_PLANNER_THINKING_LEVEL: PlannerThinkingLevel = DEFAULT_THINKING_FALLBACK_LEVEL;
 

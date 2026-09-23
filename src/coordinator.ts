@@ -40,6 +40,7 @@ import {
   resolvePlannerTimeoutMs,
   type PlannerBudget,
 } from "./planner_config.ts";
+import { resolveAdaptiveThinkingLevel, supportedThinkingLevelsForModel } from "./thinking_policy.ts";
 import {
   createPlannerActiveProgress,
   createPlannerGraceProgress,
@@ -112,6 +113,7 @@ export const DEFAULT_COORDINATOR_OPTIONS = {
   todoTimeoutMs: DEFAULT_PLANNER_TIMEOUT_MS,
   todoGracefulShutdownMs: 15_000,
   maxBashTimeoutMs: 300_000,
+  // Compatibility fallbacks; omitted runtime options now use adaptive selection.
   taskThinking: "high",
   todoThinking: DEFAULT_PLANNER_THINKING_LEVEL,
   workerSessionReuse: DEFAULT_WORKER_SESSION_REUSE_ENABLED,
@@ -266,7 +268,7 @@ export interface TodoPlannerOptions {
   inputText: string;
   cwd: string;
   runDir: string;
-  /** Defaults to the planner-only balanced level; explicit values are forwarded unchanged. */
+  /** Explicit values are forwarded unchanged; omission uses conservative adaptive selection. */
   thinkingLevel?: string;
   model?: unknown;
   abortSignal?: AbortSignal;
@@ -371,8 +373,10 @@ interface RuntimeOptions {
   workerModel?: unknown;
   workerModelName?: string;
   goal?: string;
-  taskThinking: string;
-  todoThinking: string;
+  /** Present only when the caller explicitly overrides adaptive worker selection. */
+  taskThinking?: string;
+  /** Present only when the caller explicitly overrides adaptive planner selection. */
+  todoThinking?: string;
   workerSessionReuse: boolean;
   workerSessionReuseContextThresholdPercent: number;
   networkRecovery: NetworkRecoveryConfig;
@@ -1218,6 +1222,15 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           : new Set<string>();
         protectedDirtyPathsByTask.set(executionIdentity, preExistingDirtyPaths);
       }
+      const globalInstructions = todoGlobalInstructions(todoMarkdown);
+      const workerThinking = resolveAdaptiveThinkingLevel({
+        taskKind: "worker",
+        inputText: globalInstructions,
+        taskTitle: nextTask.title,
+        taskSection: nextTask.section,
+        explicitThinkingLevel: runtime.taskThinking,
+        supportedThinkingLevels: supportedThinkingLevelsForModel(runtime.workerModel),
+      }).thinkingLevel;
       const workerOptions: RunWorkerTaskOptions = {
         cwd: runtime.cwd,
         todoPath: runtime.todoPath,
@@ -1229,13 +1242,13 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
             .map((item) => item.resultText)
             .filter((item): item is string => Boolean(item))
             .join("\n\n---\n\n") || undefined,
-        globalInstructions: todoGlobalInstructions(todoMarkdown),
+        globalInstructions,
         goal: runtime.goal,
         maxBashTimeoutSeconds: runtime.maxBashTimeoutSeconds,
         taskTimeoutSeconds: runtime.taskTimeoutSeconds,
         model: runtime.workerModel,
         modelName: runtime.workerModelName,
-        thinkingLevel: runtime.taskThinking,
+        thinkingLevel: workerThinking,
         abortSignal: combineAbortSignals(runtime.abortSignal, assignmentController.signal),
         sessionFactory: runtime.workerSessionFactory,
         networkRecovery: runtime.networkRecovery,
@@ -1643,13 +1656,23 @@ async function extractTodoMarkdownWithOneRepair(
   }
 }
 
+function plannerThinkingLevel(inputText: string, runtime: RuntimeOptions): string {
+  return resolveAdaptiveThinkingLevel({
+    taskKind: "planner",
+    inputText,
+    explicitThinkingLevel: runtime.todoThinking,
+    supportedThinkingLevels: supportedThinkingLevelsForModel(runtime.workerModel),
+    fallbackThinkingLevel: DEFAULT_PLANNER_THINKING_LEVEL,
+  }).thinkingLevel;
+}
+
 async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Promise<string> {
   return runPlannerOperationWithNetworkRecovery(
     {
       inputText,
       cwd: runtime.cwd,
       runDir: runtime.runDir,
-      thinkingLevel: runtime.todoThinking,
+      thinkingLevel: plannerThinkingLevel(inputText, runtime),
       model: runtime.workerModel,
       abortSignal: runtime.abortSignal,
       timeoutMs: runtime.todoTimeoutMs,
@@ -1803,7 +1826,7 @@ async function generateSteeringPlanRevision(options: {
           planRevision: request,
           cwd: options.runtime.cwd,
           runDir: options.runtime.runDir,
-          thinkingLevel: options.runtime.todoThinking,
+          thinkingLevel: plannerThinkingLevel(prompt, options.runtime),
           model: options.runtime.workerModel,
           abortSignal: options.runtime.abortSignal,
           timeoutMs: options.runtime.todoTimeoutMs,
@@ -1954,7 +1977,13 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
     cwd: options.cwd,
     tools: [],
     model: options.model,
-    thinkingLevel: options.thinkingLevel ?? DEFAULT_PLANNER_THINKING_LEVEL,
+    thinkingLevel: resolveAdaptiveThinkingLevel({
+      taskKind: "planner",
+      inputText: options.inputText,
+      explicitThinkingLevel: options.thinkingLevel,
+      supportedThinkingLevels: supportedThinkingLevelsForModel(options.model),
+      fallbackThinkingLevel: DEFAULT_PLANNER_THINKING_LEVEL,
+    }).thinkingLevel,
   });
   const session = result.session;
 
@@ -2201,8 +2230,8 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerModel,
     workerModelName,
     goal,
-    taskThinking: options.taskThinking ?? DEFAULT_COORDINATOR_OPTIONS.taskThinking,
-    todoThinking: options.todoThinking ?? DEFAULT_COORDINATOR_OPTIONS.todoThinking,
+    taskThinking: options.taskThinking,
+    todoThinking: options.todoThinking,
     workerSessionReuse: workerSessionReuseConfig.enabled,
     workerSessionReuseContextThresholdPercent: workerSessionReuseConfig.contextThresholdPercent,
     networkRecovery,

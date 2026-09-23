@@ -309,6 +309,30 @@ assert.equal(fakeDoneSession.prompts.length, 1);
 assert.match(fakeDoneSession.prompts[0], /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
 assert.ok(fakeDoneOutcome.events.some((event) => event.type === "message_update" && event.textDelta));
 
+let directAdaptiveThinking: string | undefined;
+await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task: {
+    taskId: "5",
+    title: "Fix a simple README typo",
+    section: "Correct one typo in README.md.",
+  },
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async (options) => {
+    directAdaptiveThinking = options.thinkingLevel;
+    return {
+      session: new FakeWorkerSession([
+        "TASK_RESULT:\nstatus: done\nsummary: ok\nchanges:\n- none\nverification:\n- not run\nremaining:\n- none",
+      ]),
+    };
+  },
+});
+assert.equal(directAdaptiveThinking, "low");
+
 const streamedListeners: Array<(event: unknown) => void> = [];
 const streamedMessages: unknown[] = [];
 const streamedCommentary = "x".repeat(12_000);
