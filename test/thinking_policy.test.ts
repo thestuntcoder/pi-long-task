@@ -8,7 +8,7 @@ import {
 } from "../src/thinking_policy.ts";
 
 test("explicit thinking overrides bypass adaptive classification unchanged", () => {
-  for (const explicitThinkingLevel of ["minimal", "xhigh", "provider-specific"]) {
+  for (const explicitThinkingLevel of ["", "minimal", "xhigh", "provider-specific"]) {
     const selected = resolveAdaptiveThinkingLevel({
       taskKind: "worker",
       taskTitle: "Delete production customer data and redesign the distributed architecture",
@@ -101,6 +101,24 @@ test("adaptive levels are bounded to recognized model capabilities", () => {
       supportedThinkingLevels: ["custom"],
     }).thinkingLevel,
     "high",
+  );
+  assert.equal(
+    resolveAdaptiveThinkingLevel({
+      taskKind: "worker",
+      inputText: "Fix a simple typo.",
+      supportedThinkingLevels: [],
+      attempt: 10,
+    }).thinkingLevel,
+    "high",
+  );
+  assert.equal(
+    resolveAdaptiveThinkingLevel({
+      taskKind: "worker",
+      inputText: "Fix a simple typo.",
+      supportedThinkingLevels: ["off"],
+      attempt: 10,
+    }).thinkingLevel,
+    "off",
   );
 });
 
