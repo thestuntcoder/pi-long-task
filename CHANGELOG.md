@@ -2,6 +2,18 @@
 
 Notable changes to Pi Long Task are recorded here. This project follows semantic versioning.
 
+## Unreleased
+
+### Changed
+
+- Select planner and worker thinking levels adaptively when no explicit override is present: confidently straightforward work may start lower, while complex, risky, uncertain, or ambiguous work retains the conservative `high` fallback.
+- Escalate adaptive reasoning across worker attempts, planner repairs, and coordinator-level network retries, clamped to the active model/provider's highest supported level.
+
+### Compatibility
+
+- Keep explicit `todoThinking`, `taskThinking`, and direct `thinkingLevel` values authoritative and unchanged across retries.
+- Preserve the historical `high` defaults as safe fallbacks for ambiguous work or unusable capability metadata; non-reasoning models remain `off`, and retry limits, deadlines, and accounting are unchanged.
+
 ## 0.7.1 - 2026-09-23
 
 ### Performance

@@ -319,7 +319,9 @@ A positive timeout is required. Grace defaults to **15 seconds**, may be zero to
 
 An explicit timeout remains exact and bypasses adaptive scaling. Omitting the new options preserves the previous call shape. The selected budget is returned additively as `plannerBudget`, including its source, detected signals, and extension reason when applicable.
 
-The planner-only thinking default is **`high`**, chosen to balance plan quality and latency. This does not change worker, discovery, or reviewer defaults. Programmatic `runCoordinator()` callers may set `todoThinking` explicitly; every supported Pi level is forwarded unchanged, including `xhigh`:
+Planner and worker thinking levels are **adaptive when no explicit override is supplied**. Confidently straightforward work—such as a focused documentation correction or another small localized change—can start with a lower reasoning budget. Complex, risky, uncertain, conflicting, or otherwise ambiguous work keeps the conservative **`high`** fallback. Classification uses conservative deterministic signals rather than asking a model to grade its own task; these examples describe the policy, not a guaranteed keyword contract.
+
+Programmatic `runCoordinator()` callers can override the planner and worker independently with `todoThinking` and `taskThinking`. Direct `runTodoPlanner()` and `runWorkerTask()` callers can use `thinkingLevel`. An explicit value always wins and is forwarded unchanged; adaptive classification, model-capability clamping, and retry escalation do not rewrite it:
 
 ```ts
 await runCoordinator({
@@ -327,9 +329,14 @@ await runCoordinator({
   inputText: "Create 24 separately planned tasks for the migration.",
   todoTimeoutMs: 12 * 60_000,
   todoGracefulShutdownMs: 30_000,
-  todoThinking: "xhigh",
+  todoThinking: "xhigh", // exact planner override
+  taskThinking: "high", // exact worker override
 });
 ```
+
+Without an override, the selected level is limited to levels supported by the active model/provider. A non-reasoning model remains `off`; an explicitly supplied but empty or unusable capability list retains the safe `high` fallback rather than guessing a lower level. When concrete model discovery is deferred to Pi's session factory, the SDK performs the final provider-aware clamp after discovery. The first execution uses the normal adaptive result. Subsequent worker attempts, planner repair attempts, and coordinator-level planner or worker recovery retries advance through supported levels and stop at the highest supported level. Retry counts, timeout budgets, network-recovery accounting, and other retry semantics are unchanged.
+
+The exported planner and worker `high` defaults remain compatibility fallbacks for ambiguous or unavailable classification/capability inputs. Goal discovery and reviewer thinking settings are separate. See [the adaptive thinking maintainer note](docs/planner-thinking-level.md) for policy and integration details.
 
 Before planning, CLI/TUI and headless progress report the effective budget in friendly units and explain any adaptive extension. Three bounded updates report elapsed and remaining time. If the deadline is reached, progress announces the grace period and its duration rather than appearing frozen.
 
