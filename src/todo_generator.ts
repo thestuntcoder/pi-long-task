@@ -259,6 +259,7 @@ export function todoPlanningOnlyPromptBlock(capabilityConstraints: readonly stri
 - Do not perform requested end work: do not implement or write code, execute research or report findings, create requested creative output (prose, stories, copy, designs, or assets), or produce any other final deliverable.
 - Use future-worker action language; do not claim work is complete or invent results.
 - Keep repeated task sections compact: use a one-sentence Goal and Done when, plus only the necessary Status and Verify bullets. Omit rationale, lengthy analysis, summaries, duplicated context, unrequested examples, and boilerplate.
+- Minimize worker handoffs because each TODO starts another model assignment. Use the fewest tasks that safely preserve dependencies and explicit boundaries; combine tightly coupled implementation, tests, and documentation that use the same context. Do not create separate setup, audit, or final-verification tasks when that work belongs inside an implementation task.
 - Preserve every instruction, constraint, required deliverable, and acceptance condition from the source request and supplied planning context. Put shared constraints above ## Progress and task-specific requirements in the relevant task.${capabilityBlock}`;
 }
 

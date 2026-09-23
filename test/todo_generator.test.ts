@@ -76,6 +76,9 @@ assert.match(prompt, /Produce only a concise executable plan for future workers\
 assert.match(prompt, /do not implement or write code, execute research or report findings/i);
 assert.match(prompt, /create requested creative output \(prose, stories, copy, designs, or assets\)/i);
 assert.match(prompt, /Keep repeated task sections compact/);
+assert.match(prompt, /Minimize worker handoffs because each TODO starts another model assignment/);
+assert.match(prompt, /combine tightly coupled implementation, tests, and documentation/);
+assert.match(prompt, /Do not create separate setup, audit, or final-verification tasks/);
 assert.match(prompt, /Omit rationale, lengthy analysis, summaries, duplicated context/);
 assert.match(prompt, /Preserve every instruction, constraint, required deliverable, and acceptance condition/);
 assert.doesNotMatch(prompt, /Overall goal:/);
@@ -106,6 +109,7 @@ assert.match(repairPrompt, /Produce only a concise executable plan for future wo
 assert.match(repairPrompt, /do not implement or write code, execute research or report findings/i);
 assert.match(repairPrompt, /create requested creative output \(prose, stories, copy, designs, or assets\)/i);
 assert.match(repairPrompt, /Keep repeated task sections compact/);
+assert.match(repairPrompt, /Minimize worker handoffs because each TODO starts another model assignment/);
 assert.match(repairPrompt, /Preserve every instruction, constraint, required deliverable, and acceptance condition/);
 assert.match(repairPrompt, /Use Node 22, keep all network calls mocked/);
 assert.match(repairPrompt, /Overall goal:\n\nShip all requested deliverables without changing the public API\./);

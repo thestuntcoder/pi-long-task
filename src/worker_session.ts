@@ -113,6 +113,7 @@ Rules:
 - If you need to stop because context is high or the work is blocked, leave the repository in a safe state and report \`status: partial\` or \`status: blocked\`.
 - Use the repository's AGENTS.md/project instructions.
 - Run focused verification commands when practical.
+- Minimize latency: batch independent reads and searches when possible, avoid repeated repository-wide scans, and prefer focused checks over full suites unless the task requires a full suite.
 - Do not run bash commands with timeout greater than ${options.maxBashTimeoutSeconds.toFixed(0)} seconds. For long full-suite checks, run once with a bounded timeout and report any timeout/failure in TASK_RESULT instead of continuing indefinitely.
 - If TODO-file global instructions restrict scope, obey them strictly. If the task appears to require out-of-scope code changes, stop and report \`status: blocked\` instead of changing those files.
 
