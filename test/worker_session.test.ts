@@ -307,6 +307,56 @@ assert.equal(fakeDoneSession.prompts.length, 1);
 assert.match(fakeDoneSession.prompts[0], /Assigned task: `TODO 4 — Port worker prompt and TASK_RESULT parsing`/);
 assert.ok(fakeDoneOutcome.events.some((event) => event.type === "message_update" && event.textDelta));
 
+const streamedListeners: Array<(event: unknown) => void> = [];
+const streamedMessages: unknown[] = [];
+const streamedCommentary = "x".repeat(12_000);
+const streamedResult = `${streamedCommentary}\nTASK_RESULT:
+status: done
+summary: streamed
+changes:
+- none
+verification:
+- not run
+remaining:
+- none`;
+const highVolumeStreamOutcome = await runWorkerTask({
+  cwd: "/tmp/project",
+  todoPath: "/tmp/TODO.md",
+  task,
+  attempt: 1,
+  commitRequested: false,
+  maxBashTimeoutSeconds: 300,
+  taskTimeoutSeconds: 0,
+  sessionFactory: async () => ({
+    session: {
+      messages: streamedMessages,
+      subscribe(listener) {
+        streamedListeners.push(listener);
+        return () => undefined;
+      },
+      async prompt() {
+        const emit = (event: unknown) => streamedListeners.forEach((listener) => listener(event));
+        emit({ type: "message_start", message: { role: "assistant" } });
+        for (const delta of streamedCommentary) {
+          emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } });
+        }
+        const message = { role: "assistant", content: streamedResult };
+        streamedMessages.push(message);
+        emit({ type: "message_end", message });
+        emit({ type: "turn_end", message, toolResults: [] });
+        emit({ type: "agent_end", messages: streamedMessages });
+      },
+    },
+  }),
+});
+assert.equal(highVolumeStreamOutcome.done, true);
+assert.equal(highVolumeStreamOutcome.assistantText, streamedResult);
+assert.equal(highVolumeStreamOutcome.events.filter((event) => event.type === "message_update").length, 1);
+assert.ok(
+  (highVolumeStreamOutcome.events.find((event) => event.type === "message_update")?.textDelta?.length ?? 0) <= 4_096,
+);
+assert.ok(highVolumeStreamOutcome.events.length < 10, "stream deltas should be compacted before result serialization");
+
 const fakeCostSession = new FakeWorkerSession(
   [
     `TASK_RESULT:

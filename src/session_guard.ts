@@ -23,6 +23,8 @@ export interface GuardedSessionPromptOptions {
   dispose?: boolean;
 }
 
+const MAX_CAPTURED_SESSION_EVENTS = 512;
+
 export interface GuardedSessionPromptResult {
   assistantText: string;
   /** True when the primary prompt deadline elapsed, even if the prompt safely completed during grace. */
@@ -54,7 +56,7 @@ export async function runGuardedSessionPrompt(
   const events: unknown[] = [];
   const timers = new Set<ReturnType<typeof setTimeout>>();
   let assistantText = "";
-  let currentAssistantText = "";
+  let currentAssistantTextChunks: string[] = [];
   let outputObserved = false;
   let timedOut = false;
   let graceExpired = false;
@@ -198,18 +200,19 @@ export async function runGuardedSessionPrompt(
     } else {
       unsubscribe = session.subscribe((event: unknown) => {
         events.push(event);
+        if (events.length > MAX_CAPTURED_SESSION_EVENTS) events.shift();
         if (isAssistantMessageStart(event)) {
-          currentAssistantText = "";
+          currentAssistantTextChunks = [];
+          assistantText = "";
         }
         const delta = assistantTextDeltaFromEvent(event);
         if (delta !== undefined) {
-          currentAssistantText += delta;
-          assistantText = currentAssistantText || assistantText;
+          if (delta) currentAssistantTextChunks.push(delta);
           outputObserved ||= delta.trim().length > 0;
         } else {
           const text = assistantTextFromEvent(event);
           if (text) {
-            currentAssistantText = text;
+            currentAssistantTextChunks = [text];
             assistantText = text;
             outputObserved ||= text.trim().length > 0;
           }
@@ -259,7 +262,7 @@ export async function runGuardedSessionPrompt(
     clearTimers();
     options.abortSignal?.removeEventListener("abort", abortListener);
     unsubscribe?.();
-    assistantText = latestAssistantText(session, events, assistantText);
+    assistantText = latestAssistantText(session, events, currentAssistantTextChunks.join("") || assistantText);
     outputObserved ||= assistantText.trim().length > 0 && assistantText !== assistantTextAtStart;
     if (options.dispose !== false) {
       try {
@@ -331,8 +334,10 @@ function latestAssistantText(session: WorkerSessionLike, events: unknown[], fall
   if (fromMessages) {
     return fromMessages;
   }
-  const fromEvents = lastAssistantTextFromEvents(events);
-  return fromEvents || fallback;
+  if (fallback) {
+    return fallback;
+  }
+  return lastAssistantTextFromEvents(events);
 }
 
 function timeoutMs(value: number | undefined): number {

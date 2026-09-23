@@ -792,6 +792,32 @@ Max bash timeout: 42s
   assert.equal(taskDone?.taskProgress?.summary.completedPercent, 100);
   assert.equal(workerToolRun.taskProgress.summary.completedTasks, 1);
 
+  const highVolumeProgressUpdates: CoordinatorProgressUpdate[] = [];
+  const highVolumeProgressRun = await runCoordinator({
+    inputText: generatedTodoMarkdown(["Bound streaming progress"]),
+    commit: false,
+    cwd: tempRoot,
+    runId: "bounded-worker-stream-progress",
+    workerRunner: async (options) => {
+      for (let index = 0; index < 4_096; index += 1) {
+        options.onEvent?.({ type: "message_update", textDelta: "x" });
+      }
+      return outcomeFor(options, "done");
+    },
+    onProgress: (update) => highVolumeProgressUpdates.push(update),
+  });
+  assert.equal(highVolumeProgressRun.status, "done");
+  const streamedUpdates = highVolumeProgressUpdates.filter(
+    (update) => update.phase === "worker_tool" && update.workerEventType === "message_update",
+  );
+  assert.ok(streamedUpdates.length <= 16, "stream progress should be throttled by character count");
+  assert.ok(streamedUpdates.length > 0);
+  assert.ok(
+    streamedUpdates.every((update) => (update.activeStatus?.length ?? 0) <= 800),
+    "active status should remain bounded as worker output grows",
+  );
+  assert.match(streamedUpdates.at(-1)?.activeStatus ?? "", /^… /);
+
   const commitSkipUpdates: CoordinatorProgressUpdate[] = [];
   const commitSkipped = await runCoordinator({
     inputText: generatedTodoMarkdown(["Skip commit for failed outcome"]),

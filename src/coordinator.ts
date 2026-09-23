@@ -101,6 +101,11 @@ import {
 
 export type { CoordinatorStatus } from "./types.ts";
 
+const WORKER_PROGRESS_MAX_BUFFER_CHARS = 2_048;
+const WORKER_PROGRESS_MAX_STATUS_CHARS = 800;
+const WORKER_PROGRESS_MIN_CHARACTER_DELTA = 256;
+const WORKER_PROGRESS_MIN_INTERVAL_MS = 100;
+
 export const DEFAULT_COORDINATOR_OPTIONS = {
   maxAttemptsPerTask: 3,
   taskTimeoutMs: 900_000,
@@ -385,7 +390,9 @@ interface RuntimeOptions {
   workerCostState: WorkerCostState;
   workerActivityByWorker: Map<string, string>;
   workerTextByWorker: Map<string, string>;
+  workerTextLengthByWorker: Map<string, number>;
   workerTextPublishedLengthByWorker: Map<string, number>;
+  workerTextPublishedAtByWorker: Map<string, number>;
   plannerDiagnostics: PlannerDiagnostic[];
   capabilityWarnings: WorkerCapabilityWarning[];
   workerSessionMetrics: WorkerSessionMetrics;
@@ -1183,7 +1190,9 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
       activeTaskReference = taskPlanReference;
       runtime.workerActivityByWorker.set(worker, initialActivity);
       runtime.workerTextByWorker.delete(worker);
+      runtime.workerTextLengthByWorker.delete(worker);
       runtime.workerTextPublishedLengthByWorker.delete(worker);
+      runtime.workerTextPublishedAtByWorker.delete(worker);
       emitProgress(
         runtime,
         `Running TODO ${nextTask.taskId} — ${nextTask.title}${attempt > 1 ? ` (attempt ${attempt})` : ""}...`,
@@ -2208,7 +2217,9 @@ function buildRuntimeOptions(options: RunCoordinatorOptions): RuntimeOptions {
     workerCostState: createWorkerCostState(),
     workerActivityByWorker: new Map(),
     workerTextByWorker: new Map(),
+    workerTextLengthByWorker: new Map(),
     workerTextPublishedLengthByWorker: new Map(),
+    workerTextPublishedAtByWorker: new Map(),
     plannerDiagnostics: [],
     capabilityWarnings,
     workerSessionMetrics: createWorkerSessionMetrics(),
@@ -2668,15 +2679,23 @@ function emitWorkerEventProgress(
   let activeStatus = runtime.workerActivityByWorker.get(worker);
 
   if (event.type === "message_update" && event.textDelta) {
-    const workerText = `${runtime.workerTextByWorker.get(worker) ?? ""}${event.textDelta}`;
+    const previousText = runtime.workerTextByWorker.get(worker) ?? "";
+    const workerText = `${previousText}${event.textDelta}`.slice(-WORKER_PROGRESS_MAX_BUFFER_CHARS);
+    const receivedLength = (runtime.workerTextLengthByWorker.get(worker) ?? 0) + event.textDelta.length;
     runtime.workerTextByWorker.set(worker, workerText);
+    runtime.workerTextLengthByWorker.set(worker, receivedLength);
     const streamedStatus = activeStatusFromWorkerText(workerText);
     const publishedLength = runtime.workerTextPublishedLengthByWorker.get(worker) ?? 0;
-    const publishBoundary = /[\n.!?:]\s*$/.test(event.textDelta) || streamedStatus.length - publishedLength >= 48;
-    if (streamedStatus && publishBoundary) {
+    const publishedAt = runtime.workerTextPublishedAtByWorker.get(worker);
+    const nowMs = runtime.now().getTime();
+    const sentenceBoundary = /[\n.!?:]\s*$/.test(event.textDelta);
+    const enoughTimeElapsed = publishedAt === undefined || nowMs - publishedAt >= WORKER_PROGRESS_MIN_INTERVAL_MS;
+    const enoughNewText = receivedLength - publishedLength >= WORKER_PROGRESS_MIN_CHARACTER_DELTA;
+    if (streamedStatus && ((sentenceBoundary && enoughTimeElapsed) || enoughNewText)) {
       activeStatus = streamedStatus;
       runtime.workerActivityByWorker.set(worker, activeStatus);
-      runtime.workerTextPublishedLengthByWorker.set(worker, streamedStatus.length);
+      runtime.workerTextPublishedLengthByWorker.set(worker, receivedLength);
+      runtime.workerTextPublishedAtByWorker.set(worker, nowMs);
       emitProgress(runtime, activeStatus, {
         phase: "worker_tool",
         taskId: task.taskId,
@@ -2694,7 +2713,9 @@ function emitWorkerEventProgress(
 
   if (event.type === "message_end") {
     runtime.workerTextByWorker.delete(worker);
+    runtime.workerTextLengthByWorker.delete(worker);
     runtime.workerTextPublishedLengthByWorker.delete(worker);
+    runtime.workerTextPublishedAtByWorker.delete(worker);
   }
 
   if (event.activity) {
@@ -2780,7 +2801,9 @@ function stripToolOutcomePrefix(activity: string): string {
 
 function activeStatusFromWorkerText(text: string): string {
   const taskResultIndex = text.indexOf("TASK_RESULT:");
-  return (taskResultIndex >= 0 ? text.slice(0, taskResultIndex) : text).replace(/\s+/g, " ").trim();
+  const normalized = (taskResultIndex >= 0 ? text.slice(0, taskResultIndex) : text).replace(/\s+/g, " ").trim();
+  if (normalized.length <= WORKER_PROGRESS_MAX_STATUS_CHARS) return normalized;
+  return `… ${normalized.slice(-WORKER_PROGRESS_MAX_STATUS_CHARS + 2)}`;
 }
 
 function emitObsoleteTaskOutcomeProgress(

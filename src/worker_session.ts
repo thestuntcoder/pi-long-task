@@ -253,6 +253,9 @@ export const DEFAULT_WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "f
 export const DEFAULT_WORKER_THINKING_LEVEL = "high";
 export const DEFAULT_TASK_TIMEOUT_SECONDS = 60 * 60;
 export const DEFAULT_GRACEFUL_SHUTDOWN_SECONDS = 60;
+/** Keep streamed diagnostics useful without returning thousands of token-delta objects. */
+export const MAX_CAPTURED_WORKER_EVENTS = 256;
+export const MAX_CAPTURED_STREAM_TEXT_CHARS = 4_096;
 
 export interface WorkerSessionLike {
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
@@ -532,7 +535,7 @@ export async function runWorkerTaskAssignment(
   const compactionEvents: string[] = [];
   const events: CapturedWorkerEvent[] = [];
   let assistantText = "";
-  let currentAssistantText = "";
+  let currentAssistantTextChunks: string[] = [];
   let sessionFile: string | undefined;
   let sessionId: string | undefined;
   let shutdownRequested = false;
@@ -561,7 +564,7 @@ export async function runWorkerTaskAssignment(
   const timers = new Set<ReturnType<typeof setTimeout>>();
 
   const capture = (event: CapturedWorkerEvent) => {
-    events.push(event);
+    retainCapturedWorkerEvent(events, event);
     options.onEvent?.(event);
   };
 
@@ -711,7 +714,8 @@ export async function runWorkerTaskAssignment(
         case "message_start": {
           const message = event.message;
           if (isRecord(message) && message.role === "assistant") {
-            currentAssistantText = "";
+            currentAssistantTextChunks = [];
+            assistantText = "";
           }
           break;
         }
@@ -719,8 +723,7 @@ export async function runWorkerTaskAssignment(
           const assistantEvent = event.assistantMessageEvent;
           if (isRecord(assistantEvent) && assistantEvent.type === "text_delta") {
             const delta = typeof assistantEvent.delta === "string" ? assistantEvent.delta : "";
-            currentAssistantText += delta;
-            assistantText = currentAssistantText || assistantText;
+            if (delta) currentAssistantTextChunks.push(delta);
           }
           break;
         }
@@ -728,6 +731,7 @@ export async function runWorkerTaskAssignment(
           const messageText = assistantMessageText(event.message);
           if (messageText) {
             assistantText = messageText;
+            currentAssistantTextChunks = [messageText];
           }
           recordWorkerUsageCost(workerUsageCostFromEvent(event), workerUsageCostKeyFromEvent(event));
           break;
@@ -777,7 +781,8 @@ export async function runWorkerTaskAssignment(
 
     if (taskTimeoutSeconds > 0) {
       schedule(() => {
-        if (finished || hasCompleteTaskResult(assistantText)) {
+        const currentAssistantText = currentAssistantTextChunks.join("") || assistantText;
+        if (finished || hasCompleteTaskResult(currentAssistantText)) {
           return;
         }
         timedOut = true;
@@ -792,14 +797,24 @@ export async function runWorkerTaskAssignment(
     }
 
     await waitForPrompt(prompt);
-    assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
+    assistantText = latestInvocationAssistantText(
+      session,
+      currentAssistantTextChunks.join("") || assistantText,
+      invocationMessageStart,
+      !reusedAssignment,
+    );
 
     if (!hasCompleteTaskResult(assistantText) && !error && !aborted && !timedOut && !options.abortSignal?.aborted) {
       contextObservations.push(
         "missing TASK_RESULT status after initial prompt, or required fields were incomplete; requested required block once",
       );
       await waitForPrompt(buildMissingTaskResultMessage());
-      assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
+      assistantText = latestInvocationAssistantText(
+        session,
+        currentAssistantTextChunks.join("") || assistantText,
+        invocationMessageStart,
+        !reusedAssignment,
+      );
     }
   } catch (exc) {
     failure ??= exc;
@@ -809,7 +824,12 @@ export async function runWorkerTaskAssignment(
     clearTimers();
     options.abortSignal?.removeEventListener("abort", abortListener);
     unsubscribe?.();
-    assistantText = latestInvocationAssistantText(session, assistantText, invocationMessageStart, !reusedAssignment);
+    assistantText = latestInvocationAssistantText(
+      session,
+      currentAssistantTextChunks.join("") || assistantText,
+      invocationMessageStart,
+      !reusedAssignment,
+    );
     sessionFile = session.sessionFile ?? sessionFile;
     sessionId = session.sessionId ?? sessionId;
     sessionStatsEnd = await workerSessionStatsSnapshot(session);
@@ -905,6 +925,23 @@ export function buildWorkerSessionCreationFailureOutcome(
     error: message,
     failure: error,
   };
+}
+
+function retainCapturedWorkerEvent(events: CapturedWorkerEvent[], event: CapturedWorkerEvent): void {
+  if (event.type === "message_update" && event.textDelta !== undefined) {
+    const previous = events.at(-1);
+    if (previous?.type === "message_update" && previous.textDelta !== undefined) {
+      previous.textDelta = `${previous.textDelta}${event.textDelta}`.slice(-MAX_CAPTURED_STREAM_TEXT_CHARS);
+      return;
+    }
+  }
+
+  events.push(event);
+  if (events.length <= MAX_CAPTURED_WORKER_EVENTS) return;
+
+  // Prefer evicting token-stream diagnostics over lifecycle/tool evidence.
+  const streamedIndex = events.findIndex((item) => item.type === "message_update");
+  events.splice(streamedIndex >= 0 ? streamedIndex : 0, 1);
 }
 
 function textFromContentPart(item: unknown): string {
