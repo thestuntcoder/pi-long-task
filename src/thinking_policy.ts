@@ -41,6 +41,8 @@ export interface AdaptiveThinkingPolicyOptions {
   fallbackThinkingLevel?: ThinkingLevel;
   /** Defaults to `low`; selection is clamped to the supplied supported levels. */
   straightforwardThinkingLevel?: ThinkingLevel;
+  /** One-based execution attempt. Adaptive retries advance one supported level per attempt. */
+  attempt?: number;
 }
 
 export interface AdaptiveThinkingSelection {
@@ -196,7 +198,12 @@ export function resolveAdaptiveThinkingLevel(options: AdaptiveThinkingPolicyOpti
   const fallback = options.fallbackThinkingLevel ?? DEFAULT_THINKING_FALLBACK_LEVEL;
   if (classified.classification !== "straightforward") {
     return {
-      thinkingLevel: nearestSupportedThinkingLevel(fallback, options.supportedThinkingLevels, fallback),
+      thinkingLevel: supportedThinkingLevelForAttempt(
+        fallback,
+        options.supportedThinkingLevels,
+        fallback,
+        options.attempt,
+      ),
       source: "fallback",
       ...classified,
     };
@@ -204,7 +211,12 @@ export function resolveAdaptiveThinkingLevel(options: AdaptiveThinkingPolicyOpti
 
   const straightforward = options.straightforwardThinkingLevel ?? DEFAULT_STRAIGHTFORWARD_THINKING_LEVEL;
   return {
-    thinkingLevel: nearestSupportedThinkingLevel(straightforward, options.supportedThinkingLevels, fallback),
+    thinkingLevel: supportedThinkingLevelForAttempt(
+      straightforward,
+      options.supportedThinkingLevels,
+      fallback,
+      options.attempt,
+    ),
     source: "adaptive",
     ...classified,
   };
@@ -236,10 +248,11 @@ function hasLargeScopeCount(text: string, includeEnumeration: boolean): boolean 
   return [...text.matchAll(ENUMERATED_ITEM_RE)].length >= LARGE_ITEM_COUNT;
 }
 
-function nearestSupportedThinkingLevel(
+function supportedThinkingLevelForAttempt(
   desired: ThinkingLevel,
   supplied: readonly string[] | undefined,
   safeFallback: ThinkingLevel,
+  attempt: number | undefined,
 ): string {
   const suppliedSet = supplied ? new Set(supplied) : undefined;
   const supported = suppliedSet
@@ -250,11 +263,18 @@ function nearestSupportedThinkingLevel(
     return "off";
   }
   // Invalid or empty capability metadata is ambiguous. Preserve the historical
-  // safe fallback instead of lowering reasoning based on unsupported data.
+  // safe fallback instead of guessing either a lower level or a supported max.
   if (supported.length === 0) {
     return safeFallback;
   }
 
   const desiredIndex = SUPPORTED_THINKING_LEVELS.indexOf(desired);
-  return supported.find((level) => SUPPORTED_THINKING_LEVELS.indexOf(level) >= desiredIndex) ?? supported.at(-1)!;
+  const baselineIndex = supported.findIndex((level) => SUPPORTED_THINKING_LEVELS.indexOf(level) >= desiredIndex);
+  const safeBaselineIndex = baselineIndex >= 0 ? baselineIndex : supported.length - 1;
+  const retryCount = validThinkingAttempt(attempt) - 1;
+  return supported[Math.min(safeBaselineIndex + retryCount, supported.length - 1)];
+}
+
+function validThinkingAttempt(attempt: number | undefined): number {
+  return Number.isSafeInteger(attempt) && (attempt ?? 0) > 0 ? attempt! : 1;
 }

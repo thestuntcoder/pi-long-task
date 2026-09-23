@@ -702,7 +702,7 @@ Max bash timeout: 42s
   );
   assert.deepEqual(
     configuredCalls.map((call) => call.thinkingLevel),
-    ["high", "high"],
+    ["high", "xhigh"],
   );
 
   const blockedProgressUpdates: CoordinatorProgressUpdate[] = [];

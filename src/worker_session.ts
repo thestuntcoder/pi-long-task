@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import type { ThinkingLevel as PiThinkingLevel } from "@earendil-works/pi-ai";
+
 import { coverageGoalAction, coverageGoalVerification, parseCoverageGoal } from "./coverage_goal.ts";
 import {
   hasCompleteTaskResult,
@@ -271,6 +273,8 @@ export interface WorkerSessionLike {
   getLastAssistantText?(): string | undefined;
   getSessionStats?(): unknown | Promise<unknown>;
   getContextUsage?(): unknown;
+  /** Pi AgentSession supports changing reasoning budget between planner repair prompts. */
+  setThinkingLevel?(level: PiThinkingLevel): void;
   sessionFile?: string;
   sessionId?: string;
   isStreaming?: boolean;
@@ -315,6 +319,8 @@ export interface CreateWorkerSessionOptions {
 export type WorkerSessionFactory = (options: CreateWorkerSessionOptions) => Promise<WorkerSessionFactoryResult>;
 
 export interface RunWorkerTaskOptions extends WorkerTaskPromptOptions, CreateWorkerSessionOptions {
+  /** True only when the coordinator selected thinkingLevel adaptively. */
+  adaptiveThinking?: boolean;
   taskTimeoutSeconds?: number;
   gracefulShutdownSeconds?: number;
   /** Normalized coordinator policy for resuming this operation after transient transport failure. */
@@ -890,6 +896,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<Sess
       taskSection: options.task.section,
       explicitThinkingLevel: options.thinkingLevel,
       supportedThinkingLevels: supportedThinkingLevelsForModel(options.model),
+      attempt: options.attempt,
     }).thinkingLevel,
   };
   let resource: WorkerSessionResource | undefined;

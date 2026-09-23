@@ -40,7 +40,11 @@ import {
   resolvePlannerTimeoutMs,
   type PlannerBudget,
 } from "./planner_config.ts";
-import { resolveAdaptiveThinkingLevel, supportedThinkingLevelsForModel } from "./thinking_policy.ts";
+import {
+  resolveAdaptiveThinkingLevel,
+  supportedThinkingLevelsForModel,
+  type ThinkingLevel,
+} from "./thinking_policy.ts";
 import {
   createPlannerActiveProgress,
   createPlannerGraceProgress,
@@ -270,6 +274,12 @@ export interface TodoPlannerOptions {
   runDir: string;
   /** Explicit values are forwarded unchanged; omission uses conservative adaptive selection. */
   thinkingLevel?: string;
+  /** Internal retry metadata: true only when thinkingLevel came from adaptive selection. */
+  adaptiveThinking?: boolean;
+  /** One-based adaptive attempt, independent of timeout accounting. */
+  thinkingAttempt?: number;
+  /** Original classification input retained when a repair prompt is retried. */
+  thinkingInputText?: string;
   model?: unknown;
   abortSignal?: AbortSignal;
   timeoutMs?: number;
@@ -434,6 +444,7 @@ interface RetainedWorkerState {
   contextUsagePercent?: number;
   previousTask: Pick<Task, "taskId" | "title">;
   previousAttempt: number;
+  thinkingLevel?: string;
   previousAssignmentIdentity: WorkerAssignmentIdentity;
   reportDiagnostic: (diagnostic: WorkerSessionDiagnostic) => void;
   reuseScope: RetainedWorkerReuseScope;
@@ -542,6 +553,7 @@ export class CoordinatorWorkerSessionOwner {
       await this.disposeRetained();
     }
     if (this.retained) {
+      this.applyAdaptiveRetryThinking(options, compatibility, this.retained);
       const decision = decideWorkerSessionReuse({
         config: {
           enabled: this.runtime.workerSessionReuse,
@@ -581,6 +593,7 @@ export class CoordinatorWorkerSessionOwner {
           health: "healthy",
           previousTask: options.task,
           previousAttempt: options.attempt,
+          thinkingLevel: options.thinkingLevel,
           previousAssignmentIdentity: identity,
           reportDiagnostic: report,
           reuseScope: "sequential_task",
@@ -750,6 +763,33 @@ export class CoordinatorWorkerSessionOwner {
     );
   }
 
+  private applyAdaptiveRetryThinking(
+    options: RunWorkerTaskOptions,
+    compatibility: WorkerSessionCompatibilityFingerprint,
+    retained: RetainedWorkerState,
+  ): void {
+    if (
+      !options.adaptiveThinking ||
+      retained.reuseScope !== "partial_continuation" ||
+      retained.thinkingLevel === options.thinkingLevel
+    ) {
+      return;
+    }
+    const compatibilityAtPreviousLevel = this.compatibilityFor({
+      ...options,
+      thinkingLevel: retained.thinkingLevel,
+    });
+    if (!sameWorkerSessionCompatibility(retained.compatibility, compatibilityAtPreviousLevel)) {
+      return;
+    }
+
+    if (options.thinkingLevel !== "off") {
+      retained.resource.session.setThinkingLevel?.(options.thinkingLevel as ThinkingLevel);
+    }
+    retained.thinkingLevel = options.thinkingLevel;
+    retained.compatibility = compatibility;
+  }
+
   private taintActiveAssignment(active: ActiveWorkerSessionAssignment, reasonCode: string): void {
     active.tainted = true;
     const retained = this.retained;
@@ -840,6 +880,21 @@ function sameWorkerAssignment(left: WorkerAssignmentIdentity, right: WorkerAssig
   );
 }
 
+function sameWorkerSessionCompatibility(
+  left: WorkerSessionCompatibilityFingerprint,
+  right: WorkerSessionCompatibilityFingerprint,
+): boolean {
+  return (
+    left.coordinatorRunId === right.coordinatorRunId &&
+    left.repositoryRoot === right.repositoryRoot &&
+    left.worktreeRoot === right.worktreeRoot &&
+    left.provider === right.provider &&
+    left.model === right.model &&
+    left.workerOptions === right.workerOptions &&
+    left.sessionConfiguration === right.sessionConfiguration
+  );
+}
+
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const available = signals.filter((signal): signal is AbortSignal => Boolean(signal));
   if (available.length === 0) return undefined;
@@ -867,6 +922,7 @@ interface WorkerRecoveryExecutionOptions {
   signal?: AbortSignal;
   onInterruption?: (outcome: SessionOutcome) => void;
   onNetworkRecovery?: (event: NetworkRecoveryEvent) => void;
+  thinkingLevelForRetry?: (retryCount: number) => string;
 }
 
 /**
@@ -918,6 +974,7 @@ async function runWorkerAttemptWithNetworkRecovery(options: WorkerRecoveryExecut
           // The recovery signal includes both run cancellation and the outage
           // deadline without replacing the assignment/steering cancellation.
           abortSignal: combineAbortSignals(options.workerOptions.abortSignal, signal),
+          ...(options.thinkingLevelForRetry ? { thinkingLevel: options.thinkingLevelForRetry(retryCount) } : {}),
           networkRecoveryContext: {
             retryCount,
             durableEvidencePath: options.taskResultPath,
@@ -1230,6 +1287,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         taskSection: nextTask.section,
         explicitThinkingLevel: runtime.taskThinking,
         supportedThinkingLevels: supportedThinkingLevelsForModel(runtime.workerModel),
+        attempt,
       }).thinkingLevel;
       const workerOptions: RunWorkerTaskOptions = {
         cwd: runtime.cwd,
@@ -1249,6 +1307,7 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
         model: runtime.workerModel,
         modelName: runtime.workerModelName,
         thinkingLevel: workerThinking,
+        adaptiveThinking: runtime.taskThinking === undefined,
         abortSignal: combineAbortSignals(runtime.abortSignal, assignmentController.signal),
         sessionFactory: runtime.workerSessionFactory,
         networkRecovery: runtime.networkRecovery,
@@ -1282,6 +1341,16 @@ export async function runCoordinator(options: RunCoordinatorOptions): Promise<Co
           signal: workerOptions.abortSignal,
           onInterruption: (interrupted) => networkInterruptedOutcomes.push(interrupted),
           onNetworkRecovery: createNetworkRecoveryProgressHandler(runtime),
+          thinkingLevelForRetry: (retryCount) =>
+            resolveAdaptiveThinkingLevel({
+              taskKind: "worker",
+              inputText: globalInstructions,
+              taskTitle: nextTask.title,
+              taskSection: nextTask.section,
+              explicitThinkingLevel: runtime.taskThinking,
+              supportedThinkingLevels: supportedThinkingLevelsForModel(runtime.workerModel),
+              attempt: attempt + retryCount,
+            }).thinkingLevel,
         });
       } catch (error) {
         if (!assignmentState.obsolete) {
@@ -1596,7 +1665,7 @@ async function generateOrNormalizeTodoMarkdown(inputText: string, runtime: Runti
   const planned = await extractTodoMarkdownWithOneRepair(
     inputText,
     plannerText,
-    (repairPrompt) => requestTodoPlan(repairPrompt, runtime),
+    (repairPrompt) => requestTodoPlan(repairPrompt, runtime, 2, inputText),
     runtime.goal,
     capabilityConstraints,
     {
@@ -1656,23 +1725,32 @@ async function extractTodoMarkdownWithOneRepair(
   }
 }
 
-function plannerThinkingLevel(inputText: string, runtime: RuntimeOptions): string {
+function plannerThinkingLevel(inputText: string, runtime: RuntimeOptions, attempt = 1): string {
   return resolveAdaptiveThinkingLevel({
     taskKind: "planner",
     inputText,
     explicitThinkingLevel: runtime.todoThinking,
     supportedThinkingLevels: supportedThinkingLevelsForModel(runtime.workerModel),
     fallbackThinkingLevel: DEFAULT_PLANNER_THINKING_LEVEL,
+    attempt,
   }).thinkingLevel;
 }
 
-async function requestTodoPlan(inputText: string, runtime: RuntimeOptions): Promise<string> {
+async function requestTodoPlan(
+  inputText: string,
+  runtime: RuntimeOptions,
+  thinkingAttempt = 1,
+  thinkingInputText = inputText,
+): Promise<string> {
   return runPlannerOperationWithNetworkRecovery(
     {
       inputText,
       cwd: runtime.cwd,
       runDir: runtime.runDir,
-      thinkingLevel: plannerThinkingLevel(inputText, runtime),
+      thinkingLevel: plannerThinkingLevel(thinkingInputText, runtime, thinkingAttempt),
+      adaptiveThinking: runtime.todoThinking === undefined,
+      thinkingAttempt,
+      thinkingInputText,
       model: runtime.workerModel,
       abortSignal: runtime.abortSignal,
       timeoutMs: runtime.todoTimeoutMs,
@@ -1707,9 +1785,19 @@ async function runPlannerOperationWithNetworkRecovery(
   plannerOptions: TodoPlannerOptions,
   runtime: RuntimeOptions,
 ): Promise<string> {
-  const run = (recoverySignal?: AbortSignal) =>
+  const run = (retryCount = 0, recoverySignal?: AbortSignal) =>
     runtime.todoPlanner({
       ...plannerOptions,
+      ...(plannerOptions.adaptiveThinking
+        ? {
+            thinkingLevel: plannerThinkingLevel(
+              plannerOptions.thinkingInputText ?? plannerOptions.inputText,
+              runtime,
+              (plannerOptions.thinkingAttempt ?? 1) + retryCount,
+            ),
+            thinkingAttempt: (plannerOptions.thinkingAttempt ?? 1) + retryCount,
+          }
+        : {}),
       // The recovery signal carries cancellation/outage expiry only. It does
       // not alter timeoutMs, which remains authoritative for every replay.
       abortSignal: combineAbortSignals(plannerOptions.abortSignal, recoverySignal),
@@ -1762,7 +1850,7 @@ async function runPlannerOperationWithNetworkRecovery(
         config: runtime.networkRecovery,
         signal: plannerOptions.abortSignal,
         onEvent: onRecoveryEvent,
-        retry: ({ signal }) => run(signal),
+        retry: ({ retryCount, signal }) => run(retryCount, signal),
       });
       return recovered.value;
     } catch (recoveryFailure) {
@@ -1827,6 +1915,9 @@ async function generateSteeringPlanRevision(options: {
           cwd: options.runtime.cwd,
           runDir: options.runtime.runDir,
           thinkingLevel: plannerThinkingLevel(prompt, options.runtime),
+          adaptiveThinking: options.runtime.todoThinking === undefined,
+          thinkingAttempt: 1,
+          thinkingInputText: prompt,
           model: options.runtime.workerModel,
           abortSignal: options.runtime.abortSignal,
           timeoutMs: options.runtime.todoTimeoutMs,
@@ -1973,17 +2064,22 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
         };
   notifyPlannerProgress(options.onProgress, createPlannerStartedProgress(effectivePlannerBudget, gracefulShutdownMs));
   const sessionFactory = options.sessionFactory ?? createIsolatedWorkerSession;
+  const adaptiveThinking = options.adaptiveThinking ?? options.thinkingLevel === undefined;
+  const thinkingAttempt = options.thinkingAttempt ?? 1;
+  const thinkingInputText = options.thinkingInputText ?? options.inputText;
+  const thinkingSelection = resolveAdaptiveThinkingLevel({
+    taskKind: "planner",
+    inputText: thinkingInputText,
+    explicitThinkingLevel: adaptiveThinking ? undefined : options.thinkingLevel,
+    supportedThinkingLevels: supportedThinkingLevelsForModel(options.model),
+    fallbackThinkingLevel: DEFAULT_PLANNER_THINKING_LEVEL,
+    attempt: thinkingAttempt,
+  });
   const result = await sessionFactory({
     cwd: options.cwd,
     tools: [],
     model: options.model,
-    thinkingLevel: resolveAdaptiveThinkingLevel({
-      taskKind: "planner",
-      inputText: options.inputText,
-      explicitThinkingLevel: options.thinkingLevel,
-      supportedThinkingLevels: supportedThinkingLevelsForModel(options.model),
-      fallbackThinkingLevel: DEFAULT_PLANNER_THINKING_LEVEL,
-    }).thinkingLevel,
+    thinkingLevel: thinkingSelection.thinkingLevel,
   });
   const session = result.session;
 
@@ -2006,8 +2102,20 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
     plannerMarkdown = await extractTodoMarkdownWithOneRepair(
       options.inputText,
       plannerText,
-      (repairPrompt) =>
-        runTodoPlannerPrompt({
+      async (repairPrompt) => {
+        if (adaptiveThinking && session.setThinkingLevel) {
+          const retryThinkingLevel = resolveAdaptiveThinkingLevel({
+            taskKind: "planner",
+            inputText: thinkingInputText,
+            supportedThinkingLevels: supportedThinkingLevelsForModel(options.model),
+            fallbackThinkingLevel: DEFAULT_PLANNER_THINKING_LEVEL,
+            attempt: thinkingAttempt + 1,
+          }).thinkingLevel;
+          if (retryThinkingLevel !== thinkingSelection.thinkingLevel && retryThinkingLevel !== "off") {
+            session.setThinkingLevel(retryThinkingLevel as ThinkingLevel);
+          }
+        }
+        return runTodoPlannerPrompt({
           session,
           prompt: repairPrompt,
           abortSignal: options.abortSignal,
@@ -2017,7 +2125,8 @@ export async function runTodoPlanner(options: TodoPlannerOptions): Promise<strin
           onDiagnostic: options.onDiagnostic,
           plannerBudget: effectivePlannerBudget,
           onProgress: options.onProgress,
-        }),
+        });
+      },
       options.goal,
       capabilityConstraints,
       {
